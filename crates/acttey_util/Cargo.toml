@@ -1,0 +1,14 @@
+[package]
+name = "acttey_util"
+description = "A simple graphics palette for more interactive web page"
+repository = "https://github.com/ecoricemon/acttey"
+license = "Apache-2.0, MIT"
+version = "0.0.1"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+web-sys = "0.3.64"
+wasm-bindgen = "0.2.87"

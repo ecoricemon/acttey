@@ -1,0 +1,18 @@
+[package]
+name = "acttey_ex_basic"
+description = "Basic example of acttey"
+repository = "https://github.com/ecoricemon/acttey"
+version = "0.0.1"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+
+[dependencies]
+wasm-bindgen = "0.2.87"
+wasm-bindgen-futures = "0.4.37"
+acttey = { version = "0.0.1", path = "../../" }
