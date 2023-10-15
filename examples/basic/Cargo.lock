@@ -44,9 +44,23 @@ dependencies = [
 name = "acttey_ecs"
 version = "0.0.0"
 dependencies = [
- "macros",
- "traits",
+ "acttey_ecs_macro",
+ "acttey_ecs_trait",
 ]
+
+[[package]]
+name = "acttey_ecs_macro"
+version = "0.0.0"
+dependencies = [
+ "acttey_ecs_trait",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "acttey_ecs_trait"
+version = "0.0.0"
 
 [[package]]
 name = "acttey_ex_basic"
@@ -93,7 +107,6 @@ dependencies = [
 name = "acttey_util"
 version = "0.0.0"
 dependencies = [
- "wasm-bindgen",
  "web-sys",
 ]
 
@@ -794,16 +807,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5e6163cb8c49088c2c36f57875e58ccd8c87c7427f7fbd50ea6710b2f3f2e8f"
 
 [[package]]
-name = "macros"
-version = "0.0.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
- "traits",
-]
-
-[[package]]
 name = "malloc_buf"
 version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1403,10 +1406,6 @@ dependencies = [
  "toml_datetime",
  "winnow",
 ]
-
-[[package]]
-name = "traits"
-version = "0.0.0"
 
 [[package]]
 name = "ttf-parser"

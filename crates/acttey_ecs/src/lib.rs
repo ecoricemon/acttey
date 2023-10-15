@@ -1,2 +1,2 @@
-pub use macros;
-pub use traits;
+pub use acttey_ecs_macro;
+pub use acttey_ecs_trait;

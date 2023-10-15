@@ -2,7 +2,7 @@
 name = "acttey_ecs"
 description = "A simple graphics palette for more interactive web page"
 repository = "https://github.com/ecoricemon/acttey"
-license = "Apache-2.0, MIT"
+license = "Apache-2.0 OR MIT"
 version = "0.0.0"
 edition = "2021"
 
@@ -10,5 +10,5 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-macros = { version = "0.0.0", path = "macros" }
-traits = { version = "0.0.0", path = "traits" }
+acttey_ecs_macro = { version = "0.0.0", path = "macro" }
+acttey_ecs_trait = { version = "0.0.0", path = "trait" }

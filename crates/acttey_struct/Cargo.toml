@@ -2,7 +2,7 @@
 name = "acttey_struct"
 description = "A simple graphics palette for more interactive web page"
 repository = "https://github.com/ecoricemon/acttey"
-license = "Apache-2.0, MIT"
+license = "Apache-2.0 OR MIT"
 version = "0.0.0"
 edition = "2021"
 

@@ -9,7 +9,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
     
     // TODO: Getting full path programitically, not hard coding
     let output = quote! {
-        impl acttey::acttey_ecs::traits::Component for #ident {
+        impl acttey::acttey_ecs::acttey_ecs_trait::Component for #ident {
             type Item = Self;
         }
     };

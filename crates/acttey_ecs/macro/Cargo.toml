@@ -1,8 +1,8 @@
 [package]
-name = "macros"
+name = "acttey_ecs_macro"
 description = "A simple graphics palette for more interactive web page"
 repository = "https://github.com/ecoricemon/acttey"
-license = "Apache-2.0, MIT"
+license = "Apache-2.0 OR MIT"
 version = "0.0.0"
 edition = "2021"
 
@@ -16,4 +16,4 @@ syn = { version = "2.0.38", features = [
   "full",
   "extra-traits"
 ]}
-traits = { version = "0.0.0", path = "../traits" }
+acttey_ecs_trait = { version = "0.0.0", path = "../trait" }
