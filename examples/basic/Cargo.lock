@@ -20,17 +20,17 @@ checksum = "c71b1793ee61086797f5c80b6efa2b8ffa6d5dd703f118545808a7f2e27f7046"
 
 [[package]]
 name = "acttey"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "acttey_app",
- "acttey_collections",
+ "acttey_ecs",
  "wasm-bindgen",
  "wasm-bindgen-futures",
 ]
 
 [[package]]
 name = "acttey_app"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "acttey_render",
  "acttey_util",
@@ -41,15 +41,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "acttey_collections"
-version = "0.0.1"
+name = "acttey_ecs"
+version = "0.0.0"
 dependencies = [
- "acttey_util",
+ "macros",
+ "traits",
 ]
 
 [[package]]
 name = "acttey_ex_basic"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "acttey",
  "wasm-bindgen",
@@ -58,7 +59,7 @@ dependencies = [
 
 [[package]]
 name = "acttey_math"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "bytemuck",
  "js-sys",
@@ -67,7 +68,7 @@ dependencies = [
 
 [[package]]
 name = "acttey_primitive"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "acttey_math",
  "bytemuck",
@@ -76,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "acttey_render"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "acttey_math",
  "acttey_primitive",
@@ -90,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "acttey_util"
-version = "0.0.1"
+version = "0.0.0"
 dependencies = [
  "wasm-bindgen",
  "web-sys",
@@ -793,6 +794,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5e6163cb8c49088c2c36f57875e58ccd8c87c7427f7fbd50ea6710b2f3f2e8f"
 
 [[package]]
+name = "macros"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+ "traits",
+]
+
+[[package]]
 name = "malloc_buf"
 version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1392,6 +1403,10 @@ dependencies = [
  "toml_datetime",
  "winnow",
 ]
+
+[[package]]
+name = "traits"
+version = "0.0.0"
 
 [[package]]
 name = "ttf-parser"

@@ -53,7 +53,7 @@ impl SparseSet {
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.denses.values().next().map(|av| av.len()).unwrap_or(0)
+        self.denses.values().next().map(|dense| dense.len()).unwrap_or(0)
     }
     
     #[inline]
@@ -86,7 +86,7 @@ impl SparseSet {
         self.sparse.get_mut(key)?.take()
     }
 
-    pub fn insert<I, T>(&mut self, entries: I, len: usize)
+    pub fn extend<I, T>(&mut self, entries: I, len: usize)
     where
         I: IntoIterator<Item = (usize, T)>,
         T: 'static,
@@ -110,7 +110,25 @@ impl SparseSet {
             self.sync_dense_len();
         }
     }
+    
+    #[inline]
+    pub fn insert<T: 'static>(&mut self, key: usize, value: T) {
+        if let Some(dense) = SparseSet::as_vec_mut(&mut self.denses) {
+            if self.sparse.len() <= key {
+                self.sparse.resize(key + 1, None);
+            }
+            if let Some(di) = self.sparse[key] {
+                dense[di] = value;
+            } else {
+                self.sparse[key] = Some(dense.len());
+                dense.push(value);
+                self.deref.push(key);
+            }
+            self.sync_dense_len();
+        }
+    }
 
+    #[inline]
     pub fn remove(&mut self, key: usize) {
         if let Some(index) = self.take_dense_index(key) {
             for dense in self.denses.values_mut() {
@@ -182,7 +200,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn test_sparseset_insert() {
+    fn test_sparseset_insert_extend() {
         let entries = [
             (0, SA { x: [0, 1] }),
             (0, SA { x: [2, 3] }),
@@ -196,18 +214,18 @@ mod tests {
 
         s.add_dense_type::<SA>();
 
-        s.insert((&entries[..1]).to_owned(), 1);
+        s.insert(entries[0].0, entries[0].1);
         assert_eq!(2, s.capacity());
         assert_eq!(1, s.len());
         assert_eq!(Some(&entries[0].1), s.get(entries[0].0));
 
-        s.insert((&entries[1..3]).to_owned(), 2);
+        s.extend((&entries[1..3]).to_owned(), 2);
         assert_eq!(2, s.capacity());
         assert_eq!(2, s.len());
         assert_eq!(Some(&entries[1].1), s.get(entries[1].0));
         assert_eq!(Some(&entries[2].1), s.get(entries[2].0));
 
-        s.insert((&entries[3..]).to_owned(), 1);
+        s.insert(entries[3].0, entries[3].1);
         assert_eq!(11, s.capacity());
         assert_eq!(3, s.len());
         assert_eq!(Some(&entries[3].1), s.get(entries[3].0));
@@ -241,8 +259,8 @@ mod tests {
         let mut s = SparseSet::new();
         s.add_dense_type::<SA>();
         s.add_dense_type::<SB>();
-        s.insert(a_entries.clone(), len);
-        s.insert(b_entries.clone(), len);
+        s.extend(a_entries.clone(), len);
+        s.extend(b_entries.clone(), len);
         assert_eq!(len, s.capacity());
         assert_eq!(len, s.len());
         for i in 0..len {

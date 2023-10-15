@@ -1,5 +1,5 @@
 [package]
-name = "acttey_primitive"
+name = "traits"
 description = "A simple graphics palette for more interactive web page"
 repository = "https://github.com/ecoricemon/acttey"
 license = "Apache-2.0, MIT"
@@ -8,13 +8,3 @@ edition = "2021"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
-
-[dependencies]
-bytemuck = { version = "1.13.1", features = [
-    "derive"
-]}
-acttey_math = { version = "0.0.0", path = "../acttey_math" }
-wgpu = "0.17.1"
-
-[dev-dependencies]
-wasm-bindgen-test = "0.3.37"

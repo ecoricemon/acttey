@@ -1,5 +1,5 @@
 [package]
-name = "acttey_util"
+name = "macros"
 description = "A simple graphics palette for more interactive web page"
 repository = "https://github.com/ecoricemon/acttey"
 license = "Apache-2.0, MIT"
@@ -7,8 +7,13 @@ version = "0.0.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+proc-macro = true
 
 [dependencies]
-web-sys = "0.3.64"
-wasm-bindgen = "0.2.87"
+proc-macro2 = "1.0.69"
+quote = "1.0.33"
+syn = { version = "2.0.38", features = [
+  "full",
+  "extra-traits"
+]}
+traits = { version = "0.0.0", path = "../traits" }

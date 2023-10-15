@@ -3,7 +3,7 @@ name = "acttey"
 description = "A simple graphics palette for more interactive web page"
 repository = "https://github.com/ecoricemon/acttey"
 license = "Apache-2.0, MIT"
-version = "0.0.1"
+version = "0.0.0"
 edition = "2021"
 
 [lib]
@@ -24,8 +24,8 @@ exclude = [
 [dependencies]
 wasm-bindgen = "0.2.87"
 wasm-bindgen-futures = "0.4.37"
-acttey_app = { version = "0.0.1", path = "crates/acttey_app" }
-acttey_collections = { version = "0.0.1", path = "crates/acttey_collections" }
+acttey_app = { version = "0.0.0", path = "crates/acttey_app" }
+acttey_ecs = { version = "0.0.0", path = "crates/acttey_ecs" }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.37"

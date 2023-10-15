@@ -1,5 +1,5 @@
 [package]
-name = "acttey_app"
+name = "acttey_struct"
 description = "A simple graphics palette for more interactive web page"
 repository = "https://github.com/ecoricemon/acttey"
 license = "Apache-2.0, MIT"
@@ -10,11 +10,6 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-wasm-bindgen = "0.2.87"
-wasm-bindgen-futures = "0.4.37"
-winit = "0.29.1-beta"
-console_error_panic_hook = "0.1.7"
-acttey_render = { version = "0.0.0", path = "../acttey_render" }
 acttey_util = { version = "0.0.0", path = "../acttey_util" }
 
 [dev-dependencies]

@@ -1,6 +1,9 @@
 use wasm_bindgen::prelude::*;
 use acttey::*;
 
+#[derive(Component)]
+pub struct Bouncing;
+
 
 #[wasm_bindgen]
 pub struct MyApp {
