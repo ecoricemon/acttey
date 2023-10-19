@@ -24,6 +24,8 @@ version = "0.0.0"
 dependencies = [
  "acttey_app",
  "acttey_ecs",
+ "acttey_render",
+ "acttey_struct",
  "wasm-bindgen",
  "wasm-bindgen-futures",
 ]
@@ -46,6 +48,7 @@ version = "0.0.0"
 dependencies = [
  "acttey_ecs_macro",
  "acttey_ecs_trait",
+ "acttey_struct",
 ]
 
 [[package]]
@@ -53,6 +56,7 @@ name = "acttey_ecs_macro"
 version = "0.0.0"
 dependencies = [
  "acttey_ecs_trait",
+ "acttey_struct",
  "proc-macro2",
  "quote",
  "syn",
@@ -63,7 +67,7 @@ name = "acttey_ecs_trait"
 version = "0.0.0"
 
 [[package]]
-name = "acttey_ex_basic"
+name = "acttey_eg_basic"
 version = "0.0.0"
 dependencies = [
  "acttey",
@@ -93,6 +97,7 @@ dependencies = [
 name = "acttey_render"
 version = "0.0.0"
 dependencies = [
+ "acttey_ecs",
  "acttey_math",
  "acttey_primitive",
  "acttey_util",
@@ -101,6 +106,13 @@ dependencies = [
  "web-sys",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "acttey_struct"
+version = "0.0.0"
+dependencies = [
+ "acttey_util",
 ]
 
 [[package]]

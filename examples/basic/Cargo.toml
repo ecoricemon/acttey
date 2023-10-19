@@ -1,5 +1,5 @@
 [package]
-name = "acttey_ex_basic"
+name = "acttey_eg_basic"
 description = "Basic example of acttey"
 repository = "https://github.com/ecoricemon/acttey"
 version = "0.0.0"

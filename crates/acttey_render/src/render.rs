@@ -15,7 +15,7 @@ use winit::{
 };
 
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Debug, Default)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Default)]
 struct UniformData {
     view_proj: Matrix4f,
     model: Matrix4f,
@@ -26,7 +26,6 @@ struct UniformData {
     _padding: [f32; 1],
 }
 
-#[derive(Debug)]
 pub struct RenderState {
     window: web_sys::Window,
     canvas: web_sys::HtmlCanvasElement,

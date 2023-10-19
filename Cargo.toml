@@ -17,6 +17,7 @@ lto = true
 members = [
     "crates/*"
 ]
+# Prevent errors when compiling examples
 exclude = [
     "examples/basic"
 ]
@@ -26,6 +27,14 @@ wasm-bindgen = "0.2.87"
 wasm-bindgen-futures = "0.4.37"
 acttey_app = { version = "0.0.0", path = "crates/acttey_app" }
 acttey_ecs = { version = "0.0.0", path = "crates/acttey_ecs" }
+acttey_render = { version = "0.0.0", path = "crates/acttey_render" }
+acttey_struct = { version = "0.0.0", path = "crates/acttey_struct" }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.37"
+
+# Just let rust-analyzer know, so that it will look for examples and show us something like inlay hints.
+[[example]]
+name = "basic"
+path = "examples/basic/src/lib.rs"
+crate-type = ["cdylib", "rlib"]

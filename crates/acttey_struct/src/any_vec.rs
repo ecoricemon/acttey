@@ -56,6 +56,11 @@ impl AnyVec {
     }
 
     #[inline]
+    pub fn is_type_of<T: 'static>(&self) -> bool {
+        TypeId::of::<T>() == self.type_id
+    }
+
+    #[inline]
     pub fn len(&self) -> usize {
         (self.fn_len)()
     }

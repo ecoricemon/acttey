@@ -12,3 +12,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 acttey_ecs_macro = { version = "0.0.0", path = "macro" }
 acttey_ecs_trait = { version = "0.0.0", path = "trait" }
+acttey_struct = { version = "0.0.0", path = "../acttey_struct" }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3.37"

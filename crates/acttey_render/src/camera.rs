@@ -1,8 +1,7 @@
 use acttey_math::prelude::*;
 use acttey_primitive::prelude::*;
 
-#[derive(Debug)]
-pub(crate) struct PerspectiveCamera {
+pub struct PerspectiveCamera {
     camera: Vector<f32, 3>,
     at: Vector<f32, 3>,
     up: Vector<f32, 3>,

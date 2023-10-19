@@ -28,6 +28,7 @@ web-sys = { version = "0.3.64", features = [
 acttey_math = { version = "0.0.0", path = "../acttey_math" }
 acttey_primitive = { version = "0.0.0", path = "../acttey_primitive" }
 acttey_util = { version = "0.0.0", path = "../acttey_util" }
+acttey_ecs = { version = "0.0.0", path = "../acttey_ecs" }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.37"

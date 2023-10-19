@@ -1,7 +1,7 @@
-mod camera;
-mod input;
-mod render;
+pub mod camera;
+pub mod input;
+pub mod render;
 
 pub mod prelude {
-    pub use crate::{input::*, render::*};
+    pub use crate::{camera::*, input::*, render::*};
 }

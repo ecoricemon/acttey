@@ -1,9 +1,6 @@
-use wasm_bindgen::prelude::*;
 use acttey::*;
-
-#[derive(Component)]
-pub struct Bouncing;
-
+// use acttey_ecs::entity::EntityState;
+use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 pub struct MyApp {
@@ -14,18 +11,18 @@ pub struct MyApp {
 impl MyApp {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Self {
-        Self {
-            app: None
-        }
+        Self { app: None }
     }
-    
+
     #[wasm_bindgen]
     pub async fn run(&mut self) {
         let app = App::new().await;
         app.animate();
         self.app = Some(app);
+
+        // let mut es = EntityState::new();
     }
-    
+
     #[wasm_bindgen]
     pub fn set_camera(
         &mut self,

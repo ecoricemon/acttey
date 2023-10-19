@@ -14,7 +14,7 @@ if [ "$#" -ne 1 ]; then
     my_exit 1
 fi
 
-cleandirs=(
+wasm_dirs=(
     pkg
     target
 )
@@ -26,8 +26,8 @@ elif [ "$1" = "test" ]; then
 elif [ "$1" = "clean" ]; then
     # Direct cleaning
     echo "=== Cleaning root directory... ==="
-    for dir in "${cleandirs[@]}"; do
-        rm -rf $dir
+    for wasm_dir in "${wasm_dirs[@]}"; do
+        rm -rf $wasm_dir
     done
 
     # Make npm clean itself
@@ -37,6 +37,10 @@ elif [ "$1" = "clean" ]; then
             pushd .
             cd $dir
             npm run clean-all
+            # Make sure to remove wasm build results
+            for wasm_dir in "${wasm_dirs[@]}"; do
+                rm -rf $wasm_dir
+            done
             popd
         fi
     done

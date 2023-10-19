@@ -1,4 +1,5 @@
 use crate::any_vec::AnyVec;
+use crate::traits::CollectType;
 use std::{any::TypeId, collections::HashMap};
 
 /// Sparseset with heterogeneous dense Vec.
@@ -39,6 +40,10 @@ impl SparseSet {
         self.sync_dense_len();
     }
 
+    pub fn contains_type<T: 'static>(&self) -> bool {
+        self.denses.contains_key(&TypeId::of::<T>())
+    }
+
     fn sync_dense_len(&mut self) {
         if let Some(longest) = self.denses.values().map(|dense| dense.len()).max() {
             for dense in self.denses.values() {
@@ -47,15 +52,28 @@ impl SparseSet {
         }
     }
 
+    /// Returns true if all denses have the same length.
+    fn has_equal_denses_len(&self) -> bool {
+        let repr_len = self.len();
+        self.denses
+            .values()
+            .map(|dense| dense.len())
+            .all(|len| repr_len == len)
+    }
+
     pub fn remove_dense_type<T: 'static>(&mut self) {
         self.denses.remove(&TypeId::of::<T>());
     }
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.denses.values().next().map(|dense| dense.len()).unwrap_or(0)
+        self.denses
+            .values()
+            .next()
+            .map(|dense| dense.len())
+            .unwrap_or(0)
     }
-    
+
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
@@ -86,34 +104,22 @@ impl SparseSet {
         self.sparse.get_mut(key)?.take()
     }
 
+    /// Insert single type values at the end of the dense array.
+    /// Then fill other dense arrays out with their default values.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the generic parameter `T` have not been added.
     pub fn extend<I, T>(&mut self, entries: I, len: usize)
     where
         I: IntoIterator<Item = (usize, T)>,
         T: 'static,
     {
-        if let Some(dense) = SparseSet::as_vec_mut(&mut self.denses) {
-            self.sparse.reserve_exact(len);
-            self.deref.reserve_exact(len);
-            dense.reserve_exact(len);
-            for (key, value) in entries.into_iter() {
-                if self.sparse.len() <= key {
-                    self.sparse.resize(key + 1, None);
-                }
-                if let Some(di) = self.sparse[key] {
-                    dense[di] = value;
-                } else {
-                    self.sparse[key] = Some(dense.len());
-                    dense.push(value);
-                    self.deref.push(key);
-                }
-            }
-            self.sync_dense_len();
-        }
-    }
-    
-    #[inline]
-    pub fn insert<T: 'static>(&mut self, key: usize, value: T) {
-        if let Some(dense) = SparseSet::as_vec_mut(&mut self.denses) {
+        let dense = SparseSet::as_vec_mut(&mut self.denses).unwrap();
+        self.sparse.reserve_exact(len);
+        self.deref.reserve_exact(len);
+        dense.reserve_exact(len);
+        for (key, value) in entries.into_iter() {
             if self.sparse.len() <= key {
                 self.sparse.resize(key + 1, None);
             }
@@ -124,7 +130,39 @@ impl SparseSet {
                 dense.push(value);
                 self.deref.push(key);
             }
-            self.sync_dense_len();
+        }
+        self.sync_dense_len();
+    }
+
+    /// Insert a single type value at the end of the dense array.
+    /// Then fill other dense arrays out with their default values.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the generic parameter `T` have not been added.
+    #[inline]
+    pub fn insert_sync<T: 'static>(&mut self, key: usize, value: T) {
+        self.insert(key, value);
+        self.sync_dense_len();
+    }
+
+    /// Insert a single type value at the end of the dense array.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the generic parameter `T` have not been added.
+    #[inline]
+    pub fn insert<T: 'static>(&mut self, key: usize, value: T) {
+        let dense = SparseSet::as_vec_mut(&mut self.denses).unwrap();
+        if self.sparse.len() <= key {
+            self.sparse.resize(key + 1, None);
+        }
+        if let Some(di) = self.sparse[key] {
+            dense[di] = value;
+        } else {
+            self.sparse[key] = Some(dense.len());
+            dense.push(value);
+            self.deref.push(key);
         }
     }
 
@@ -181,6 +219,38 @@ impl SparseSet {
     }
 }
 
+impl CollectType for SparseSet {
+    #[inline]
+    fn begin_collect_type(&mut self) {
+        debug_assert!(self.has_equal_denses_len());
+    }
+
+    #[inline]
+    fn end_collect_type(&mut self) {
+        debug_assert!(self.has_equal_denses_len());
+    }
+
+    #[inline]
+    fn collect_type<T: 'static + Default>(&mut self) {
+        self.denses.insert(TypeId::of::<T>(), AnyVec::new::<T>());
+    }
+
+    #[inline]
+    fn begin_collect_item(&mut self, _key: usize) {
+        debug_assert!(self.has_equal_denses_len());
+    }
+
+    #[inline]
+    fn end_collect_item(&mut self) {
+        debug_assert!(self.has_equal_denses_len());
+    }
+
+    #[inline]
+    fn collect_item<T: 'static + Default>(&mut self, key: usize, value: T) {
+        self.insert(key, value);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,9 +282,11 @@ mod tests {
         assert_eq!(2, s.capacity());
         assert_eq!(0, s.len());
 
+        assert_eq!(false, s.contains_type::<SA>());
         s.add_dense_type::<SA>();
+        assert_eq!(true, s.contains_type::<SA>());
 
-        s.insert(entries[0].0, entries[0].1);
+        s.insert_sync(entries[0].0, entries[0].1);
         assert_eq!(2, s.capacity());
         assert_eq!(1, s.len());
         assert_eq!(Some(&entries[0].1), s.get(entries[0].0));
@@ -225,7 +297,7 @@ mod tests {
         assert_eq!(Some(&entries[1].1), s.get(entries[1].0));
         assert_eq!(Some(&entries[2].1), s.get(entries[2].0));
 
-        s.insert(entries[3].0, entries[3].1);
+        s.insert_sync(entries[3].0, entries[3].1);
         assert_eq!(11, s.capacity());
         assert_eq!(3, s.len());
         assert_eq!(Some(&entries[3].1), s.get(entries[3].0));
