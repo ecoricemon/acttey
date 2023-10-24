@@ -1,10 +1,21 @@
+#![allow(unused)]
 use acttey::*;
-// use acttey_ecs::entity::EntityState;
 use wasm_bindgen::prelude::*;
+use std::collections::HashMap;
 
 #[wasm_bindgen]
 pub struct MyApp {
     app: Option<App>,
+}
+
+#[derive(Component)]
+struct CompA {
+    v: i32
+}
+
+#[derive(Component)]
+struct CompB {
+    v: i32
 }
 
 #[wasm_bindgen]
@@ -20,7 +31,12 @@ impl MyApp {
         app.animate();
         self.app = Some(app);
 
-        // let mut es = EntityState::new();
+        let mut a = HashMap::new();
+        a.insert(0_usize, CompA { v: 0 });
+        
+        let mut b = vec![(0_usize, CompB { v: 1 })];
+        
+        // app.add_component();
     }
 
     #[wasm_bindgen]

@@ -4,15 +4,12 @@ use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use winit::event::*;
 
-#[wasm_bindgen]
 pub struct App {
     input_state: Rc<RefCell<InputState>>,
     render_state: Rc<RefCell<RenderState>>,
 }
 
-#[wasm_bindgen]
 impl App {
-    #[wasm_bindgen(constructor)]
     pub async fn new() -> Self {
         set_panic_hook();
 
@@ -30,6 +27,10 @@ impl App {
             render_state,
         }
     }
+    
+    // pub fn add_component_container(&mut self, container: impl Contain) {
+
+    // }
 
     pub fn animate(&self) {
         let animate = Rc::new(RefCell::new(None));

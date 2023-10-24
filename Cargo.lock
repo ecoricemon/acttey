@@ -35,11 +35,11 @@ dependencies = [
 name = "acttey_app"
 version = "0.0.0"
 dependencies = [
+ "acttey_ecs",
  "acttey_render",
  "acttey_util",
  "console_error_panic_hook",
  "wasm-bindgen",
- "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "winit",
 ]
@@ -51,6 +51,7 @@ dependencies = [
  "acttey_ecs_macro",
  "acttey_ecs_trait",
  "acttey_struct",
+ "acttey_util",
  "wasm-bindgen-test",
 ]
 

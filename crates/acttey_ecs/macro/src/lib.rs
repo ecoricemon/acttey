@@ -42,7 +42,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
 }
 
 /// Derive macro generating an impl of the trait `Entity`.
-/// You can't put types in that are not deriving the trait `Component`.
+/// You can't put types in that are not deriving `Component`.
 ///
 /// # Examples
 ///
@@ -101,7 +101,7 @@ pub fn derive_component_entity(input: TokenStream) -> TokenStream {
     unimplemented!();
 }
 
-/// Implements the trait `Entity` and `acttey_struct::traits::NotifyType`.
+/// Implements the trait `Entity` and other traits.
 /// Set check to true when you want to check if the struct has `Component`s only.
 fn impl_entity(input: TokenStream, check: bool) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
@@ -169,11 +169,11 @@ fn impl_entity(input: TokenStream, check: bool) -> TokenStream {
             }
         }
 
-        // Implements the trait acttey_struct::traits::NotifyType.
-        impl acttey_struct::traits::NotifyType for #ident {
+        // Implements the trait acttey_struct::traits::Notify.
+        impl acttey_struct::traits::Notify for #ident {
             fn notify_types(
                 &self,
-                collector: &mut impl acttey_struct::traits::CollectType
+                collector: &mut impl acttey_struct::traits::Collect
             ) {
                 collector.begin_collect_type();
 
@@ -187,7 +187,7 @@ fn impl_entity(input: TokenStream, check: bool) -> TokenStream {
 
             fn moves(
                 self,
-                collector: &mut impl acttey_struct::traits::CollectType,
+                collector: &mut impl acttey_struct::traits::Collect,
                 key: usize
             ) {
                 collector.begin_collect_item(key);
@@ -202,7 +202,7 @@ fn impl_entity(input: TokenStream, check: bool) -> TokenStream {
                 // collector.collect_item<CompB>(b, key);
                 #(#collect_items)*
 
-                collector.end_collect_item();
+                collector.end_collect_item(key);
             }
         }
     }

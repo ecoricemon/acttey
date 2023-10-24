@@ -11,11 +11,11 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 wasm-bindgen = "0.2.87"
-wasm-bindgen-futures = "0.4.37"
 winit = "0.29.1-beta"
 console_error_panic_hook = "0.1.7"
 acttey_render = { version = "0.0.0", path = "../acttey_render" }
 acttey_util = { version = "0.0.0", path = "../acttey_util" }
+acttey_ecs = { version = "0.0.0", path = "../acttey_ecs" }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.37"
