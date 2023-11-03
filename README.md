@@ -14,9 +14,9 @@ wasm-pack build
 
 ```sh
 # Chrome (chromedriver)
-wasm-pack test --chrome --headless --workspace
+wasm-pack test --chrome --headless
 # Firefox
-wasm-pack test --firefox --headless --workspace
+wasm-pack test --firefox --headless
 # Safari
-wasm-pack test --safari --headless --workspace
+wasm-pack test --safari --headless
 ```

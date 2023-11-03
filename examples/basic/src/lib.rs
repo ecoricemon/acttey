@@ -1,7 +1,7 @@
 #![allow(unused)]
 use acttey::*;
-use wasm_bindgen::prelude::*;
 use std::collections::HashMap;
+use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 pub struct MyApp {
@@ -10,12 +10,12 @@ pub struct MyApp {
 
 #[derive(Component)]
 struct CompA {
-    v: i32
+    v: i32,
 }
 
 #[derive(Component)]
 struct CompB {
-    v: i32
+    v: i32,
 }
 
 #[wasm_bindgen]
@@ -33,9 +33,9 @@ impl MyApp {
 
         let mut a = HashMap::new();
         a.insert(0_usize, CompA { v: 0 });
-        
+
         let mut b = vec![(0_usize, CompB { v: 1 })];
-        
+
         // app.add_component();
     }
 

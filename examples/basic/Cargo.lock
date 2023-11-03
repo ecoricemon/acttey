@@ -22,104 +22,35 @@ checksum = "c71b1793ee61086797f5c80b6efa2b8ffa6d5dd703f118545808a7f2e27f7046"
 name = "acttey"
 version = "0.0.0"
 dependencies = [
- "acttey_app",
- "acttey_ecs",
- "acttey_render",
- "acttey_struct",
- "wasm-bindgen",
- "wasm-bindgen-futures",
-]
-
-[[package]]
-name = "acttey_app"
-version = "0.0.0"
-dependencies = [
- "acttey_render",
- "acttey_util",
+ "acttey-ecs-macros",
+ "bytemuck",
  "console_error_panic_hook",
+ "erased-generic-trait",
+ "js-sys",
+ "paste",
  "wasm-bindgen",
  "wasm-bindgen-futures",
+ "web-sys",
+ "wgpu",
  "winit",
 ]
 
 [[package]]
-name = "acttey_ecs"
+name = "acttey-ecs-macros"
 version = "0.0.0"
 dependencies = [
- "acttey_ecs_macro",
- "acttey_ecs_trait",
- "acttey_struct",
-]
-
-[[package]]
-name = "acttey_ecs_macro"
-version = "0.0.0"
-dependencies = [
- "acttey_ecs_trait",
- "acttey_struct",
  "proc-macro2",
  "quote",
  "syn",
 ]
 
 [[package]]
-name = "acttey_ecs_trait"
-version = "0.0.0"
-
-[[package]]
-name = "acttey_eg_basic"
+name = "acttey_example_basic"
 version = "0.0.0"
 dependencies = [
  "acttey",
  "wasm-bindgen",
  "wasm-bindgen-futures",
-]
-
-[[package]]
-name = "acttey_math"
-version = "0.0.0"
-dependencies = [
- "bytemuck",
- "js-sys",
- "paste",
-]
-
-[[package]]
-name = "acttey_primitive"
-version = "0.0.0"
-dependencies = [
- "acttey_math",
- "bytemuck",
- "wgpu",
-]
-
-[[package]]
-name = "acttey_render"
-version = "0.0.0"
-dependencies = [
- "acttey_ecs",
- "acttey_math",
- "acttey_primitive",
- "acttey_util",
- "bytemuck",
- "wasm-bindgen",
- "web-sys",
- "wgpu",
- "winit",
-]
-
-[[package]]
-name = "acttey_struct"
-version = "0.0.0"
-dependencies = [
- "acttey_util",
-]
-
-[[package]]
-name = "acttey_util"
-version = "0.0.0"
-dependencies = [
- "web-sys",
 ]
 
 [[package]]
@@ -489,6 +420,17 @@ name = "equivalent"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5443807d6dff69373d433ab9ef5378ad8df50ca6298caf15de6e52e24aaf54d5"
+
+[[package]]
+name = "erased-generic-trait"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a6d0869e5e7baa257e8a57259032d7936f8a7e4807d996190272a42b1f90940"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "errno"
