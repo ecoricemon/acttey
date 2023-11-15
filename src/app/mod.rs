@@ -1,19 +1,31 @@
-use crate::render::{input::InputState, render_state::RenderState};
-use std::cell::RefCell;
-use std::rc::Rc;
+use super::{
+    ecs::{
+        entity::Entity,
+        skey,
+        storage::Storage,
+        system::{Invokable, System},
+    },
+    render::{input::InputState, render_state::RenderState},
+};
+use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::prelude::*;
 use winit::event::*;
 
 pub struct App {
     input_state: Rc<RefCell<InputState>>,
     render_state: Rc<RefCell<RenderState>>,
+    storage: Rc<RefCell<Storage>>,
+    systems: Rc<RefCell<Vec<Box<dyn Invokable>>>>,
 }
 
 impl App {
     pub async fn new() -> Self {
         set_panic_hook();
 
+        // Input state.
         let input_state = Rc::new(RefCell::new(InputState::new()));
+
+        // Render state.
         let (render_state, event_loop) = RenderState::new().await;
         RenderState::set_event_handlers(
             event_loop,
@@ -22,21 +34,46 @@ impl App {
         );
         let render_state = Rc::new(RefCell::new(render_state));
 
+        // Storage.
+        let storage = Rc::new(RefCell::new(Storage::new()));
+
+        // Systems.
+        let systems = Rc::new(RefCell::new(Vec::new()));
+
         Self {
             input_state,
+            storage,
             render_state,
+            systems,
         }
     }
 
-    // pub fn add_component_container(&mut self, container: impl Contain) {
+    pub fn regist_entity<E: Entity>(&mut self) -> &mut Self {
+        self.storage.borrow_mut().insert_default::<E>();
+        self
+    }
 
-    // }
+    #[inline]
+    pub fn insert_entity(&mut self, key: usize, ent: impl Entity) -> &mut Self {
+        self.storage.borrow_mut().insert_entity(key, ent);
+        self
+    }
 
-    pub fn animate(&self) {
+    pub fn regist_system<S: System>(&mut self, sys: S) -> &mut Self {
+        self.systems.borrow_mut().push(Box::new(sys));
+        self.storage.borrow_mut().insert_sinfo(skey!(S), S::info());
+        self
+    }
+
+    pub fn animate(&mut self) {
+        self.storage.borrow_mut().invalidate_sinfo();
+
         let animate = Rc::new(RefCell::new(None));
         let animate_drop = animate.clone();
         let input_state = self.input_state.clone();
         let render_state = self.render_state.clone();
+        let storage = self.storage.clone();
+        let systems = self.systems.clone();
         *animate_drop.borrow_mut() = Some(Closure::<dyn FnMut(f32)>::new(move |time: f32| {
             let mut input_state = input_state.borrow_mut();
             let mut render_state = render_state.borrow_mut();
@@ -72,6 +109,13 @@ impl App {
                 }
                 _ => (),
             });
+
+            // Update
+            let mut storage = storage.borrow_mut();
+            for sys in systems.borrow().iter() {
+                sys.invoke(&mut storage);
+            }
+
             // Render
             render_state.render(time);
             // Request next frame

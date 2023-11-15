@@ -21,15 +21,21 @@ pub fn console_log(s: String) {
 ///
 /// let a = A {};
 ///
-/// assert_eq!(std::any::TypeId::of<A>(), ty!(<A>));
-/// assert_eq!(std::any::TypeId::of<A>(), ty!(&a));
+/// assert_eq!(std::any::TypeId::of<A>(), ty!(A));
+/// assert_eq!(std::any::TypeId::of<A>(), ty!(&&a));
 /// ```
 #[macro_export]
 macro_rules! ty {
-    (<$t:ty>) => {
+    (&$t:ident) => {
+        std::any::Any::type_id($t)
+    };
+    (&&$t:ident) => {
+        std::any::Any::type_id(&$t)
+    };
+    ($t:ty) => {
         std::any::TypeId::of::<$t>()
     };
-    ($($t:tt)*) => {
-        std::any::Any::type_id($($t)*)
+    (<$type:ident as $trait:ident>::$item:ident) => {
+        std::any::TypeId::of::<<$type as $trait>::$item>()
     };
 }

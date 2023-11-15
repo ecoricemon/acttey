@@ -9,9 +9,18 @@ pub mod util;
 // Re-exports App.
 pub use app::App;
 
-// Re-exports ECS derive macros.
+// Re-exports ECS relative things.
 pub use acttey_ecs_macros::{Component, Entity};
+pub use ds::sparse_set::SparseSet;
+pub use ecs::{
+    entity::CollectGeneric,
+    query::{Filter, Query, QueryMut},
+    system::{Invokable, System},
+};
 
-// Test code can import crate::acttey::*.
+// Re-exports Uuid.
+pub use uuid::Uuid;
+
+// Can import crate::acttey::*.
 #[allow(unused_imports)]
 use crate as acttey;

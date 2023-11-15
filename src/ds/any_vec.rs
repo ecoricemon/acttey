@@ -52,7 +52,7 @@ impl AnyVec {
         });
 
         Self {
-            type_id: ty!(<T>),
+            type_id: ty!(T),
             raw,
             fn_len,
             fn_capacity,
@@ -105,7 +105,7 @@ impl AnyVec {
     /// Calling this method with incorrect type causes panic.
     #[inline]
     pub fn get<T: 'static>(&self, index: usize) -> Option<&T> {
-        assert_eq!(self.type_id, ty!(<T>));
+        assert_eq!(self.type_id, ty!(T));
         unsafe { self.get_type_unchecked::<T>(index) }
     }
 
@@ -118,7 +118,7 @@ impl AnyVec {
     /// In **DEBUG** mode, safety conditions are checked and cause panic.
     #[inline]
     pub unsafe fn get_type_unchecked<T: 'static>(&self, index: usize) -> Option<&T> {
-        debug_assert_eq!(self.type_id, ty!(<T>));
+        debug_assert_eq!(self.type_id, ty!(T));
         unsafe { (*(self.raw as *mut Vec<T>)).get(index) }
     }
 
@@ -131,7 +131,7 @@ impl AnyVec {
     /// In **DEBUG** mode, safety conditions are checked and cause panic when they are met.
     #[inline]
     pub unsafe fn get_unchecked<T: 'static>(&self, index: usize) -> &T {
-        debug_assert_eq!(self.type_id, ty!(<T>));
+        debug_assert_eq!(self.type_id, ty!(T));
         debug_assert!(index < self.len());
         unsafe { (*(self.raw as *mut Vec<T>)).get_unchecked(index) }
     }
@@ -141,7 +141,7 @@ impl AnyVec {
     /// Calling this method with incorrect type causes panic.
     #[inline]
     pub fn get_mut<T: 'static>(&self, index: usize) -> Option<&mut T> {
-        assert_eq!(self.type_id, ty!(<T>));
+        assert_eq!(self.type_id, ty!(T));
         unsafe { self.get_type_unchecked_mut::<T>(index) }
     }
 
@@ -154,7 +154,7 @@ impl AnyVec {
     /// In **DEBUG** mode, safety conditions are checked and cause panic.
     #[inline]
     pub unsafe fn get_type_unchecked_mut<T: 'static>(&self, index: usize) -> Option<&mut T> {
-        debug_assert_eq!(self.type_id, ty!(<T>));
+        debug_assert_eq!(self.type_id, ty!(T));
         unsafe { (*(self.raw as *mut Vec<T>)).get_mut(index) }
     }
 
@@ -167,7 +167,7 @@ impl AnyVec {
     /// In **DEBUG** mode, safety conditions are checked and cause panic when they are met.
     #[inline]
     pub unsafe fn get_unchecked_mut<T: 'static>(&mut self, index: usize) -> &mut T {
-        debug_assert_eq!(self.type_id, ty!(<T>));
+        debug_assert_eq!(self.type_id, ty!(T));
         debug_assert!(index < self.len());
         unsafe { (*(self.raw as *mut Vec<T>)).get_unchecked_mut(index) }
     }
@@ -177,7 +177,7 @@ impl AnyVec {
     /// Calling this method with incorrect type causes panic.
     #[inline]
     pub fn push<T: 'static>(&mut self, value: T) {
-        assert_eq!(self.type_id, ty!(<T>));
+        assert_eq!(self.type_id, ty!(T));
         unsafe {
             self.push_type_unchecked(value);
         }
@@ -192,7 +192,7 @@ impl AnyVec {
     /// In **DEBUG** mode, safety condition is checked and causes panic when that is met.
     #[inline]
     pub unsafe fn push_type_unchecked<T: 'static>(&mut self, value: T) {
-        debug_assert_eq!(self.type_id, ty!(<T>));
+        debug_assert_eq!(self.type_id, ty!(T));
         unsafe {
             (*(self.raw as *mut Vec<T>)).push(value);
         }
@@ -203,7 +203,7 @@ impl AnyVec {
     /// Calling this method with incorrect type causes panic.
     #[inline]
     pub fn pop<T: 'static>(&mut self) -> Option<T> {
-        assert_eq!(self.type_id, ty!(<T>));
+        assert_eq!(self.type_id, ty!(T));
         unsafe { self.pop_type_unchecked() }
     }
 
@@ -216,7 +216,7 @@ impl AnyVec {
     /// In **DEBUG** mode, safety condition is checked and causes panic when that is met.
     #[inline]
     pub unsafe fn pop_type_unchecked<T: 'static>(&mut self) -> Option<T> {
-        debug_assert_eq!(self.type_id, ty!(<T>));
+        debug_assert_eq!(self.type_id, ty!(T));
         unsafe { (*(self.raw as *mut Vec<T>)).pop() }
     }
 
@@ -225,7 +225,7 @@ impl AnyVec {
     /// Calling this method with incorrect type or out of bound `index` causes panic.
     #[inline]
     pub fn swap_remove<T: 'static>(&mut self, index: usize) -> T {
-        assert_eq!(self.type_id, ty!(<T>));
+        assert_eq!(self.type_id, ty!(T));
         assert!(index < self.len());
         unsafe { self.swap_remove_type_unchecked(index) }
     }
@@ -239,7 +239,7 @@ impl AnyVec {
     /// In **DEBUG** mode, safety condition is checked and causes panic when that is met.
     #[inline]
     pub unsafe fn swap_remove_type_unchecked<T: 'static>(&mut self, index: usize) -> T {
-        debug_assert_eq!(self.type_id, ty!(<T>));
+        debug_assert_eq!(self.type_id, ty!(T));
         unsafe { (*(self.raw as *mut Vec<T>)).swap_remove(index) }
     }
 
@@ -255,7 +255,7 @@ impl AnyVec {
     where
         F: FnMut() -> T,
     {
-        debug_assert_eq!(self.type_id, ty!(<T>));
+        debug_assert_eq!(self.type_id, ty!(T));
         unsafe { (*(self.raw as *mut Vec<T>)).resize_with(new_len, f) }
     }
 }
@@ -265,8 +265,17 @@ impl<'a, T: 'static> From<&'a AnyVec> for &'a Vec<T> {
     ///
     /// Calling this method with incorrect type causes panic.
     fn from(value: &'a AnyVec) -> Self {
-        assert_eq!(value.type_id, ty!(<T>));
+        assert_eq!(value.type_id, ty!(T));
         unsafe { &*(value.raw as *const Vec<T>) }
+    }
+}
+
+impl<'a, T: 'static> From<&'a AnyVec> for &'a [T] {
+    /// # Panics
+    ///
+    /// Calling this method with incorrect type causes panic.
+    fn from(value: &'a AnyVec) -> Self {
+        <&Vec<T>>::from(value)
     }
 }
 
@@ -275,8 +284,17 @@ impl<'a, T: 'static> From<&'a mut AnyVec> for &'a mut Vec<T> {
     ///
     /// Calling this method with incorrect type causes panic.
     fn from(value: &'a mut AnyVec) -> Self {
-        assert_eq!(value.type_id, ty!(<T>));
+        assert_eq!(value.type_id, ty!(T));
         unsafe { &mut *(value.raw as *mut Vec<T>) }
+    }
+}
+
+impl<'a, T: 'static> From<&'a mut AnyVec> for &'a mut [T] {
+    /// # Panics
+    ///
+    /// Calling this method with incorrect type causes panic.
+    fn from(value: &'a mut AnyVec) -> Self {
+        <&mut Vec<T>>::from(value)
     }
 }
 

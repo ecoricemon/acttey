@@ -22,7 +22,7 @@ bytemuck = { version = "1.13.1", features = [
 ]}
 paste = "1.0.14"
 js-sys = "0.3.64"
-wgpu = "0.17.1"
+wgpu = "0.18.0"
 web-sys = { version = "0.3.64", features = [
     "console",
     "Window",
@@ -32,9 +32,16 @@ web-sys = { version = "0.3.64", features = [
     "MouseEvent"
 ]}
 winit = "0.29.1-beta"
-erased-generic-trait = "0.0.3"
+erased-generic-trait = "0.0.4"
 acttey-ecs-macros = { path = "src/ecs/macros" }
 console_error_panic_hook = "0.1.7"
+uuid = { version = "1.5.0", features = [
+    "v4",                # Lets you generate random UUIDs
+    "fast-rng",          # Use a faster (but still sufficiently random) RNG
+    "macro-diagnostics", # Enable better diagnostics for compile-time UUIDs
+    "js"                 # For WebAssembly
+]}
+ahash = "0.8.6"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.37"

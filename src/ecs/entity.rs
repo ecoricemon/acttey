@@ -1,128 +1,100 @@
-use super::traits::{Collect, Component, Entity, ErasedCollect};
-use crate::{ds::sparse_set::SparseSet, ty};
-use std::any::TypeId;
-use std::collections::HashMap;
-use std::mem::zeroed;
+use super::storage::Storage;
+use crate::ty;
+use erased_generic_trait::erase_generic;
+use std::any::{Any, TypeId};
 
-#[derive(Default)]
-pub struct EntityState {
-    // TODO: ErasedCollect causes performance loss but gives us flexibility. Users can make their own entity storage.
-    entities: HashMap<TypeId, Box<dyn ErasedCollect>>,
+pub trait Component: 'static {}
+
+/// Entity must have distinct components in it.
+/// If you need the same types of data, then define different `Component`s using the types.
+pub trait Entity: 'static {
+    /// DO NOT call me!
+    /// This is an internal validation function.
+    /// TODO: Validate component identity as well. use uuid?
+    /// TODO: Please fix me with better way :)
+    fn validate();
+
+    /// Notifies types to the collector.
+    /// This implementation calls the collector's functions to hand types over such as inner field's types.
+    /// And can't recive trait object based on `Collect` because types must be known beforehand becoming a trait object (See `erased-generic-trait`)
+    fn notify_types<T>(collector: &mut T, storage: &mut Storage)
+    where
+        T: CollectGeneric + Downcast;
+
+    /// Moves itself out into the collector.
+    fn moves(self, collector: &mut Box<dyn Collect>, key: usize);
 }
 
-impl EntityState {
-    pub fn new() -> Self {
-        Default::default()
+// TODO: `Collect` has `ErasedCollectRow` as a supertrait that is object safe,
+// which is declared and implemented by `erased-generic-trait`.
+// Using that, we can have different types of collectors in a single storage,
+// that means users can define their own collector.
+// But downside of `erased-generic-trait` is performance penalty by a number of indirection.
+// Please see `erased-generic-trait` documentation for more details.
+
+#[erase_generic(CollectErased)]
+pub trait CollectGeneric {
+    /// Collects a single type.
+    fn collect_type<T: 'static>(&mut self);
+
+    /// Collects an item of the given type.
+    /// Please make sure that collecting all types at once.
+    /// In other words, call collect() as many as the number of types you put in
+    /// between begin_collect() and end_collect().
+    fn collect<T: 'static>(&mut self, key: usize, value: &mut T);
+
+    /// Copies an item of the given type and key to the `value`.
+    fn copy<T: 'static>(&mut self, key: usize, value: &mut T) -> Option<()>;
+}
+
+pub trait CollectNonGeneric {
+    /// Determines if the given `TypeId` has been collected.
+    fn contains_type(&self, ty: &TypeId) -> bool;
+
+    /// Prepares collecting items.
+    fn begin_collect(&mut self, key: usize);
+
+    /// Finishes collecting items.
+    fn end_collect(&mut self, key: usize);
+
+    /// Removes items having the given key.
+    fn remove(&mut self, key: usize);
+
+    /// Retrieves how many items have been collected.
+    fn len(&self) -> usize;
+
+    /// Determines this is empty.
+    fn is_empty(&self) -> bool;
+
+    /// Returns a mutable raw pointer of a single type container.
+    fn values_as_any(&mut self, ty: &TypeId) -> &mut dyn Any;
+}
+
+/// Object safe trait for `CollectGeneric` and `CollectNonGeneric`.
+pub trait Collect: 'static + CollectErased + CollectNonGeneric {}
+
+/// Blanket impl of `Collect`.
+impl<T: 'static + CollectErased + CollectNonGeneric> Collect for T {}
+
+/// This helps you to use CollectGeneric's methods on a Box<dyn Collect>.
+/// It's exactly same with the impl by `erased-generic-trait`.
+impl CollectGeneric for dyn Collect {
+    #[inline]
+    fn collect_type<T: 'static>(&mut self) {
+        self.erased_collect_type(&ty!(T))
     }
 
-    pub fn add_entity_type<E: Entity>(&mut self, capacity: usize) {
-        self.entities.entry(ty!(<E>)).or_insert_with(|| {
-            let mut collector = SparseSet::with_capacity(capacity);
-            E::notify_types(&mut collector);
-            Box::new(collector)
-        });
+    #[inline]
+    fn collect<T: 'static>(&mut self, key: usize, value: &mut T) {
+        self.erased_collect(&ty!(T), key, value)
     }
 
-    pub fn insert_entity(&mut self, key: usize, ent: impl Entity) {
-        let collector: &mut Box<dyn ErasedCollect> = self.entities.get_mut(&ty!(&ent)).unwrap();
-        ent.moves(collector, key);
-    }
-
-    pub fn remove_entity(&mut self, ent_ty: &TypeId, key: usize) {
-        self.entities.get_mut(ent_ty).unwrap().remove(key);
-    }
-
-    pub fn copy_component<C: Component>(&mut self, ent_ty: &TypeId, key: usize) -> Option<C> {
-        let mut comp: C = unsafe { zeroed() };
-        let collector: &mut Box<dyn ErasedCollect> = self.entities.get_mut(ent_ty).unwrap();
-        collector.copy(key, &mut comp)?;
-        Some(comp)
+    #[inline]
+    fn copy<T: 'static>(&mut self, key: usize, value: &mut T) -> Option<()> {
+        self.erased_copy(&ty!(T), key, value)
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::acttey::*;
-    use acttey_ecs_macros::{Component, Entity};
-    use wasm_bindgen_test::*;
-
-    wasm_bindgen_test_configure!(run_in_browser);
-
-    #[derive(Component, Default, Clone, PartialEq, Debug)]
-    struct CompA {
-        x: i32,
-    }
-
-    #[derive(Component, Default, Clone, PartialEq, Debug)]
-    struct CompB(i32);
-
-    #[derive(Component, Default, Clone, PartialEq, Debug)]
-    struct CompC;
-
-    #[derive(Entity, Default, Clone, PartialEq, Debug)]
-    struct EntAB {
-        a: CompA,
-        b: CompB,
-    }
-
-    #[wasm_bindgen_test]
-    fn test_entity_state_insert_remove() {
-        let mut state = EntityState::new();
-
-        // Adds entity type `EntAB` which has CompA and CompB.
-        state.add_entity_type::<EntAB>(0);
-        let collector = state.entities.get(&ty!(<EntAB>)).unwrap();
-        assert!(collector.contains_type(&ty!(<CompA>)));
-        assert!(collector.contains_type(&ty!(<CompB>)));
-        assert!(!collector.contains_type(&ty!(<CompC>)));
-
-        // Test entities
-        let ents = [
-            EntAB {
-                a: CompA { x: 1 },
-                b: CompB(2),
-            },
-            EntAB {
-                a: CompA { x: 3 },
-                b: CompB(4),
-            },
-        ];
-
-        // Inserts the test entities.
-        for (id, ent) in ents.iter().enumerate() {
-            state.insert_entity(id, ent.clone());
-        }
-
-        // Inserted correctly?
-        let collector = state.entities.get(&ty!(<EntAB>)).unwrap();
-        assert_eq!(ents.len(), collector.len());
-        for (id, ent) in ents.iter().enumerate() {
-            assert_eq!(
-                Some(ent.a.clone()),
-                state.copy_component::<CompA>(&ty!(ent), id)
-            );
-            assert_eq!(
-                Some(ent.b.clone()),
-                state.copy_component::<CompB>(&ty!(ent), id)
-            )
-        }
-
-        // Removes the first one.
-        state.remove_entity(&ty!(<EntAB>), 0);
-
-        // Removed correctly?
-        let set = state.entities.get(&ty!(<EntAB>)).unwrap();
-        assert_eq!(ents.len() - 1, set.len());
-        for (id, ent) in ents.iter().enumerate().skip(1) {
-            assert_eq!(
-                Some(ent.a.clone()),
-                state.copy_component::<CompA>(&ty!(ent), id)
-            );
-            assert_eq!(
-                Some(ent.b.clone()),
-                state.copy_component::<CompB>(&ty!(ent), id)
-            )
-        }
-    }
+pub trait Downcast {
+    fn downcast<C: 'static>(any: &mut dyn Any) -> &mut [C];
 }

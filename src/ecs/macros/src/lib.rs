@@ -1,6 +1,12 @@
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, DeriveInput};
+use syn::{
+    parse_macro_input, DeriveInput, Data, DataStruct, Fields, Field, FieldsNamed, FieldsUnnamed, DataEnum, Ident, Type, TypeTuple, TypePath, Path, PathSegment, PathArguments, AngleBracketedGenericArguments, GenericArgument, Token,
+    punctuated::Punctuated,
+    Result,
+    parse::{Parse, ParseStream},
+    LitInt,
+};
 
 // TODO: Getting proper path programmatically, not hard codining
 // because path is varing as where we are accessing from.
@@ -36,7 +42,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
 
     quote! {
         // Implements the trait `Component`.
-        impl acttey::ecs::traits::Component for #ident {}
+        impl acttey::ecs::entity::Component for #ident {}
     }
     .into()
 }
@@ -118,25 +124,57 @@ fn impl_entity(input: TokenStream, check: bool) -> TokenStream {
     let validate = field_types.iter().map(|ty| {
         quote! {
             let x: Option<#ty> = std::option::Option::None;
-            let _: &dyn acttey::ecs::traits::Component = &(x.unwrap()) as &dyn acttey::ecs::traits::Component;
+            let _: &dyn acttey::ecs::entity::Component = 
+                &(x.unwrap()) as &dyn acttey::ecs::entity::Component;
         }
     });
 
     // Wraps the validate token with option.
-    let optional_validate = check.then(|| {
-        quote! {
+    let optional_validate = check.then(|| quote! {
             // Analyzer will let us know when it's not implementing Component.
             #(#validate)*
             unreachable!("You can't call me.");
-        }
-    });
+        });
 
     // Generates TokenStream informing Component types.
-    let collect_types = field_types.iter().map(|ty| {
-        quote! {
+    let collect_types = field_types
+        .iter()
+        .map(|ty| quote! {
             collector.collect_type::<#ty>();
-        }
-    });
+        });
+    
+    // Generates TokenStream inserting into `downcasters` field of the `EntityStorage`.
+    let insert_downcasters = field_types
+        .iter()
+        .map(|ty| quote! {
+            storage.downcasters.insert(
+                acttey::ecs::ComponentKey::new(
+                    std::any::TypeId::of::<#ty>(),
+                    acttey::ecs::EntityKey::new(
+                        std::any::TypeId::of::<#ident>()                       
+                    )
+                ),
+                // Safety: function pointer is not null.
+                unsafe {
+                    std::ptr::NonNull::new_unchecked(T::downcast::<#ty> as *mut ())
+                }
+            );
+        });
+
+    // Generates TokenStream inserting into `borrows` field of the `EntityStorage`.
+    let insert_borrows = field_types
+        .iter()
+        .map(|ty| quote! {
+            storage.borrow_states.insert(
+                acttey::ecs::ComponentKey::new(
+                    std::any::TypeId::of::<#ty>(),
+                    acttey::ecs::EntityKey::new(
+                        std::any::TypeId::of::<#ident>()                       
+                    )
+                ),
+                acttey::ecs::storage::BorrowState::Available
+            );
+        });
 
     // Generates TokenStream destructuring from normal struct.
     let optional_destructure_normal_struct = match kind {
@@ -162,23 +200,32 @@ fn impl_entity(input: TokenStream, check: bool) -> TokenStream {
 
     quote! {
         // Implements the trait Entity.
-        impl acttey::ecs::traits::Entity for #ident {
+        impl acttey::ecs::entity::Entity for #ident {
             fn validate() {
                 #optional_validate
             }
 
-            fn notify_types(
-                collector: &mut impl acttey::ecs::traits::Collect
-            ) {
+            fn notify_types<T>(
+                collector: &mut T,
+                storage: &mut acttey::ecs::storage::Storage,
+            )
+            where
+                T: acttey::ecs::entity::CollectGeneric + 
+                   acttey::ecs::entity::Downcast
+            {
                 // *Expand example*
                 // collector.collect_type<CompA>();
                 // collector.collect_type<CompB>();
                 #(#collect_types)*
+                
+                #(#insert_downcasters)*
+                
+                #(#insert_borrows)*
             }
 
             fn moves(
                 self,
-                collector: &mut Box<dyn acttey::ecs::traits::ErasedCollect>,
+                collector: &mut Box<dyn acttey::ecs::entity::Collect>,
                 key: usize
             ) {
                 collector.begin_collect(key);
@@ -206,11 +253,11 @@ fn impl_entity(input: TokenStream, check: bool) -> TokenStream {
 fn get_kind(ast: &DeriveInput) -> Kind {
     match ast {
         // normal struct
-        syn::DeriveInput {
+        DeriveInput {
             data:
-                syn::Data::Struct(
-                    syn::DataStruct {
-                        fields: syn::Fields::Named(..),
+                Data::Struct(
+                    DataStruct {
+                        fields: Fields::Named(..),
                         ..
                     },
                     ..,
@@ -218,11 +265,11 @@ fn get_kind(ast: &DeriveInput) -> Kind {
             ..
         } => Kind::NormalStruct,
         // tuple struct
-        syn::DeriveInput {
+        DeriveInput {
             data:
-                syn::Data::Struct(
-                    syn::DataStruct {
-                        fields: syn::Fields::Unnamed(..),
+                Data::Struct(
+                    DataStruct {
+                        fields: Fields::Unnamed(..),
                         ..
                     },
                     ..,
@@ -234,19 +281,19 @@ fn get_kind(ast: &DeriveInput) -> Kind {
 }
 
 /// Extracts `Field`s out from the `DeriveInput`.
-fn get_fields(ast: &DeriveInput) -> Vec<syn::Field> {
+fn get_fields(ast: &DeriveInput) -> Vec<Field> {
     let punctuated = match ast {
         // struct
-        syn::DeriveInput {
+        DeriveInput {
             data:
-                syn::Data::Struct(
-                    syn::DataStruct {
+                Data::Struct(
+                    DataStruct {
                         fields:
                             // Named (normal struct)
-                            syn::Fields::Named(syn::FieldsNamed { named: fields, .. })
+                            Fields::Named(FieldsNamed { named: fields, .. })
                             |
                             // Unnamed (tuple struct)
-                            syn::Fields::Unnamed(syn::FieldsUnnamed {
+                            Fields::Unnamed(FieldsUnnamed {
                                 unnamed: fields, ..
                             })
                             ,
@@ -257,9 +304,9 @@ fn get_fields(ast: &DeriveInput) -> Vec<syn::Field> {
             ..
         } => fields,
         // enum
-        syn::DeriveInput {
-            data: syn::Data::Enum(
-                syn::DataEnum {
+        DeriveInput {
+            data: Data::Enum(
+                DataEnum {
                     ..
                 }
             ),
@@ -273,12 +320,12 @@ fn get_fields(ast: &DeriveInput) -> Vec<syn::Field> {
 }
 
 /// Extracts `Ident`s out from the `Option<Ident>`s.
-fn get_idents(fields: &[syn::Field]) -> Vec<Option<syn::Ident>> {
+fn get_idents(fields: &[Field]) -> Vec<Option<Ident>> {
     fields.iter().map(|field| field.ident.clone()).collect()
 }
 
 /// Tries to unwrap `Option<Ident>`s or put increasing letters starting from '_0'.
-fn unwrap_idents(idents: Vec<Option<syn::Ident>>) -> Vec<syn::Ident> {
+fn unwrap_idents(idents: Vec<Option<Ident>>) -> Vec<Ident> {
     let mut num = 0_u32;
     idents
         .into_iter()
@@ -287,7 +334,7 @@ fn unwrap_idents(idents: Vec<Option<syn::Ident>>) -> Vec<syn::Ident> {
                 let mut id = String::from('_');
                 id.push_str(num.to_string().as_str());
                 num += 1;
-                syn::Ident::new(
+                Ident::new(
                     id.as_str(),
                     proc_macro2::Span::call_site(), /* No meanings */
                 )
@@ -297,7 +344,7 @@ fn unwrap_idents(idents: Vec<Option<syn::Ident>>) -> Vec<syn::Ident> {
 }
 
 /// Extracts `Type`s out from the `Field`s.
-fn get_types(fields: &[syn::Field]) -> Vec<syn::Type> {
+fn get_types(fields: &[Field]) -> Vec<Type> {
     fields.iter().map(|field| field.ty.clone()).collect()
 }
 
@@ -305,7 +352,7 @@ fn get_types(fields: &[syn::Field]) -> Vec<syn::Type> {
 /// Unwrap targets are
 /// - tuple
 /// - `Option`
-fn unwrap_type(ty: &syn::Type) -> Vec<syn::Type> {
+fn unwrap_type(ty: &Type) -> Vec<Type> {
     let mut res = vec![];
 
     // Unwrap tuple
@@ -322,9 +369,9 @@ fn unwrap_type(ty: &syn::Type) -> Vec<syn::Type> {
 
 /// Unwrap a tuple of `Type`s recursively and returns unwrapped `Type`s.
 /// Returns empty vector when the input `Type` is not a tuple.
-fn unwrap_type_tuple(ty: &syn::Type) -> Vec<syn::Type> {
+fn unwrap_type_tuple(ty: &Type) -> Vec<Type> {
     let mut res = vec![];
-    if let syn::Type::Tuple(syn::TypeTuple { elems, .. }) = ty {
+    if let Type::Tuple(TypeTuple { elems, .. }) = ty {
         for inner_ty in elems {
             res.extend(unwrap_type(inner_ty));
         }
@@ -334,12 +381,12 @@ fn unwrap_type_tuple(ty: &syn::Type) -> Vec<syn::Type> {
 
 /// Unwrap an `Option` of `Type` recursively and returns unwrapped `Type`s.
 /// Returns empty vector when the input `Type` is not an `Option`.
-fn unwrap_type_option(ty: &syn::Type) -> Vec<syn::Type> {
+fn unwrap_type_option(ty: &Type) -> Vec<Type> {
     let mut res = vec![];
 
     let segments = match ty {
-        syn::Type::Path(syn::TypePath {
-            path: syn::Path { segments, .. },
+        Type::Path(TypePath {
+            path: Path { segments, .. },
             ..
         }) if segments.len() == 1 => segments,
         // Option starts from Path, so return immediately if it doesn't
@@ -349,10 +396,10 @@ fn unwrap_type_option(ty: &syn::Type) -> Vec<syn::Type> {
     };
 
     let args = match &segments[0] {
-        syn::PathSegment {
+        PathSegment {
             ident,
             arguments:
-                syn::PathArguments::AngleBracketed(syn::AngleBracketedGenericArguments { args, .. }),
+                PathArguments::AngleBracketed(AngleBracketedGenericArguments { args, .. }),
         } if ident == "Option" => args,
         // Not an option? Return
         _ => {
@@ -361,7 +408,7 @@ fn unwrap_type_option(ty: &syn::Type) -> Vec<syn::Type> {
     };
 
     match &args[0] {
-        syn::GenericArgument::Type(inner_ty) => {
+        GenericArgument::Type(inner_ty) => {
             res.extend(unwrap_type(inner_ty));
         }
         // Option must have generic argumnet within it
@@ -369,4 +416,62 @@ fn unwrap_type_option(ty: &syn::Type) -> Vec<syn::Type> {
     }
 
     res
+}
+
+#[proc_macro]
+pub fn nth(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as Nth);
+    let identifiers = input.identifiers.into_iter().collect::<Vec<_>>();
+    if input.n < identifiers.len() {
+        let ident = &identifiers[input.n];
+        quote! { #ident }.into()
+    } else {
+        panic!("Index out of bounds");
+    }
+}
+
+struct Nth {
+    n: usize,
+    _comma: Token![,],
+    identifiers: Punctuated<Ident, Token![,]>,
+}
+
+impl Parse for Nth {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let n: LitInt = input.parse()?;
+        Ok(Nth {
+            n: n.base10_parse()?,
+            _comma: input.parse()?,
+            identifiers: input.parse_terminated(Ident::parse, Token![,])?,
+        })
+    }
+}
+
+#[proc_macro]
+pub fn repeat(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as Repeat);
+    let job = input.job;
+    let jobs = (0..input.n).into_iter()
+        .map(|i| {
+            quote! { #job!(#i); }
+        });
+
+    quote! { #(#jobs)* }.into()
+}
+
+struct Repeat {
+    n: usize,
+    _comma: Token![,],
+    job: Ident,
+}
+
+impl Parse for Repeat {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let n: LitInt = input.parse()?;
+        Ok(Repeat {
+            n: n.base10_parse()?,
+            _comma: input.parse()?,
+            job: input.parse()?,
+        })
+    }
 }

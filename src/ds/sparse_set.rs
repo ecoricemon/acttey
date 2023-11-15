@@ -1,12 +1,12 @@
 use super::any_vec::AnyVec;
 use crate::{
-    ecs::traits::{Collect, ErasedCollect},
+    ecs::entity::{CollectErased, CollectGeneric, CollectNonGeneric, Downcast},
     ty,
 };
+use ahash::AHashMap;
 use erased_generic_trait::{add_fn_table, generate_fn_table, inject_fn_table};
 use std::{
-    any::TypeId,
-    collections::HashMap,
+    any::{Any, TypeId},
     mem::{swap, zeroed},
     ptr::copy_nonoverlapping,
 };
@@ -18,22 +18,16 @@ type Resizer = Box<dyn Fn(&mut AnyVec, usize)>;
 /// Capacity: Length of sparse Vec.
 /// Length: Length of dense Vec.
 #[inject_fn_table(
-    ErasedCollect;
-    fn collect_type<V: 'static>(&mut self);
-    fn contains_type(&self, ty_id: &TypeId) -> bool;
-    fn begin_collect(&mut self, key: usize);
-    fn end_collect(&mut self, key: usize);
-    fn collect<V: 'static>(&mut self, key: usize, value: &mut V);
-    fn copy<V: 'static>(&mut self, key: usize, value: &mut V) -> Option<()>;
-    fn remove(&mut self, key: usize);
-    fn len(&self) -> usize;
-    fn is_empty(&self) -> bool;
+    CollectErased;
+    fn collect_type<T: 'static>(&mut self);
+    fn collect<T: 'static>(&mut self, key: usize, value: &mut T);
+    fn copy<T: 'static>(&mut self, key: usize, value: &mut T) -> Option<()>;
 )]
 pub struct SparseSet {
     sparse: Vec<Option<usize>>,
     deref: Vec<usize>,
-    denses: HashMap<TypeId, AnyVec>,
-    resizers: HashMap<TypeId, Option<Resizer>>,
+    denses: AHashMap<TypeId, AnyVec, ahash::RandomState>,
+    resizers: AHashMap<TypeId, Option<Resizer>, ahash::RandomState>,
 }
 
 impl SparseSet {
@@ -42,8 +36,8 @@ impl SparseSet {
             fn_table: generate_fn_table!(SparseSet),
             sparse: Vec::new(),
             deref: Vec::new(),
-            denses: HashMap::new(),
-            resizers: HashMap::new(),
+            denses: AHashMap::new(),
+            resizers: AHashMap::new(),
         }
     }
 
@@ -56,8 +50,8 @@ impl SparseSet {
             fn_table: generate_fn_table!(SparseSet),
             sparse,
             deref,
-            denses: HashMap::new(),
-            resizers: HashMap::new(),
+            denses: AHashMap::new(),
+            resizers: AHashMap::new(),
         }
     }
 
@@ -71,7 +65,7 @@ impl SparseSet {
         let mut v = AnyVec::with_capacity::<V>(len);
         // `v` grew here, but elements were not set.
         v.grow(len);
-        self.denses.insert(ty!(<V>), v);
+        self.denses.insert(ty!(V), v);
     }
 
     /// Adds new dense with the type `V` and fills it with the value returned by `f`.
@@ -80,7 +74,7 @@ impl SparseSet {
     pub fn add_dense_type_with<V: 'static>(&mut self, f: Box<dyn Fn() -> V>) {
         // Make a resizer.
         let resizer = Box::new(move |dense: &mut AnyVec, new_len: usize| {
-            assert!(dense.is_type_of(&ty!(<V>)));
+            assert!(dense.is_type_of(&ty!(V)));
             // Safety: Type checked.
             unsafe {
                 dense.resize_with(new_len, f.as_ref());
@@ -91,10 +85,10 @@ impl SparseSet {
         let len = self.len();
         let mut v = AnyVec::with_capacity::<V>(len);
         resizer.as_ref()(&mut v, len);
-        self.denses.insert(ty!(<V>), v);
+        self.denses.insert(ty!(V), v);
 
         // Keep the resizer for later.
-        self.resizers.insert(ty!(<V>), Some(resizer));
+        self.resizers.insert(ty!(V), Some(resizer));
     }
 
     pub fn contains_type(&self, ty: &TypeId) -> bool {
@@ -150,13 +144,13 @@ impl SparseSet {
     }
 
     #[inline]
-    fn as_vec<V: 'static>(denses: &HashMap<TypeId, AnyVec>) -> Option<&Vec<V>> {
-        Some(denses.get(&ty!(<V>))?.into())
+    fn as_vec<V: 'static>(denses: &AHashMap<TypeId, AnyVec>) -> Option<&Vec<V>> {
+        Some(denses.get(&ty!(V))?.into())
     }
 
     #[inline]
-    fn as_vec_mut<V: 'static>(denses: &mut HashMap<TypeId, AnyVec>) -> Option<&mut Vec<V>> {
-        Some(denses.get_mut(&ty!(<V>))?.into())
+    fn as_vec_mut<V: 'static>(denses: &mut AHashMap<TypeId, AnyVec>) -> Option<&mut Vec<V>> {
+        Some(denses.get_mut(&ty!(V))?.into())
     }
 
     #[inline]
@@ -256,7 +250,7 @@ impl SparseSet {
         // Type and index are checked by denses.get() and self.into_dense_index() respectively.
         Some(unsafe {
             self.denses
-                .get(&ty!(<V>))?
+                .get(&ty!(V))?
                 .get_unchecked::<V>(self.get_dense_index(key)?)
         })
     }
@@ -268,9 +262,7 @@ impl SparseSet {
         // Type and index are checked by denses.get() and self.into_dense_index() respectively.
         Some(unsafe {
             let index = self.get_dense_index(key)?;
-            self.denses
-                .get_mut(&ty!(<V>))?
-                .get_unchecked_mut::<V>(index)
+            self.denses.get_mut(&ty!(V))?.get_unchecked_mut::<V>(index)
         })
     }
 
@@ -295,36 +287,11 @@ impl std::default::Default for SparseSet {
     }
 }
 
-impl Collect for SparseSet {
+impl CollectGeneric for SparseSet {
     #[inline]
     fn collect_type<V: 'static>(&mut self) {
         add_fn_table!(self, V);
-        self.denses.insert(ty!(<V>), AnyVec::new::<V>());
-    }
-
-    #[inline]
-    fn contains_type(&self, ty_id: &TypeId) -> bool {
-        self.denses.contains_key(ty_id)
-    }
-
-    #[inline]
-    fn begin_collect(&mut self, key: usize) {
-        debug_assert!(self.has_equal_denses_len());
-
-        if self.sparse.len() <= key {
-            self.sparse.resize(key + 1, None);
-        }
-    }
-
-    #[inline]
-    fn end_collect(&mut self, key: usize) {
-        // Items should have been pushed.
-        if self.sparse[key].is_none() {
-            self.sparse[key] = Some(self.len() - 1);
-            self.deref.push(key);
-        }
-
-        debug_assert!(self.has_equal_denses_len());
+        self.denses.insert(ty!(V), AnyVec::new::<V>());
     }
 
     #[inline]
@@ -348,6 +315,33 @@ impl Collect for SparseSet {
         }
         Some(())
     }
+}
+
+impl CollectNonGeneric for SparseSet {
+    #[inline]
+    fn contains_type(&self, ckey: &TypeId) -> bool {
+        self.denses.contains_key(ckey)
+    }
+
+    #[inline]
+    fn begin_collect(&mut self, key: usize) {
+        debug_assert!(self.has_equal_denses_len());
+
+        if self.sparse.len() <= key {
+            self.sparse.resize(key + 1, None);
+        }
+    }
+
+    #[inline]
+    fn end_collect(&mut self, key: usize) {
+        // Items should have been pushed.
+        if self.sparse[key].is_none() {
+            self.sparse[key] = Some(self.len() - 1);
+            self.deref.push(key);
+        }
+
+        debug_assert!(self.has_equal_denses_len());
+    }
 
     #[inline]
     fn remove(&mut self, key: usize) {
@@ -362,6 +356,17 @@ impl Collect for SparseSet {
     #[inline]
     fn is_empty(&self) -> bool {
         self.is_empty()
+    }
+
+    #[inline]
+    fn values_as_any(&mut self, ty: &TypeId) -> &mut dyn Any {
+        self.denses.get_mut(ty).unwrap()
+    }
+}
+
+impl Downcast for SparseSet {
+    fn downcast<C: 'static>(any: &mut dyn Any) -> &mut [C] {
+        any.downcast_mut::<AnyVec>().unwrap().into()
     }
 }
 
@@ -396,9 +401,9 @@ mod tests {
         assert_eq!(2, s.capacity());
         assert_eq!(0, s.len());
 
-        assert_eq!(false, s.contains_type(&ty!(<SA>)));
+        assert_eq!(false, s.contains_type(&ty!(SA)));
         s.add_dense_type_with(Box::new(|| SA::default()));
-        assert_eq!(true, s.contains_type(&ty!(<SA>)));
+        assert_eq!(true, s.contains_type(&ty!(SA)));
 
         s.insert_sync(entries[0].0, entries[0].1);
         assert_eq!(2, s.capacity());
