@@ -1,6 +1,6 @@
 use crate::{
-    math::{matrix::Matrix4f, vector::Vector},
     primitive::constant::radian,
+    primitive::{matrix::Matrix4f, vector::Vector},
 };
 
 pub struct PerspectiveCamera {

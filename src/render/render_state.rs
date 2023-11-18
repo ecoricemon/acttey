@@ -1,8 +1,7 @@
 use super::{camera::PerspectiveCamera, input::InputState};
 use crate::{
     log,
-    math::matrix::Matrix4f,
-    primitive::{shape::sample, Vertex},
+    primitive::{matrix::Matrix4f, shape::sample},
 };
 use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::prelude::*;
@@ -48,7 +47,16 @@ pub struct RenderState {
 impl RenderState {
     pub async fn new() -> (Self, EventLoop<()>) {
         // Sample shape
-        let (vertices, indices) = sample("cube").unwrap();
+        let mesh_primitive = sample("sphere");
+        let vertex_info = mesh_primitive.create_interleaved_vertex_info();
+        let indices = mesh_primitive.get_indices();
+        let index_num = indices.len() as u32;
+        let vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: vertex_info.vertex_size as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &vertex_info.wgpu_attributes,
+        };
+
         // Window
         let window = web_sys::window().expect_throw("Failed to get the window");
         // Canvas
@@ -81,11 +89,9 @@ impl RenderState {
             canvas.height(),
         );
         // wgpu vertex buffer
-        let vertex_buffer =
-            RenderState::create_vertex_buffer(&device, bytemuck::cast_slice(&vertices));
+        let vertex_buffer = RenderState::create_vertex_buffer(&device, &vertex_info.bytes);
         // wgpu index buffer
-        let index_buffer =
-            RenderState::create_index_buffer(&device, bytemuck::cast_slice(&indices));
+        let index_buffer = RenderState::create_index_buffer(&device, bytemuck::cast_slice(indices));
         // Camera
         let mut camera = PerspectiveCamera::new();
         let aspect = canvas.width() as f32 / canvas.height() as f32;
@@ -108,6 +114,7 @@ impl RenderState {
             &[&uniform_layout],
             &shader_module,
             &surface_config,
+            vertex_layout,
         );
 
         (
@@ -121,7 +128,7 @@ impl RenderState {
                 surface_config,
                 vertex_buffer,
                 index_buffer,
-                index_num: indices.len() as u32,
+                index_num,
                 camera,
                 uniform_data,
                 uniform_buffer,
@@ -310,6 +317,7 @@ impl RenderState {
         bind_group_layouts: &[&wgpu::BindGroupLayout],
         shader_module: &wgpu::ShaderModule,
         surface_config: &wgpu::SurfaceConfiguration,
+        vertex_layout: wgpu::VertexBufferLayout,
     ) -> wgpu::RenderPipeline {
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -317,14 +325,13 @@ impl RenderState {
                 bind_group_layouts,
                 push_constant_ranges: &[],
             });
-        let attributes = Vertex::vertex_attribute();
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Render pipeline"),
             layout: Some(&render_pipeline_layout),
             vertex: wgpu::VertexState {
                 module: shader_module,
                 entry_point: "v_main",
-                buffers: &[Vertex::layout(&attributes)],
+                buffers: &[vertex_layout],
             },
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,

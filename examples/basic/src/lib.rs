@@ -54,7 +54,7 @@ impl System for MoveSystem {
                 p.y += v.y;
                 p.z += v.z;
             }
-            crate::log!("{:?}", pos);
+            // crate::log!("{:?}", pos);
         }
     }
 }

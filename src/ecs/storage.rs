@@ -128,8 +128,8 @@ impl Storage {
         }
 
         let values = collectors.get_mut(&ekey).unwrap().values_as_any(&ty!(C));
-
         let downcaster = downcasters.get(&ckey).unwrap();
+
         unsafe {
             // Make sure that the signature must be same with Downcast::downcast.
             transmute::<_, fn(&mut dyn Any) -> &mut [C]>(downcaster.as_ptr())(values)
@@ -147,10 +147,7 @@ impl Storage {
         };
 
         let sinfo = self.sinfo.get(skey).unwrap();
-        for ckey in sinfo.reads.iter() {
-            free(self.borrow_states.get_mut(ckey).unwrap());
-        }
-        for ckey in sinfo.writes.iter() {
+        for ckey in sinfo.reads.iter().chain(sinfo.writes.iter()) {
             free(self.borrow_states.get_mut(ckey).unwrap());
         }
     }

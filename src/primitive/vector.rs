@@ -48,6 +48,45 @@ impl Number for u8 {
     }
 }
 
+impl Number for u16 {
+    type Output = u16;
+
+    #[inline]
+    fn zero() -> Self::Output {
+        0
+    }
+
+    #[inline]
+    fn one() -> Self::Output {
+        1
+    }
+
+    #[inline]
+    fn max() -> Self::Output {
+        u16::MAX
+    }
+
+    #[inline]
+    fn _sqrt(self) -> Self::Output {
+        panic!("Oops! There's no sqrt() for u16")
+    }
+
+    #[inline]
+    fn _acos(self) -> Self::Output {
+        panic!("Oops! There's no acos() for u16")
+    }
+
+    #[inline]
+    fn from_f32(v: f32) -> Self::Output {
+        v as Self::Output
+    }
+
+    #[inline]
+    fn from_f64(v: f64) -> Self::Output {
+        v as Self::Output
+    }
+}
+
 impl Number for f32 {
     type Output = f32;
 
@@ -136,7 +175,7 @@ macro_rules! impl_vector {
                 + 'static
         {
             #[inline]
-            pub fn new($($field: T),+) -> Self {
+            pub const fn new($($field: T),+) -> Self {
                 Self([$($field),+])
             }
 
@@ -161,14 +200,30 @@ macro_rules! impl_vector {
                 use std::any::TypeId;
                 match TypeId::of::<T>() {
                     x if x == TypeId::of::<u8>() => Some("u8"),
+                    x if x == TypeId::of::<u16>() => Some("u16"),
                     x if x == TypeId::of::<f32>() => Some("f32"),
                     _ => None
                 }
             }
 
             #[inline]
-            pub fn get_dim() -> usize {
+            pub const fn size() -> usize {
+                std::mem::size_of::<Self>()
+            }
+
+            #[inline]
+            pub const fn get_size(&self) -> usize {
+                Self::size()
+            }
+
+            #[inline]
+            pub const fn dim() -> usize {
                 $d
+            }
+
+            #[inline]
+            pub const fn get_dim(&self) -> usize {
+                Self::dim()
             }
 
             #[inline]
@@ -193,6 +248,7 @@ macro_rules! impl_vector {
             )+
 
             /// Setter
+            #[inline]
             pub fn set(&mut self, $($field: T),+) {
                 $(
                     self.0[$index] = $field;
@@ -542,10 +598,10 @@ mod tests {
     fn test_type_and_dimension_getter() {
         assert_eq!("u8", V1u8::get_type().unwrap());
         assert_eq!("f32", V1f32::get_type().unwrap());
-        assert_eq!(1, V1f32::get_dim());
-        assert_eq!(2, V2f32::get_dim());
-        assert_eq!(3, V3f32::get_dim());
-        assert_eq!(4, V4f32::get_dim());
+        assert_eq!(1, V1f32::dim());
+        assert_eq!(2, V2f32::dim());
+        assert_eq!(3, V3f32::dim());
+        assert_eq!(4, V4f32::dim());
     }
 
     #[wasm_bindgen_test]

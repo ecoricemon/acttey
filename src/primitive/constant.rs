@@ -3,6 +3,7 @@
 pub mod color {
     use super::super::{u8x4_to_color, Color};
 
+    pub const DEFAULT: Color = u8x4_to_color([0x80, 0x80, 0x80, 0xFF]);
     pub const BLACK: Color = u8x4_to_color([0x00, 0x00, 0x00, 0xFF]);
     pub const WHITE: Color = u8x4_to_color([0xFF, 0xFF, 0xFF, 0xFF]);
     pub const RED: Color = u8x4_to_color([0xFF, 0x00, 0x00, 0xFF]);

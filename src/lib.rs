@@ -1,7 +1,6 @@
 pub mod app;
 pub mod ds;
 pub mod ecs;
-pub mod math;
 pub mod primitive;
 pub mod render;
 pub mod util;
