@@ -1,5 +1,8 @@
-use super::{entity::Component, fkey, qkey, storage::Store, FilterKey, QueryKey, SystemKey};
 use crate::{
+    ecs::{
+        fkey, predefined::resource::ResourcePack, qkey, storage::Store, traits::Component,
+        FilterKey, QueryKey, SystemKey,
+    },
     ty,
     util::{downcast_mut_slice, downcast_slice},
 };
@@ -11,7 +14,7 @@ use std::{
 };
 
 /// A filter to select slices of `Component`.
-/// Users should fill this form of filter.
+/// You should fill out this form of filter.
 ///
 /// - `Target` is what `Component` you want. You will receive slices of this `Target`.
 /// - `FilterAll` is a tuple of `Component`s to select entities that have all these `Component`s. Empty tuple means selecting all entities.
@@ -19,16 +22,16 @@ use std::{
 /// - `FilterNone` is a tuple of `Component`s not to select entities that have any of these `Component`s. Empty tuple means selecting all entities.
 pub trait Filter: 'static {
     type Target: Component;
-    type FilterAll: Identify;
-    type FilterAny: Identify;
-    type FilterNone: Identify;
+    type All: Identify;
+    type Any: Identify;
+    type None: Identify;
 
     #[inline]
     fn ids() -> [Vec<TypeId>; 3] {
         [
-            <Self::FilterAll as Identify>::ids(),
-            <Self::FilterAny as Identify>::ids(),
-            <Self::FilterNone as Identify>::ids(),
+            <Self::All as Identify>::ids(),
+            <Self::Any as Identify>::ids(),
+            <Self::None as Identify>::ids(),
         ]
     }
 
@@ -85,7 +88,7 @@ pub trait Query<'a>: 'static {
     }
 
     fn query(storage: &mut impl Store, skey: SystemKey) -> Self::Output;
-    fn gen_fkeys(skey: SystemKey) -> Vec<FilterKey>;
+    fn fkeys(skey: SystemKey) -> Vec<FilterKey>;
     fn info(skey: SystemKey) -> QueryInfo;
 }
 
@@ -98,7 +101,7 @@ pub trait QueryMut<'a>: 'static {
     }
 
     fn query_mut(storage: &mut impl Store, skey: SystemKey) -> Self::Output;
-    fn gen_fkeys_mut(skey: SystemKey) -> Vec<FilterKey>;
+    fn fkeys_mut(skey: SystemKey) -> Vec<FilterKey>;
     fn info_mut(skey: SystemKey) -> QueryInfo;
 }
 
@@ -112,6 +115,18 @@ impl QueryInfo {
     pub fn new<T: for<'a> Query<'a>>(skey: SystemKey) -> Self {
         T::info(skey)
     }
+}
+
+pub trait ResQuery<'a> {
+    type Output;
+
+    fn query(res_pack: &'a ResourcePack) -> Self::Output;
+}
+
+pub trait ResQueryMut<'a> {
+    type Output;
+
+    fn query_mut(res_pack: &'a ResourcePack) -> Self::Output;
 }
 
 pub struct QueryIter<'a, T> {
@@ -129,6 +144,14 @@ impl<'a, T> QueryIter<'a, T> {
     pub unsafe fn new(v: &Vec<NonNull<[()]>>) -> Self {
         Self {
             iter: (*(v as *const Vec<NonNull<[()]>>)).iter(),
+            _marker: PhantomData,
+        }
+    }
+
+    #[inline]
+    pub fn empty() -> Self {
+        Self {
+            iter: Default::default(),
             _marker: PhantomData,
         }
     }
@@ -161,6 +184,14 @@ impl<'a, T> QueryIterMut<'a, T> {
     pub unsafe fn new(v: &mut Vec<NonNull<[()]>>) -> Self {
         Self {
             iter: (*(v as *mut Vec<NonNull<[()]>>)).iter_mut(),
+            _marker: PhantomData,
+        }
+    }
+
+    #[inline]
+    pub fn empty() -> Self {
+        Self {
+            iter: Default::default(),
             _marker: PhantomData,
         }
     }
@@ -201,7 +232,7 @@ macro_rules! impl_identify {
         }
     };
     (1, $id:ident) => {
-        impl<$id: $crate::acttey::ecs::entity::Component>
+        impl<$id: $crate::acttey::ecs::traits::Component>
             $crate::acttey::ecs::query::Identify for $id
         {
             type Output = [std::any::TypeId; 1];
@@ -223,7 +254,7 @@ macro_rules! impl_identify {
         }
     };
     ($n:expr, $($id:ident),+) => {
-        impl<$($id: $crate::acttey::ecs::entity::Component),+>
+        impl<$($id: $crate::acttey::ecs::traits::Component),+>
             $crate::acttey::ecs::query::Identify for ( $($id),+ )
         {
             type Output = [std::any::TypeId; $n];
@@ -246,7 +277,7 @@ macro_rules! impl_identify {
     }
 }
 
-// :)
+// impl `Identify` for tuple combinations.
 impl_identify!(0);
 impl_identify!(1, A);
 impl_identify!(2, A, B);
@@ -267,6 +298,62 @@ impl_identify!(16, A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P);
 
 #[macro_export]
 macro_rules! impl_query {
+    (0) => {
+        impl<'a> $crate::acttey::ecs::query::Query<'a> for ()
+        {
+            type Output = $crate::acttey::ecs::query::QueryIter<'a, ()>;
+
+            #[inline]
+            fn query(
+                _storage: &mut impl $crate::acttey::ecs::storage::Store,
+                _skey: $crate::acttey::ecs::SystemKey,
+            ) -> Self::Output {
+                QueryIter::empty()
+            }
+
+            #[inline]
+            fn fkeys(_skey: $crate::acttey::ecs::SystemKey)
+                -> Vec<$crate::acttey::ecs::FilterKey>
+            {
+                vec![]
+            }
+
+            #[inline]
+            fn info(_skey: $crate::acttey::ecs::SystemKey) -> $crate::acttey::ecs::query::QueryInfo {
+                $crate::acttey::ecs::query::QueryInfo {
+                    finfo: vec![]
+                }
+            }
+        }
+        impl<'a> $crate::acttey::ecs::query::QueryMut<'a> for ()
+        {
+            type Output = $crate::acttey::ecs::query::QueryIterMut<'a, ()>;
+
+
+            #[inline]
+            fn query_mut(
+                _storage: &mut impl $crate::acttey::ecs::storage::Store,
+                _skey: $crate::acttey::ecs::SystemKey,
+            ) -> Self::Output {
+                QueryIterMut::empty()
+            }
+
+            #[inline]
+            fn fkeys_mut(_skey: $crate::acttey::ecs::SystemKey)
+                -> Vec<$crate::acttey::ecs::FilterKey>
+            {
+                vec![]
+            }
+
+            #[inline]
+            fn info_mut(_skey: $crate::acttey::ecs::SystemKey) -> $crate::acttey::ecs::query::QueryInfo {
+                $crate::acttey::ecs::query::QueryInfo {
+                    finfo: vec![]
+                }
+            }
+        }
+
+    };
     (1, $id:ident) => {
         impl<'a,
             $id: $crate::acttey::ecs::query::Filter>
@@ -283,7 +370,7 @@ macro_rules! impl_query {
             }
 
             #[inline]
-            fn gen_fkeys(skey: $crate::acttey::ecs::SystemKey)
+            fn fkeys(skey: $crate::acttey::ecs::SystemKey)
                 -> Vec<$crate::acttey::ecs::FilterKey>
             {
                 vec![$crate::acttey::ecs::FilterKey::new(
@@ -315,7 +402,7 @@ macro_rules! impl_query {
             }
 
             #[inline]
-            fn gen_fkeys_mut(skey: $crate::acttey::ecs::SystemKey)
+            fn fkeys_mut(skey: $crate::acttey::ecs::SystemKey)
                 -> Vec<$crate::acttey::ecs::FilterKey>
             {
                 vec![$crate::acttey::ecs::FilterKey::new(
@@ -349,7 +436,7 @@ macro_rules! impl_query {
             }
 
             #[inline]
-            fn gen_fkeys(skey: $crate::acttey::ecs::SystemKey)
+            fn fkeys(skey: $crate::acttey::ecs::SystemKey)
                 -> Vec<$crate::acttey::ecs::FilterKey>
             {
                 let qkey = Self::gen_key(skey);
@@ -385,7 +472,7 @@ macro_rules! impl_query {
             }
 
             #[inline]
-            fn gen_fkeys_mut(skey: $crate::acttey::ecs::SystemKey)
+            fn fkeys_mut(skey: $crate::acttey::ecs::SystemKey)
                 -> Vec<$crate::acttey::ecs::FilterKey>
             {
                 let qkey = Self::gen_key_mut(skey);
@@ -408,7 +495,8 @@ macro_rules! impl_query {
     }
 }
 
-// :)
+// impl `Query` and `QueryMut` for tuple combinations.
+impl_query!(0);
 impl_query!(1, A);
 impl_query!(2, A, B);
 impl_query!(3, A, B, C);
@@ -425,6 +513,97 @@ impl_query!(13, A, B, C, D, E, F, G, H, I, J, K, L, M);
 impl_query!(14, A, B, C, D, E, F, G, H, I, J, K, L, M, N);
 impl_query!(15, A, B, C, D, E, F, G, H, I, J, K, L, M, N, O);
 impl_query!(16, A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P);
+
+macro_rules! impl_res_query {
+    (0) => {
+        impl<'a> $crate::acttey::ecs::query::ResQuery<'a> for ()
+        {
+            type Output = ();
+
+            #[inline]
+            fn query(_res_pack: &'a $crate::acttey::ecs::predefined::resource::ResourcePack) -> Self::Output {
+            }
+        }
+
+        impl<'a> $crate::acttey::ecs::query::ResQueryMut<'a> for ()
+        {
+            type Output = ();
+
+            #[inline]
+            fn query_mut(_res_pack: &'a $crate::acttey::ecs::predefined::resource::ResourcePack) -> Self::Output {
+            }
+        }
+    };
+    (1, $id:ident) => {
+        impl<'a,
+            $id: $crate::acttey::ecs::traits::Resource>
+            $crate::acttey::ecs::query::ResQuery<'a> for $id
+        {
+            type Output = &'a $id;
+
+            #[inline]
+            fn query(res_pack: &'a $crate::acttey::ecs::predefined::resource::ResourcePack) -> Self::Output {
+                res_pack.get::<$id>()
+            }
+        }
+
+        impl<'a,
+            $id: $crate::acttey::ecs::traits::Resource>
+            $crate::acttey::ecs::query::ResQueryMut<'a> for $id
+        {
+            type Output = &'a mut $id;
+
+            #[inline]
+            fn query_mut(res_pack: &'a $crate::acttey::ecs::predefined::resource::ResourcePack) -> Self::Output {
+                res_pack.get::<$id>()
+            }
+        }
+    };
+    ($n:expr, $($id:ident),+) => {
+        impl<'a,
+            $($id: $crate::acttey::ecs::traits::Resource),+>
+            $crate::acttey::ecs::query::ResQuery<'a> for ( $($id),+ )
+        {
+            type Output = ( $(&'a $id),+ );
+
+            #[inline]
+            fn query(res_pack: &'a $crate::acttey::ecs::predefined::resource::ResourcePack) -> Self::Output {
+                ( $(res_pack.get::<$id>()),+ )
+            }
+        }
+
+        impl<'a,
+            $($id: $crate::acttey::ecs::traits::Resource),+>
+            $crate::acttey::ecs::query::ResQueryMut<'a> for ( $($id),+ )
+        {
+            type Output = ( $(&'a mut $id),+ );
+
+            #[inline]
+            fn query_mut(res_pack: &'a $crate::acttey::ecs::predefined::resource::ResourcePack) -> Self::Output {
+                ( $(res_pack.get::<$id>()),+ )
+            }
+        }
+    };
+}
+
+// impl `ResQuery` and `ResQueryMut` for tuple combinations.
+impl_res_query!(0);
+impl_res_query!(1, A);
+impl_res_query!(2, A, B);
+impl_res_query!(3, A, B, C);
+impl_res_query!(4, A, B, C, D);
+impl_res_query!(5, A, B, C, D, E);
+impl_res_query!(6, A, B, C, D, E, F);
+impl_res_query!(7, A, B, C, D, E, F, G);
+impl_res_query!(8, A, B, C, D, E, F, G, H);
+impl_res_query!(9, A, B, C, D, E, F, G, H, I);
+impl_res_query!(10, A, B, C, D, E, F, G, H, I, J);
+impl_res_query!(11, A, B, C, D, E, F, G, H, I, J, K);
+impl_res_query!(12, A, B, C, D, E, F, G, H, I, J, K, L);
+impl_res_query!(13, A, B, C, D, E, F, G, H, I, J, K, L, M);
+impl_res_query!(14, A, B, C, D, E, F, G, H, I, J, K, L, M, N);
+impl_res_query!(15, A, B, C, D, E, F, G, H, I, J, K, L, M, N, O);
+impl_res_query!(16, A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P);
 
 #[cfg(test)]
 mod tests {
@@ -447,17 +626,17 @@ mod tests {
     struct FA;
     impl Filter for FA {
         type Target = CA;
-        type FilterAll = (CA, CB);
-        type FilterAny = CA;
-        type FilterNone = ();
+        type All = (CA, CB);
+        type Any = CA;
+        type None = ();
     }
 
     struct FB;
     impl Filter for FB {
         type Target = CB;
-        type FilterAll = ();
-        type FilterAny = (CB, CA);
-        type FilterNone = CA;
+        type All = ();
+        type Any = (CB, CA);
+        type None = CA;
     }
 
     type Q = (FA, FB);
@@ -473,11 +652,11 @@ mod tests {
         // gen_fkeys() and gen_fkeys_mut()
         assert_eq!(
             vec![fkey!(FA, qkey), fkey!(FB, qkey)],
-            <Q as Query>::gen_fkeys(skey)
+            <Q as Query>::fkeys(skey)
         );
         assert_eq!(
             vec![fkey!(FA, qkey_mut), fkey!(FB, qkey_mut)],
-            <Q as QueryMut>::gen_fkeys_mut(skey)
+            <Q as QueryMut>::fkeys_mut(skey)
         );
     }
 }

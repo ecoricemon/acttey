@@ -1,9 +1,19 @@
-pub mod entity;
+pub mod predefined;
 pub mod query;
 pub mod storage;
 pub mod system;
+pub mod traits;
 
 use std::any::TypeId;
+
+pub mod prelude {
+    pub use super::{
+        predefined::prelude::*,
+        query::{Filter, Query, QueryMut, ResQuery, ResQueryMut},
+        system::{System, Systems},
+    };
+    pub use acttey_ecs_macros::{Component, Entity};
+}
 
 #[derive(Hash, PartialEq, Eq, Clone, Copy, Debug)]
 pub struct SystemKey(TypeId);

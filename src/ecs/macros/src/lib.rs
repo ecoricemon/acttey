@@ -1,11 +1,12 @@
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
-    parse_macro_input, DeriveInput, Data, DataStruct, Fields, Field, FieldsNamed, FieldsUnnamed, DataEnum, Ident, Type, TypeTuple, TypePath, Path, PathSegment, PathArguments, AngleBracketedGenericArguments, GenericArgument, Token,
-    punctuated::Punctuated,
-    Result,
     parse::{Parse, ParseStream},
-    LitInt,
+    parse_macro_input,
+    punctuated::Punctuated,
+    AngleBracketedGenericArguments, Data, DataEnum, DataStruct, DeriveInput, Field, Fields,
+    FieldsNamed, FieldsUnnamed, GenericArgument, Ident, LitInt, Path, PathArguments, PathSegment,
+    Result, Token, Type, TypePath, TypeTuple,
 };
 
 // TODO: Getting proper path programmatically, not hard codining
@@ -42,7 +43,19 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
 
     quote! {
         // Implements the trait `Component`.
-        impl acttey::ecs::entity::Component for #ident {}
+        impl acttey::ecs::traits::Component for #ident {}
+    }
+    .into()
+}
+
+#[proc_macro_derive(Resource)]
+pub fn derive_resource(input: TokenStream) -> TokenStream {
+    let ast = parse_macro_input!(input as DeriveInput);
+    let ident = ast.ident.clone();
+
+    quote! {
+        // Implements the trait `Resource`.
+        impl acttey::ecs::traits::Resource for #ident {}
     }
     .into()
 }
@@ -124,34 +137,35 @@ fn impl_entity(input: TokenStream, check: bool) -> TokenStream {
     let validate = field_types.iter().map(|ty| {
         quote! {
             let x: Option<#ty> = std::option::Option::None;
-            let _: &dyn acttey::ecs::entity::Component = 
-                &(x.unwrap()) as &dyn acttey::ecs::entity::Component;
+            let _: &dyn acttey::ecs::traits::Component =
+                &(x.unwrap()) as &dyn acttey::ecs::traits::Component;
         }
     });
 
     // Wraps the validate token with option.
-    let optional_validate = check.then(|| quote! {
+    let optional_validate = check.then(|| {
+        quote! {
             // Analyzer will let us know when it's not implementing Component.
             #(#validate)*
             unreachable!("You can't call me.");
-        });
+        }
+    });
 
     // Generates TokenStream informing Component types.
-    let collect_types = field_types
-        .iter()
-        .map(|ty| quote! {
+    let collect_types = field_types.iter().map(|ty| {
+        quote! {
             collector.collect_type::<#ty>();
-        });
-    
+        }
+    });
+
     // Generates TokenStream inserting into `downcasters` field of the `EntityStorage`.
-    let insert_downcasters = field_types
-        .iter()
-        .map(|ty| quote! {
+    let insert_downcasters = field_types.iter().map(|ty| {
+        quote! {
             storage.downcasters.insert(
                 acttey::ecs::ComponentKey::new(
                     std::any::TypeId::of::<#ty>(),
                     acttey::ecs::EntityKey::new(
-                        std::any::TypeId::of::<#ident>()                       
+                        std::any::TypeId::of::<#ident>()
                     )
                 ),
                 // Safety: function pointer is not null.
@@ -159,22 +173,23 @@ fn impl_entity(input: TokenStream, check: bool) -> TokenStream {
                     std::ptr::NonNull::new_unchecked(T::downcast::<#ty> as *mut ())
                 }
             );
-        });
+        }
+    });
 
     // Generates TokenStream inserting into `borrows` field of the `EntityStorage`.
-    let insert_borrows = field_types
-        .iter()
-        .map(|ty| quote! {
+    let insert_borrows = field_types.iter().map(|ty| {
+        quote! {
             storage.borrow_states.insert(
                 acttey::ecs::ComponentKey::new(
                     std::any::TypeId::of::<#ty>(),
                     acttey::ecs::EntityKey::new(
-                        std::any::TypeId::of::<#ident>()                       
+                        std::any::TypeId::of::<#ident>()
                     )
                 ),
                 acttey::ecs::storage::BorrowState::Available
             );
-        });
+        }
+    });
 
     // Generates TokenStream destructuring from normal struct.
     let optional_destructure_normal_struct = match kind {
@@ -200,7 +215,7 @@ fn impl_entity(input: TokenStream, check: bool) -> TokenStream {
 
     quote! {
         // Implements the trait Entity.
-        impl acttey::ecs::entity::Entity for #ident {
+        impl acttey::ecs::traits::Entity for #ident {
             fn validate() {
                 #optional_validate
             }
@@ -210,24 +225,27 @@ fn impl_entity(input: TokenStream, check: bool) -> TokenStream {
                 storage: &mut acttey::ecs::storage::Storage,
             )
             where
-                T: acttey::ecs::entity::CollectGeneric + 
-                   acttey::ecs::entity::Downcast
+                T: acttey::ecs::traits::CollectGeneric +
+                   acttey::ecs::traits::Downcast
             {
                 // *Expand example*
                 // collector.collect_type<CompA>();
                 // collector.collect_type<CompB>();
                 #(#collect_types)*
-                
+
                 #(#insert_downcasters)*
-                
+
                 #(#insert_borrows)*
             }
 
             fn moves(
                 self,
-                collector: &mut Box<dyn acttey::ecs::entity::Collect>,
+                collector: &mut Box<dyn acttey::ecs::traits::Collect>,
                 key: usize
             ) {
+                // For `impl CollectGeneric for dyn Collect`.
+                use acttey::ecs::traits::CollectGeneric;
+
                 collector.begin_collect(key);
 
                 // *Expand example*
@@ -398,8 +416,7 @@ fn unwrap_type_option(ty: &Type) -> Vec<Type> {
     let args = match &segments[0] {
         PathSegment {
             ident,
-            arguments:
-                PathArguments::AngleBracketed(AngleBracketedGenericArguments { args, .. }),
+            arguments: PathArguments::AngleBracketed(AngleBracketedGenericArguments { args, .. }),
         } if ident == "Option" => args,
         // Not an option? Return
         _ => {
@@ -451,10 +468,9 @@ impl Parse for Nth {
 pub fn repeat(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as Repeat);
     let job = input.job;
-    let jobs = (0..input.n).into_iter()
-        .map(|i| {
-            quote! { #job!(#i); }
-        });
+    let jobs = (0..input.n).into_iter().map(|i| {
+        quote! { #job!(#i); }
+    });
 
     quote! { #(#jobs)* }.into()
 }

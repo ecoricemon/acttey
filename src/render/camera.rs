@@ -1,9 +1,9 @@
-use crate::{
-    primitive::constant::radian,
-    primitive::{matrix::Matrix4f, vector::Vector},
+use crate::primitive::{
+    constant::radian,
+    {matrix::Matrix4f, vector::Vector},
 };
 
-pub struct PerspectiveCamera {
+pub(super) struct PerspectiveCamera {
     camera: Vector<f32, 3>,
     at: Vector<f32, 3>,
     up: Vector<f32, 3>,
@@ -18,15 +18,15 @@ pub struct PerspectiveCamera {
 
 impl PerspectiveCamera {
     #[inline]
-    pub(crate) fn new() -> Self {
+    pub(super) fn new() -> Self {
         Default::default()
     }
 
     #[rustfmt::skip]
-    fn look_at(camera: Vector<f32, 3>, at: Vector<f32, 3>, up: Vector<f32, 3>) -> Matrix4f {
-        let forward = (camera - at).make_unit();
-        let right = up.cross_3d(forward).make_unit();
-        let up = forward.cross_3d(right);
+    pub(super) fn look_at(camera: Vector<f32, 3>, at: Vector<f32, 3>, up: Vector<f32, 3>) -> Matrix4f {
+        let forward = (camera - at).unit();
+        let right = up.normal(forward);
+        let up = forward.cross(right);
         Matrix4f::new([
             right.x(), up.x(), forward.x(), 0.0,
             right.y(), up.y(), forward.y(), 0.0,
@@ -36,7 +36,7 @@ impl PerspectiveCamera {
     }
 
     #[rustfmt::skip]
-    fn project(fovy: f32, aspect: f32, near: f32, far: f32) -> Matrix4f {
+    pub(super) fn project(fovy: f32, aspect: f32, near: f32, far: f32) -> Matrix4f {
         let cot_hfovy = 1.0 / (fovy / 2.0).tan();
         let n_f = near - far;
         Matrix4f::new([
@@ -47,7 +47,7 @@ impl PerspectiveCamera {
         ])
     }
 
-    pub fn set_view(
+    pub(super) fn set_view(
         &mut self,
         camera: Option<(f32, f32, f32)>,
         at: Option<(f32, f32, f32)>,
@@ -67,7 +67,7 @@ impl PerspectiveCamera {
         self.view_proj = &self.proj * &self.view;
     }
 
-    pub fn set_proj(
+    pub(super) fn set_proj(
         &mut self,
         fovy: Option<f32>,
         aspect: Option<f32>,
@@ -118,12 +118,4 @@ impl Default for PerspectiveCamera {
             view_proj,
         }
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use wasm_bindgen_test::*;
-    // use super::*;
-
-    wasm_bindgen_test_configure!(run_in_browser);
 }

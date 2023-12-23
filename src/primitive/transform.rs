@@ -1,4 +1,4 @@
-use super::{matrix::Matrix4f, vector::Vector};
+use crate::primitive::{matrix::Matrix4f, vector::Vector};
 
 pub fn translate_x(d: f32) -> Matrix4f {
     Matrix4f::new([

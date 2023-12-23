@@ -1,12 +1,15 @@
-use super::{
-    ckey, ekey,
-    entity::{Collect, CollectGeneric, Component, Downcast, Entity},
-    fkey,
-    query::{Filter, FilterInfo, QueryIter, QueryIterMut},
-    system::SystemInfo,
-    ComponentKey, EntityKey, FilterKey, QueryKey, SystemKey,
+use crate::{
+    ds::sparse_set::SparseSet,
+    ecs::{
+        ckey, ekey, fkey,
+        query::{Filter, FilterInfo, QueryIter, QueryIterMut},
+        system::SystemInfo,
+        traits::{Collect, CollectGeneric, Component, Downcast, Entity},
+        ComponentKey, EntityKey, FilterKey, QueryKey, SystemKey,
+    },
+    ty,
+    util::upcast_slice,
 };
-use crate::{ty, util::upcast_slice, SparseSet};
 use ahash::AHashMap;
 use std::{
     any::{type_name, Any, TypeId},
@@ -40,7 +43,8 @@ pub struct Storage {
     /// Value: Vec<ptr to slice of a collector's piece>, e.g. `AnyVec` as a slice as a ptr.
     query_buffer: AHashMap<FilterKey, Vec<NonNull<[()]>>>,
 
-    //
+    /// A map holding system info.
+    /// Entries will never be removed from the map.
     sinfo: AHashMap<SystemKey, SystemInfo>,
 
     //
@@ -59,7 +63,7 @@ impl Storage {
         self.insert_entity_type::<E, _>(SparseSet::new());
     }
 
-    pub fn insert_default_with_capacity<E: Entity>(&mut self, capacity: usize) {
+    pub fn insert_default_with<E: Entity>(&mut self, capacity: usize) {
         self.insert_entity_type::<E, _>(SparseSet::with_capacity(capacity));
     }
 

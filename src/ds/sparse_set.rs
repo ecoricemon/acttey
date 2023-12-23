@@ -1,12 +1,13 @@
-use super::any_vec::AnyVec;
 use crate::{
-    ecs::entity::{CollectErased, CollectGeneric, CollectNonGeneric, Downcast},
+    ds::vec::AnyVec,
+    ecs::traits::{CollectErased, CollectGeneric, CollectNonGeneric, Downcast},
     ty,
 };
 use ahash::AHashMap;
 use erased_generic_trait::{add_fn_table, generate_fn_table, inject_fn_table};
 use std::{
     any::{Any, TypeId},
+    hash::Hash,
     mem::{swap, zeroed},
     ptr::copy_nonoverlapping,
 };
@@ -370,6 +371,102 @@ impl Downcast for SparseSet {
     }
 }
 
+pub struct MonoSparseSet<K: Eq + Hash + Clone, V> {
+    sparse: AHashMap<K, usize>,
+    dense: Vec<(K, V)>,
+}
+
+impl<K: Eq + Hash + Clone, V> MonoSparseSet<K, V> {
+    pub fn new() -> Self {
+        Self {
+            sparse: AHashMap::new(),
+            dense: Vec::with_capacity(4),
+        }
+    }
+
+    #[inline]
+    pub fn clear(&mut self) {
+        self.sparse.clear();
+        self.dense.clear();
+    }
+
+    #[inline]
+    pub fn contains_key(&self, k: &K) -> bool {
+        self.sparse.contains_key(k)
+    }
+
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.dense.len()
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    pub fn insert(&mut self, k: K, v: V) -> Option<V> {
+        if let Some(index) = self.sparse.get(&k) {
+            let mut item = (k, v);
+            // Safety: `index` is valid.
+            let old = unsafe { self.dense.get_unchecked_mut(*index) };
+            swap(old, &mut item);
+            Some(item.1)
+        } else {
+            self.sparse.insert(k.clone(), self.dense.len());
+            self.dense.push((k, v));
+            None
+        }
+    }
+
+    #[inline]
+    pub fn remove(&mut self, k: &K) -> Option<V> {
+        if let Some(index) = self.sparse.get(&k).cloned() {
+            let old_v = self.dense.swap_remove(index).1;
+            self.sparse.remove(k);
+            if let Some(last) = self.dense.get(index) {
+                unsafe {
+                    *self.sparse.get_mut(&last.0).unwrap_unchecked() = index;
+                }
+            }
+            Some(old_v)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub fn get(&self, k: &K) -> Option<&V> {
+        self.dense.get(*self.sparse.get(k)?).map(|(_, v)| v)
+    }
+
+    #[inline]
+    pub fn get_mut(&mut self, k: &K) -> Option<&mut V> {
+        self.dense.get_mut(*self.sparse.get(k)?).map(|(_, v)| v)
+    }
+
+    #[inline]
+    pub fn keys(&self) -> std::collections::hash_map::Keys<'_, K, usize> {
+        self.sparse.keys()
+    }
+
+    #[inline]
+    pub fn values(&self) -> impl Iterator<Item = &V> {
+        self.dense.iter().map(|(k, v)| v)
+    }
+
+    #[inline]
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
+        self.dense.iter_mut().map(|(k, v)| v)
+    }
+
+    #[inline]
+    pub fn iter(&self) -> std::slice::Iter<'_, (K, V)> {
+        self.dense.iter()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,5 +577,51 @@ mod tests {
         }
         assert_eq!(None, s.get::<SA>(0));
         assert_eq!(None, s.get::<SB>(0));
+    }
+
+    #[wasm_bindgen_test]
+    fn test_monosparseset_insert_remove() {
+        let mut set = MonoSparseSet::new();
+        assert!(set.is_empty());
+
+        let entries = [(0, 'a'), (1, 'b'), (2, 'c'), (3, 'd'), (4, 'e')];
+        for (i, (k, v)) in entries.iter().cloned().enumerate() {
+            set.insert(k, v);
+            assert_eq!(i + 1, set.len());
+            assert_eq!(Some(&v), set.get(&k));
+        }
+
+        let mut entries: Vec<Option<_>> = entries.into_iter().map(|entry| Some(entry)).collect();
+
+        fn check(entries: &Vec<Option<(i32, char)>>, set: &MonoSparseSet<i32, char>) {
+            let (mut keys, mut values) = entries.iter().filter_map(|&entry| entry).fold(
+                (vec![], vec![]),
+                |(mut keys, mut values), (key, value)| {
+                    keys.push(key);
+                    values.push(value);
+                    (keys, values)
+                },
+            );
+            let mut set_keys = set.keys().cloned().collect::<Vec<_>>();
+            let mut set_values = set.values().cloned().collect::<Vec<_>>();
+
+            keys.sort();
+            values.sort();
+            set_keys.sort();
+            set_values.sort();
+
+            assert_eq!(keys, set_keys);
+            assert_eq!(values, set_values);
+        }
+
+        check(&entries, &set);
+
+        let remove_order = [2, 4, 0, 1, 3];
+
+        for i in remove_order {
+            let (k, v) = entries[i].take().unwrap();
+            set.remove(&k);
+            check(&entries, &set);
+        }
     }
 }

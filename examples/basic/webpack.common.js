@@ -1,6 +1,5 @@
 const path = require("path");
 const CopyPlugin = require("copy-webpack-plugin");
-const WasmPackPlugin = require("@wasm-tool/wasm-pack-plugin");
 
 const dist = path.resolve(__dirname, "dist");
 
@@ -18,16 +17,8 @@ module.exports = {
         path.resolve(__dirname, "static")
       ],
     }),
-    new WasmPackPlugin({
-      crateDirectory: __dirname,
-      outName: "wasm-index",
-    }),
   ],
   experiments: {
     asyncWebAssembly: true,
-  },
-  performance: {
-    maxAssetSize: 500000,
-    maxEntrypointSize: 500000,
   }
 };

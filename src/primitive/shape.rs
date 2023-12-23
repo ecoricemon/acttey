@@ -1,10 +1,77 @@
-use super::{
+use crate::primitive::{
     constant::{color, radian},
     mesh::Mesh,
     transform::rotate_y,
     vector::Vector,
     Color, Normal, Position,
 };
+
+pub struct Box {
+    width: f32,
+    height: f32,
+    depth: f32,
+    color: Color,
+}
+
+impl Box {
+    pub fn new(width: f32, height: f32, depth: f32, color: Color) -> Self {
+        Self {
+            width,
+            height,
+            depth,
+            color,
+        }
+    }
+}
+
+impl Default for Box {
+    fn default() -> Self {
+        Box::new(1.0, 1.0, 1.0, color::DEFAULT)
+    }
+}
+
+impl From<[f32; 3]> for Box {
+    fn from(value: [f32; 3]) -> Self {
+        Box::new(value[0], value[1], value[2], color::DEFAULT)
+    }
+}
+
+impl From<Box> for Mesh {
+    fn from(value: Box) -> Self {
+        create_cube(
+            [0.0, 0.0, 0.0].into(),
+            value.width,
+            value.height,
+            value.depth,
+            value.color,
+        )
+    }
+}
+
+// pub struct Plane {
+//     width: f32,
+//     height: f32,
+// }
+
+// impl Plane {
+//     pub fn new(width: f32, height: f32) -> Self {
+//         Self {
+//             width,
+//             height,
+//         }
+//     }
+// }
+
+// impl From<[f32; 2]> for Plane {
+//     fn from(value: [f32; 2]) -> Self {
+//         Plane::new(value[0], value[1])
+//     }
+// }
+
+// impl From<Plane> for Mesh {
+//     fn from(value: Plane) -> Self {
+//     }
+// }
 
 #[derive(Copy, Clone)]
 enum Edge {
@@ -65,6 +132,7 @@ fn sample_icosphere() -> Mesh {
     create_icosphere(0.5, 3, color::DEFAULT)
 }
 
+// TODO: width, height, and calculate normal (other as well)
 // BL, BR, TL, TR
 pub fn create_square(positions: [Position; 4], colors: [Color; 4]) -> Mesh {
     let normal = Normal::from([0.0, 0.0, 1.0]);
@@ -72,7 +140,7 @@ pub fn create_square(positions: [Position; 4], colors: [Color; 4]) -> Mesh {
         .with_position(Vec::from(positions).into())
         .with_normal(vec![normal; 4].into())
         .with_color(Vec::from(colors).into())
-        .with_indices(vec![0, 1, 2, 2, 1, 3])
+        .with_indices(vec![0_u16, 1, 2, 2, 1, 3].into())
 }
 
 pub fn create_circle(center: Vector<f32, 2>, radius: f32, vertices: u32, color: Color) -> Mesh {
@@ -87,7 +155,7 @@ pub fn create_circle(center: Vector<f32, 2>, radius: f32, vertices: u32, color: 
         .collect::<Vec<_>>();
 
     // CCW, Triangle List
-    let indices = (2..n).flat_map(|i| [0, i - 1, i]).collect();
+    let indices: Vec<u16> = (2..n as u16).flat_map(|i| [0, i - 1, i]).collect();
 
     let normal = Normal::from([0.0, 0.0, 1.0]);
 
@@ -95,7 +163,7 @@ pub fn create_circle(center: Vector<f32, 2>, radius: f32, vertices: u32, color: 
         .with_position(positions.into())
         .with_normal(vec![normal; n as usize].into())
         .with_color(vec![color; n as usize].into())
-        .with_indices(indices)
+        .with_indices(indices.into())
 }
 
 pub fn create_cube(
@@ -148,7 +216,7 @@ pub fn create_cube(
     }
 
     // CCW, Triangle List
-    let indices = (0..6)
+    let indices: Vec<u16> = (0..6)
         .map(|i| i * 4)
         .flat_map(|i| [i, i + 1, i + 2, i + 2, i + 1, i + 3])
         .collect();
@@ -157,7 +225,7 @@ pub fn create_cube(
         .with_position(positions.into())
         .with_normal(normals.into())
         .with_color(vec![color; 24].into())
-        .with_indices(indices)
+        .with_indices(indices.into())
 }
 
 pub fn create_icosahedron(
@@ -186,7 +254,7 @@ pub fn create_icosahedron(
         .collect();
 
     // CCW, Triangle List
-    let mut indices = Vec::with_capacity(index_cap.unwrap_or(60));
+    let mut indices: Vec<u16> = Vec::with_capacity(index_cap.unwrap_or(60));
     if index_cap.is_none() {
         indices.resize(60, 0);
         indices[..60].copy_from_slice(&[
@@ -203,7 +271,7 @@ pub fn create_icosahedron(
         .with_position(positions.into())
         .with_normal(normals.into())
         .with_color(colors.into())
-        .with_indices(indices)
+        .with_indices(indices.into())
 }
 
 fn cut_arc_into_pow2(buf: &mut [Position], off: usize, len: usize, si: usize, ei: usize) {
@@ -211,7 +279,7 @@ fn cut_arc_into_pow2(buf: &mut [Position], off: usize, len: usize, si: usize, ei
         return;
     }
     let half = len / 2;
-    buf[off + half] = (buf[si] + buf[ei]).make_unit();
+    buf[off + half] = (buf[si] + buf[ei]).unit();
     cut_arc_into_pow2(buf, off, half, si, off + half);
     cut_arc_into_pow2(buf, off + half + 1, half, off + half, ei);
 }
@@ -295,7 +363,7 @@ pub fn create_icosphere(radius: f32, division: usize, color: Color) -> Mesh {
     let primitive = create_icosahedron(1.0, color, Some(vertex_len), Some(index_len));
     let positions: &Vec<Position> = primitive.get_position().unwrap().into();
     let mut positions = positions.clone();
-    let mut indices = Vec::new();
+    let mut indices: Vec<u16> = Vec::new();
 
     positions.resize(vertex_len, Position::default());
 
@@ -305,14 +373,14 @@ pub fn create_icosphere(radius: f32, division: usize, color: Color) -> Mesh {
     // Divide each face
     fn divide(
         positions: &mut Vec<Position>,
-        indices: &mut Vec<u32>,
+        indices: &mut Vec<u16>,
         f: Face,
         d: usize,
         off: usize,
         len: usize,
     ) {
         if d == 0 {
-            indices.extend(f.v.into_iter().map(|i| i as u32));
+            indices.extend(f.v.into_iter().map(|i| i as u16));
             return;
         }
         let unwrap = |e: Edge| match e {
@@ -387,7 +455,7 @@ pub fn create_icosphere(radius: f32, division: usize, color: Color) -> Mesh {
         .with_position(positions.into())
         .with_normal(normals.into())
         .with_color(colors.into())
-        .with_indices(indices)
+        .with_indices(indices.into())
 }
 
 #[cfg(test)]

@@ -1,0 +1,20 @@
+[package]
+name = "erased-generic-trait"
+description = "Macros for generating trait objects from traits with generic methods"
+repository = "https://github.com/ecoricemon/erased-generic-trait"
+license = "Apache-2.0 OR MIT"
+version = "0.0.4"
+edition = "2021"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+ahash = "0.8.6"
+proc-macro2 = "1.0.69"
+quote = "1.0.33"
+syn = { version = "2.0.38", features = [
+  "full",
+  "extra-traits",
+  "parsing"
+]}

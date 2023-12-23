@@ -1,9 +1,13 @@
 pub mod constant;
+pub mod matrix;
 pub mod mesh;
 pub mod shape;
-pub mod matrix;
 pub mod transform;
 pub mod vector;
+
+pub mod prelude {
+    pub use super::{matrix::Matrix4f, shape, transform};
+}
 
 /// Default position type is Vector<f32, 3>.
 pub type Position = vector::Vector<f32, 3>;

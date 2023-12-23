@@ -1,13 +1,17 @@
 struct UniformData {
     view_proj: mat4x4<f32>,
-    model: mat4x4<f32>,
     mouse_move: vec2<f32>,
     mouse_click: vec2<f32>,
     resolution: vec2<f32>,
     time: f32,
 }
 
+struct UniformModel {
+    model: mat4x4<f32>,
+}
+
 @group(0) @binding(0) var<uniform> uni: UniformData;
+@group(0) @binding(1) var<uniform> uni_model: UniformModel;
 
 struct VertexInput {
     @location(0) point: vec3<f32>,
@@ -23,8 +27,8 @@ struct VertexOutput {
 @vertex
 fn v_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    //out.point = uni.view_proj * uni.model * vec4f(in.point, 1.0);
-    out.point = uni.view_proj * vec4f(in.point, 1.0);
+    out.point = uni.view_proj * uni_model.model * vec4f(in.point, 1.0);
+    //out.point = uni.view_proj * vec4f(in.point, 1.0);
     out.color = in.color;
     return out;
 }

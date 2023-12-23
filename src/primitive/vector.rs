@@ -278,7 +278,7 @@ macro_rules! impl_vector {
 
             #[inline]
             #[must_use]
-            pub fn make_unit(self) -> Self {
+            pub fn unit(self) -> Self {
                 let norm = self.norm_l2();
                 match norm != T::zero() {
                     true => {Self::new($(self.0[$index] / norm),+)},
@@ -300,7 +300,7 @@ macro_rules! impl_vector {
 
             #[inline]
             #[allow(unused)]
-            pub fn cross_3d(self, rhs: Self) -> Self {
+            pub fn cross(self, rhs: Self) -> Self {
                 Self(
                     cross_product_helper!($d,
                         self.0[1] * rhs.0[2] - self.0[2] * rhs.0[1],
@@ -309,6 +309,11 @@ macro_rules! impl_vector {
                         self.0[3]
                     )
                 )
+            }
+
+            #[inline]
+            pub fn normal(self, rhs: Self) -> Self {
+                self.cross(rhs).unit()
             }
 
             #[inline]
@@ -553,7 +558,7 @@ mod tests {
         let (x, y, z) = (1.0, 2.0, 3.0);
         let mut v = V3f32::new(x, y, z);
         let norm = v.norm_l2();
-        let unit_v = v.make_unit();
+        let unit_v = v.unit();
         v.normalize();
         assert!((v.norm_l2() - 1.0).abs() < EPS);
         assert_eq!(V3f32::new(x / norm, y / norm, z / norm), v);

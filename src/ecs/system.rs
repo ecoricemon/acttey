@@ -1,21 +1,30 @@
-use super::{
-    query::{Query, QueryInfo, QueryMut},
-    skey,
-    storage::Storage,
-    ComponentKey, QueryKey,
+use crate::{
+    ds::sparse_set::MonoSparseSet,
+    ecs::{
+        predefined::resource::ResourcePack,
+        query::{Query, QueryInfo, QueryMut, ResQuery, ResQueryMut},
+        skey,
+        storage::Storage,
+        ComponentKey, QueryKey, SystemKey,
+    },
 };
+use std::any::TypeId;
 
 pub trait Invokable {
-    fn invoke(&self, storage: &mut Storage); // Depends on DataPool for object safety.
+    // Depends on DataPool for object safety.
+    fn invoke(&mut self, res_pack: &ResourcePack);
 }
 
-impl<T: System> Invokable for T {
+impl<S: System> Invokable for S {
     #[inline]
-    fn invoke(&self, storage: &mut Storage) {
-        let skey = skey!(T);
+    fn invoke(&mut self, res_pack: &ResourcePack) {
+        let storage = res_pack.get::<Storage>();
+        let skey = skey!(S);
         self.run(
-            <T::Ref as Query>::query(storage, skey),
-            <T::Mut as QueryMut>::query_mut(storage, skey),
+            <S::Ref as Query>::query(storage, skey),
+            <S::Mut as QueryMut>::query_mut(storage, skey),
+            <S::ResRef as ResQuery>::query(res_pack),
+            <S::ResMut as ResQueryMut>::query_mut(res_pack),
         );
         storage.returns(&skey);
     }
@@ -24,8 +33,16 @@ impl<T: System> Invokable for T {
 pub trait System: 'static {
     type Ref: for<'a> Query<'a>;
     type Mut: for<'a> QueryMut<'a>;
+    type ResRef: for<'a> ResQuery<'a>;
+    type ResMut: for<'a> ResQueryMut<'a>;
 
-    fn run(&self, r: <Self::Ref as Query>::Output, m: <Self::Mut as QueryMut>::Output);
+    fn run(
+        &mut self,
+        r: <Self::Ref as Query>::Output,
+        m: <Self::Mut as QueryMut>::Output,
+        rr: <Self::ResRef as ResQuery>::Output,
+        rm: <Self::ResMut as ResQueryMut>::Output,
+    );
 
     fn info() -> SystemInfo {
         let skey = skey!(Self);
@@ -37,6 +54,10 @@ pub trait System: 'static {
             reads: vec![],
             writes: vec![],
         }
+    }
+
+    fn key() -> SystemKey {
+        skey!(Self)
     }
 }
 
@@ -65,3 +86,7 @@ impl<T: System> From<T> for SystemInfo {
         T::info()
     }
 }
+
+/// TODO: Systems should have priority or a sort of order to be runned.
+/// The order must be kept when a supersystem inserts or removes.
+pub type Systems = MonoSparseSet<SystemKey, Box<dyn Invokable>>;

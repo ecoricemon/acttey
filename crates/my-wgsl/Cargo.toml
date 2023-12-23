@@ -1,0 +1,23 @@
+[package]
+name = "my-wgsl"
+description = "Generating WGSL text from rust"
+repository = "https://github.com/ecoricemon/acttey"
+license = "Apache-2.0 OR MIT"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies.smallvec]
+version = "1.11.2"
+
+[dependencies.paste]
+version = "1.0.14"
+
+[dependencies.my-wgsl-macros]
+path = "src/my-wgsl-macros"
+
+[dev-dependencies.pretty_assertions] 
+version = "1.4.0"
+
+[[example]]
+name = "hello"
+crate-type = ["bin"]

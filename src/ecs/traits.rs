@@ -1,9 +1,10 @@
-use super::storage::Storage;
-use crate::ty;
+use crate::{ecs::storage::Storage, ty};
 use erased_generic_trait::erase_generic;
 use std::any::{Any, TypeId};
 
 pub trait Component: 'static {}
+
+pub trait Resource: 'static {}
 
 /// Entity must have distinct components in it.
 /// If you need the same types of data, then define different `Component`s using the types.
@@ -25,8 +26,8 @@ pub trait Entity: 'static {
     fn moves(self, collector: &mut Box<dyn Collect>, key: usize);
 }
 
-// TODO: `Collect` has `ErasedCollectRow` as a supertrait that is object safe,
-// which is declared and implemented by `erased-generic-trait`.
+// TODO: `Collect` has object safe `CollectErased` as a supertrait,
+// which is declared and implemented by `erased-generic-trait` crate.
 // Using that, we can have different types of collectors in a single storage,
 // that means users can define their own collector.
 // But downside of `erased-generic-trait` is performance penalty by a number of indirection.
@@ -76,7 +77,7 @@ pub trait Collect: 'static + CollectErased + CollectNonGeneric {}
 /// Blanket impl of `Collect`.
 impl<T: 'static + CollectErased + CollectNonGeneric> Collect for T {}
 
-/// This helps you to use CollectGeneric's methods on a Box<dyn Collect>.
+/// This allows us to use CollectGeneric's methods on a Box<dyn Collect>.
 /// It's exactly same with the impl by `erased-generic-trait`.
 impl CollectGeneric for dyn Collect {
     #[inline]

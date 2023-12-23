@@ -30,6 +30,18 @@ elif [ "$1" = "clean" ]; then
         rm -rf $wasm_dir
     done
 
+    # Clean other crates
+    echo "=== Cleaning other crate directory... ==="
+    for dir in "crates"/*; do
+        if [ -d "$dir" ] && [ -e "$dir/Cargo.toml" ]; then
+            echo "=== Cleaning $dir... ==="
+            pushd .
+            cd $dir
+            cargo clean
+            popd
+        fi
+    done
+
     # Make npm clean itself
     for dir in "examples"/*; do
         if [ -d "$dir" ] && [ -e "$dir/package.json" ]; then

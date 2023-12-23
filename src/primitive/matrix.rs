@@ -1,8 +1,8 @@
-use super::vector::Vector;
+use crate::primitive::vector::Vector;
 use std::ops;
 
 /// Column major 4x4 f32 matrix.
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Debug, PartialEq)]
 #[repr(transparent)]
 pub struct Matrix4f([f32; 16]);
 
@@ -20,6 +20,11 @@ impl Matrix4f {
     }
 
     #[inline]
+    pub fn set(&mut self, r: usize, c: usize, value: f32) {
+        self.0[Self::index(r, c)] = value;
+    }
+
+    #[inline]
     #[must_use]
     #[rustfmt::skip]
     pub fn transpose(self) -> Self {
@@ -29,6 +34,17 @@ impl Matrix4f {
             self.0[2], self.0[6], self.0[10], self.0[14],
             self.0[3], self.0[7], self.0[11], self.0[15],
         ])
+    }
+
+    #[inline]
+    fn index(r: usize, c: usize) -> usize {
+        r * 4 + c
+    }
+}
+
+impl Default for Matrix4f {
+    fn default() -> Self {
+        Matrix4f::identity()
     }
 }
 
