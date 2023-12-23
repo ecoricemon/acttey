@@ -1,6 +1,6 @@
 [package]
 name = "my-wgsl-macros"
-description = "Generating WGSL text from rust"
+description = "Generating WGSL code from rust"
 repository = "https://github.com/ecoricemon/acttey"
 license = "Apache-2.0 OR MIT"
 version = "0.0.1"
@@ -13,9 +13,4 @@ doctest = false
 [dependencies]
 proc-macro2 = "1.0.69"
 quote = "1.0.33"
-syn = { version = "2.0.38", features = [
-  "full",
-  "extra-traits",
-  "parsing"
-]}
-smallvec = "1.11.2"
+syn = { version = "2.0.38", features = ["full"] }

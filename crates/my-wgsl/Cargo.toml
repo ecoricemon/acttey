@@ -1,6 +1,6 @@
 [package]
 name = "my-wgsl"
-description = "Generating WGSL text from rust"
+description = "Generating WGSL code from rust"
 repository = "https://github.com/ecoricemon/acttey"
 license = "Apache-2.0 OR MIT"
 version = "0.0.1"
