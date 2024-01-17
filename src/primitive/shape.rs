@@ -1,52 +1,10 @@
 use crate::primitive::{
-    constant::{color, radian},
-    mesh::Mesh,
+    constant::radians,
+    mesh::Geometry,
     transform::rotate_y,
     vector::Vector,
     Color, Normal, Position,
 };
-
-pub struct Box {
-    width: f32,
-    height: f32,
-    depth: f32,
-    color: Color,
-}
-
-impl Box {
-    pub fn new(width: f32, height: f32, depth: f32, color: Color) -> Self {
-        Self {
-            width,
-            height,
-            depth,
-            color,
-        }
-    }
-}
-
-impl Default for Box {
-    fn default() -> Self {
-        Box::new(1.0, 1.0, 1.0, color::DEFAULT)
-    }
-}
-
-impl From<[f32; 3]> for Box {
-    fn from(value: [f32; 3]) -> Self {
-        Box::new(value[0], value[1], value[2], color::DEFAULT)
-    }
-}
-
-impl From<Box> for Mesh {
-    fn from(value: Box) -> Self {
-        create_cube(
-            [0.0, 0.0, 0.0].into(),
-            value.width,
-            value.height,
-            value.depth,
-            value.color,
-        )
-    }
-}
 
 // pub struct Plane {
 //     width: f32,
@@ -68,7 +26,7 @@ impl From<Box> for Mesh {
 //     }
 // }
 
-// impl From<Plane> for Mesh {
+// impl From<Plane> for Geometry {
 //     fn from(value: Plane) -> Self {
 //     }
 // }
@@ -91,64 +49,22 @@ struct Face {
     e: [Edge; 3],
 }
 
-/// Samples: "square", "circle", "cube", "sphere"
-pub fn sample(name: &str) -> Mesh {
-    match name {
-        "square" => sample_square(),
-        "circle" => sample_circle(),
-        "cube" => sample_cube(),
-        "sphere" => sample_icosphere(),
-        _ => panic!(),
-    }
-}
-
-fn sample_square() -> Mesh {
-    create_square(
-        [
-            Position::new(-1.0, -1.0, 0.0),
-            Position::new(1.0, -1.0, 0.0),
-            Position::new(-1.0, 1.0, 0.0),
-            Position::new(1.0, 1.0, 0.0),
-        ],
-        [color::BLUE, color::GREEN, color::MAGENTA, color::YELLOW],
-    )
-}
-
-fn sample_circle() -> Mesh {
-    create_circle([0.0, 0.0].into(), 1.0, 64, color::DEFAULT)
-}
-
-fn sample_cube() -> Mesh {
-    create_cube(
-        Vector::<f32, 3>::new(0.0, 0.0, -1.0),
-        2.0,
-        2.0,
-        2.0,
-        color::DEFAULT,
-    )
-}
-
-fn sample_icosphere() -> Mesh {
-    create_icosphere(0.5, 3, color::DEFAULT)
-}
-
 // TODO: width, height, and calculate normal (other as well)
 // BL, BR, TL, TR
-pub fn create_square(positions: [Position; 4], colors: [Color; 4]) -> Mesh {
+pub fn create_square(positions: [Position; 4], colors: [Color; 4]) -> Geometry {
     let normal = Normal::from([0.0, 0.0, 1.0]);
-    Mesh::new()
+    Geometry::new()
         .with_position(Vec::from(positions).into())
         .with_normal(vec![normal; 4].into())
-        .with_color(Vec::from(colors).into())
         .with_indices(vec![0_u16, 1, 2, 2, 1, 3].into())
 }
 
-pub fn create_circle(center: Vector<f32, 2>, radius: f32, vertices: u32, color: Color) -> Mesh {
+pub fn create_circle(center: Vector<f32, 2>, radius: f32, vertices: u32, color: Color) -> Geometry {
     const DEFAULT: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
     let n = vertices.max(3);
     let positions = (0..n)
         .map(|i| {
-            let theta = radian::TAU / n as f32 * i as f32;
+            let theta = radians::TAU / n as f32 * i as f32;
             let (s, c) = theta.sin_cos();
             Position::from_arr_f32([center.x() + radius * c, center.y() + radius * s], DEFAULT)
         })
@@ -159,72 +75,9 @@ pub fn create_circle(center: Vector<f32, 2>, radius: f32, vertices: u32, color: 
 
     let normal = Normal::from([0.0, 0.0, 1.0]);
 
-    Mesh::new()
+    Geometry::new()
         .with_position(positions.into())
         .with_normal(vec![normal; n as usize].into())
-        .with_color(vec![color; n as usize].into())
-        .with_indices(indices.into())
-}
-
-pub fn create_cube(
-    center: Vector<f32, 3>,
-    width: f32,
-    height: f32,
-    depth: f32,
-    color: Color,
-) -> Mesh {
-    const DEFAULT: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
-    let (hw, hh, hd) = (width / 2.0, height / 2.0, depth / 2.0);
-    let fbl = center + Vector::<f32, 3>::new(-hw, -hh, hd);
-    let ref_positions: Vec<Position> = (0..8)
-        .map(|i| {
-            Position::from_vec_f32(
-                fbl + Vector::<f32, 3>::new(
-                    if i & 1 != 0 { width } else { 0.0 },
-                    if i & 2 != 0 { height } else { 0.0 },
-                    if i & 4 != 0 { -depth } else { 0.0 },
-                ),
-                DEFAULT,
-            )
-        })
-        .collect();
-    let ref_normals = [
-        Normal::from_arr_f32([1.0, 0.0, 0.0], DEFAULT), // Right
-        Normal::from_arr_f32([-1.0, 0.0, 0.0], DEFAULT), // Left
-        Normal::from_arr_f32([0.0, 1.0, 0.0], DEFAULT), // Top
-        Normal::from_arr_f32([0.0, -1.0, 0.0], DEFAULT), // Bottom
-        Normal::from_arr_f32([0.0, 0.0, 1.0], DEFAULT), // Front
-        Normal::from_arr_f32([0.0, 0.0, -1.0], DEFAULT), // Rear
-    ];
-    let planes: [[usize; 4]; 6] = [
-        [1, 5, 3, 7],
-        [4, 0, 6, 2],
-        [2, 3, 6, 7],
-        [1, 0, 5, 4],
-        [0, 1, 2, 3],
-        [5, 4, 7, 6],
-    ];
-
-    let mut positions = Vec::with_capacity(24);
-    let mut normals = Vec::with_capacity(24);
-
-    for (ni, plane) in planes.into_iter().enumerate() {
-        for pi in plane {
-            positions.push(ref_positions[pi]);
-            normals.push(ref_normals[ni]);
-        }
-    }
-
-    // CCW, Triangle List
-    let indices: Vec<u16> = (0..6)
-        .map(|i| i * 4)
-        .flat_map(|i| [i, i + 1, i + 2, i + 2, i + 1, i + 3])
-        .collect();
-
-    Mesh::new()
-        .with_position(positions.into())
-        .with_normal(normals.into())
-        .with_color(vec![color; 24].into())
         .with_indices(indices.into())
 }
 
@@ -233,16 +86,16 @@ pub fn create_icosahedron(
     color: Color,
     vertex_cap: Option<usize>,
     index_cap: Option<usize>,
-) -> Mesh {
+) -> Geometry {
     // Reference: https://en.wikipedia.org/wiki/Regular_icosahedron
     let a = 1_f32 / 5_f32.sqrt() * radius;
     let mut coords = Vec::with_capacity(vertex_cap.unwrap_or(12));
     coords.push(Position::new(0.0, 1.0 * radius, 0.0));
     coords.push(Position::new(2.0 * a, a, 0.0));
     for i in 1..=4 {
-        coords.push(&rotate_y(radian::FRAC_TAU_5 * i as f32) * coords[1]);
+        coords.push(&rotate_y(radians::FRAC_TAU_5 * i as f32) * coords[1]);
     }
-    let rot_mat = rotate_y(radian::FRAC_PI_5);
+    let rot_mat = rotate_y(radians::FRAC_PI_5);
     for i in 1..=5 {
         coords.push(&rot_mat * (coords[i] - Position::new(0.0, 2.0 * a, 0.0)));
     }
@@ -265,12 +118,10 @@ pub fn create_icosahedron(
     }
 
     let normals = positions.clone();
-    let colors = vec![color; positions.len()];
 
-    Mesh::new()
+    Geometry::new()
         .with_position(positions.into())
         .with_normal(normals.into())
-        .with_color(colors.into())
         .with_indices(indices.into())
 }
 
@@ -342,7 +193,7 @@ fn cut_icosahedron_edges(
     faces
 }
 
-pub fn create_icosphere(radius: f32, division: usize, color: Color) -> Mesh {
+pub fn create_icosphere(radius: f32, division: usize, color: Color) -> Geometry {
     if division == 0 {
         return create_icosahedron(radius, color, None, None);
     }
@@ -449,19 +300,19 @@ pub fn create_icosphere(radius: f32, division: usize, color: Color) -> Mesh {
         *pos *= radius;
     }
 
-    let colors = vec![color; positions.len()];
-
-    Mesh::new()
+    Geometry::new()
         .with_position(positions.into())
         .with_normal(normals.into())
-        .with_color(colors.into())
         .with_indices(indices.into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::primitive::transform::{rotate_z, scale};
+    use crate::primitive::{
+        transform::{rotate_z, scale},
+        constant::colors,
+    };
     use wasm_bindgen_test::*;
 
     wasm_bindgen_test_configure!(run_in_browser);
@@ -473,7 +324,7 @@ mod tests {
         let center = Vector::<f32, 2>::new(1.0, 2.0);
         let radius = 1.0;
         let vertices = 16;
-        let primitive = create_circle(center, radius, vertices, color::DEFAULT);
+        let primitive = create_circle(center, radius, vertices, colors::DEFAULT);
         let positions: &Vec<Position> = primitive.get_position().unwrap().into();
         assert_eq!(vertices, positions.len() as u32);
         assert!(positions
@@ -508,7 +359,7 @@ mod tests {
             for exp_v in expect.iter_mut() {
                 *exp_v = &scale(radius, radius, radius) * (*exp_v);
             }
-            let primitive = create_icosahedron(radius, color::DEFAULT, None, None);
+            let primitive = create_icosahedron(radius, colors::DEFAULT, None, None);
             let positions: &Vec<Position> = primitive.get_position().unwrap().into();
             let indices = primitive.get_indices();
             assert_eq!(expect.len(), positions.len());
@@ -526,13 +377,13 @@ mod tests {
         for n in [2, 4, 8, 16] {
             let radius = 1.0;
             let mut buf = vec![Position::default(); n + 1];
-            let rot_y = rotate_y(-radian::FRAC_PI_4);
+            let rot_y = rotate_y(-radians::FRAC_PI_4);
             let s = Position::new(radius, 0.0, 0.0);
             let e = Position::new(0.0, radius, 0.0);
             (buf[0], buf[1]) = (&rot_y * s, e);
 
             let mut expect = buf.clone();
-            let theta = radian::FRAC_PI_2 / n as f32;
+            let theta = radians::FRAC_PI_2 / n as f32;
             for i in 1..n {
                 expect[i + 1] = (&(&rot_y * &rotate_z(theta * i as f32)) * s).into();
             }
@@ -554,7 +405,7 @@ mod tests {
             let (seed_len, shared_len) = (V, E * shared_unit);
             let shared_off = seed_len;
             let vertex_len = seed_len + shared_len;
-            let primitive = create_icosahedron(1.0, color::DEFAULT, Some(vertex_len), None);
+            let primitive = create_icosahedron(1.0, colors::DEFAULT, Some(vertex_len), None);
             let positions: &Vec<Position> = primitive.get_position().unwrap().into();
             let mut buf = positions.clone();
 
@@ -600,7 +451,7 @@ mod tests {
             (0.5, 2,  162,  320 * 3),
             (2.0, 2,  162,  320 * 3),
         ] {
-            let primitive = create_icosphere(radius, division, color::DEFAULT);
+            let primitive = create_icosphere(radius, division, colors::DEFAULT);
             let positions: &Vec<Position> = primitive.get_position().unwrap().into();
             let indices = primitive.get_indices();
             assert_eq!(vertex_num, positions.len());

@@ -1,7 +1,10 @@
 use ahash::AHashMap;
-use std::collections::{
-    vec_deque::{Drain, Iter},
-    VecDeque,
+use std::{
+    collections::{
+        vec_deque::{Drain, Iter},
+        VecDeque,
+    },
+    rc::Rc,
 };
 use wasm_bindgen::prelude::*;
 
@@ -54,7 +57,7 @@ impl From<Closure<dyn Fn(web_sys::KeyboardEvent)>> for EventListener {
     }
 }
 
-pub struct Input {
+pub struct EventManager {
     listeners: AHashMap<String, EventListener>,
     resized: VecDeque<u32>,
     mouse: VecDeque<(u32, web_sys::MouseEvent)>,
@@ -62,7 +65,7 @@ pub struct Input {
     command: VecDeque<Command>,
 }
 
-impl Input {
+impl EventManager {
     pub fn new() -> Self {
         Self {
             listeners: AHashMap::new(),
@@ -73,27 +76,33 @@ impl Input {
         }
     }
 
-    pub fn contains_event_listener(&self, id: &str, type_: &str) -> bool {
-        self.listeners.contains_key(&Self::listeners_key(id, type_))
+    pub fn contains_event_listener(&self, selectors: &str, type_: &str) -> bool {
+        self.listeners
+            .contains_key(&Self::listeners_key(selectors, type_))
     }
 
     #[inline(always)]
-    fn listeners_key(id: &str, type_: &str) -> String {
-        format!("{} {}", id, type_)
+    fn listeners_key(selectors: &str, type_: &str) -> String {
+        format!("{} {}", selectors, type_)
     }
 
     pub(crate) fn add_event_listener(
         &mut self,
-        id: &str,
+        selectors: &str,
         type_: &str,
         listener: EventListener,
     ) -> Option<EventListener> {
         self.listeners
-            .insert(Self::listeners_key(id, type_), listener)
+            .insert(Self::listeners_key(selectors, type_), listener)
     }
 
-    pub(crate) fn remove_event_listener(&mut self, id: &str, type_: &str) -> Option<EventListener> {
-        self.listeners.remove(&Self::listeners_key(id, type_))
+    pub(crate) fn remove_event_listener(
+        &mut self,
+        selectors: &str,
+        type_: &str,
+    ) -> Option<EventListener> {
+        self.listeners
+            .remove(&Self::listeners_key(selectors, type_))
     }
 
     #[inline]
@@ -163,7 +172,7 @@ impl Input {
     }
 }
 
-impl Default for Input {
+impl Default for EventManager {
     fn default() -> Self {
         Self::new()
     }

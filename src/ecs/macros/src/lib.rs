@@ -468,7 +468,7 @@ impl Parse for Nth {
 pub fn repeat(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as Repeat);
     let job = input.job;
-    let jobs = (0..input.n).into_iter().map(|i| {
+    let jobs = (0..input.n).map(|i| {
         quote! { #job!(#i); }
     });
 

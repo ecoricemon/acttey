@@ -7,14 +7,13 @@ pub mod util;
 
 pub mod prelude {
     pub use super::{
-        app::prelude::*, ds::prelude::*, ecs::prelude::*, primitive::prelude::*,
+        app::prelude::*, ds::prelude::*, ecs::prelude::*, primitive::prelude::*, render,
         render::prelude::*, util::prelude::*,
     };
 }
 
 // Makes us be able to import like crate::acttey::*.
-#[allow(unused_imports)]
-use crate as acttey;
+extern crate self as acttey;
 
 pub(crate) mod errmsg {
     pub(crate) const WEBSYS_GET_ELEMENT: &str = "failed to get html element";
@@ -22,4 +21,8 @@ pub(crate) mod errmsg {
     pub(crate) const WEBSYS_REQ_ANIMATION: &str = "failed to request animation frame";
     pub(crate) const WEBSYS_ADD_LISTENER: &str = "failed to add event listener";
     pub(crate) const WEBSYS_ADD_ELEMENT: &str = "failed to create element";
+}
+
+std::thread_local! {
+    pub static DUMMY_RC_STR: std::rc::Rc<str> = std::rc::Rc::from("");
 }

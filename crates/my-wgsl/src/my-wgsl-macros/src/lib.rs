@@ -7,17 +7,17 @@ use syn::{
     parse_macro_input,
     punctuated::Punctuated,
     token::{Brace, Paren},
-    Attribute, Expr, FnArg, GenericArgument, Ident, ItemStruct, Lit, MacroDelimiter, Meta,
-    MetaList, Pat, Path, PathArguments, Token, Type, LitStr,
+    Attribute, Expr, FnArg, GenericArgument, Ident, ItemStruct, Lit, LitStr, MacroDelimiter, Meta,
+    MetaList, Pat, Path, PathArguments, Token, Type,
 };
 
 /// Implements `my_wgsl::ToIdent` and `my_wgsl::AsStructure` from literal struct.
-/// 
+///
 /// # Examples
-/// 
+///
 /// ```
 /// use my_wgsl::*;
-/// 
+///
 /// fn foo() {
 ///     let mut builder = Builder::new();
 ///     wgsl_decl_struct_from_str!(
@@ -41,12 +41,12 @@ pub fn wgsl_decl_struct_from_str(item: TokenStream) -> TokenStream {
 }
 
 /// Implements `my_wgsl::ToIdent` and `my_wgsl::AsStructure` for the struct.
-/// 
+///
 /// # Examples
-/// 
+///
 /// ```
 /// use my_wgsl::*;
-/// 
+///
 /// #[wgsl_decl_struct]
 /// struct PointLight {
 ///     position: vec3f,
@@ -91,18 +91,20 @@ pub fn wgsl_decl_struct(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // Implements `my_wgsl::AsStructure`
     let impl_as_structure = quote! {
         impl my_wgsl::ToIdent for #ident {
-            fn maybe_ident() -> &'static str {
-                stringify!(#ident)
+            fn maybe_ident() -> Option<&'static str> {
+                Some(stringify!(#ident))
             }
 
             fn to_ident() -> String {
-                Self::maybe_ident().to_owned()
+                // Safety:: Infallible.
+                unsafe { Self::maybe_ident().unwrap_unchecked().to_owned() }
             }
         }
 
         impl my_wgsl::AsStructure for #ident {
             fn as_structure() -> my_wgsl::Structure {
-                let ident = Self::maybe_ident();
+                // Safety: Infallible.
+                let ident = unsafe { Self::maybe_ident().unwrap_unchecked() };
                 let mut members = smallvec::smallvec![];
                 #(
                     let attrs = my_wgsl::Attributes(smallvec::smallvec![#(
@@ -131,19 +133,19 @@ pub fn wgsl_decl_struct(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Generates `my_wgsl::Function` from the given literal.
-/// 
+///
 /// # Examples
-/// 
+///
 /// ```
 /// use my_wgsl::*;
-/// 
+///
 /// let mut builder = Builder::new();
 /// let f = wgsl_decl_fn_from_str!(
 ///     "
 ///     #[fragment]
 ///     fn fragmentMain(#[location(0)] worldPos : vec3f,
 ///                     #[location(1)] normal : vec3f,
-///                     #[location(2)] uv : vec2f) 
+///                     #[location(2)] uv : vec2f)
 ///     -> #[location(0)] vec4f {
 ///         // Your code
 ///     }
@@ -161,18 +163,18 @@ pub fn wgsl_decl_fn_from_str(item: TokenStream) -> TokenStream {
 }
 
 /// Generates `my_wgsl::Function` from the given code.
-/// 
+///
 /// # Examples
-/// 
+///
 /// ```
 /// use my_wgsl::*;
-/// 
+///
 /// let mut builder = Builder::new();
 /// let f = wgsl_decl_fn!(
 ///     #[fragment]
 ///     fn fragmentMain(#[location(0)] worldPos : vec3f,
 ///                     #[location(1)] normal : vec3f,
-///                     #[location(2)] uv : vec2f) 
+///                     #[location(2)] uv : vec2f)
 ///     -> #[location(0)] vec4f {
 ///         // Your code
 ///     }
@@ -321,10 +323,10 @@ fn impl_others(others: &mut Vec<&String>) -> Vec<TokenStream2> {
 fn attrs_to_string_pairs(attrs: &[Attribute]) -> (Vec<String>, Vec<String>) {
     attrs
         .iter()
-        .map(|attr| {
+        .filter_map(|attr| {
             let (mut outer, mut inner) = (String::new(), String::new());
             attribute_to_string_pair(attr, &mut outer, &mut inner);
-            (outer, inner)
+            (!outer.is_empty()).then_some((outer, inner))
         })
         .fold((vec![], vec![]), |mut acc, (outer, inner)| {
             acc.0.push(outer);
@@ -339,7 +341,8 @@ fn attribute_to_string_pair(attr: &Attribute, outer: &mut String, inner: &mut St
     match &attr.meta {
         Meta::Path(path) => path_to_string(path, outer),
         Meta::List(meta_list) => meta_list_to_string_pair(meta_list, outer, inner),
-        Meta::NameValue(..) => panic!("not allowed Meta"),
+        // Comment document belongs to here.
+        Meta::NameValue(..) => {}
     }
 }
 

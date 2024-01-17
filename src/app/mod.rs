@@ -1,8 +1,12 @@
-pub(crate) mod input;
+pub mod event;
+mod r#loop;
 
 use crate::{
-    app::input::{Event, EventListener, Input},
-    ds::refs::RCell,
+    app::event::{Event, EventListener, EventManager},
+    ds::{
+        generational::{GenIndexRc, LabelOrGenIndexRc},
+        refs::RCell,
+    },
     ecs::{
         predefined::resource::{ResourcePack, TimeStamp},
         storage::Storage,
@@ -10,18 +14,30 @@ use crate::{
         traits::Entity,
     },
     primitive::{
+        cameras::Camera,
         matrix::Matrix4f,
-        mesh::{InterleavedVertexInfo, Mesh},
+        mesh::{Geometry, GeometryVar, Material, MeshResource},
     },
-    render::RenderResource,
+    render::{
+        buffer::VertexBufferMeta,
+        canvas::{Canvas, Surface, SurfacePack},
+        descs,
+        pipeline::{PipelineBuilder, PipelineLayoutBuilder},
+        renderer::RenderPass,
+        resource::RenderResource,
+        shaders, IterBindGroupLayout, IterShader, RenderError,
+    },
+    util::{AsBytes, AsMultiBytes, OptionStr},
 };
-use std::rc::Rc;
-use my_wgsl::wgsl_decl_struct;
+use ahash::AHashMap;
+use std::{borrow::Borrow, rc::Rc};
 use wasm_bindgen::prelude::*;
-use web_sys::Performance;
+// use web_sys::Performance;
+
+use self::r#loop::Loop;
 
 pub mod prelude {
-    pub use super::{input::Input, App};
+    pub use super::{event::EventManager, App};
 }
 
 #[repr(C)]
@@ -30,106 +46,95 @@ struct UniformData {
     view_proj: Matrix4f,
 }
 
+struct AppStateEach<'a> {
+    storage: &'a mut Storage,
+    systems: &'a mut Systems,
+    super_systems: &'a mut Vec<Box<dyn Invokable>>,
+    render: &'a mut RenderResource,
+    meshes: &'a mut MeshResource,
+    cameras: &'a mut AHashMap<Rc<str>, Camera>,
+}
+
 struct AppState {
     storage: Storage,
     systems: Systems,
     super_systems: Vec<Box<dyn Invokable>>,
     render: RenderResource,
+    meshes: MeshResource,
+    cameras: AHashMap<Rc<str>, Camera>,
 }
 
 impl AppState {
-    fn new(
-        storage: Storage,
-        systems: Systems,
-        render: RenderResource,
-        super_systems: Vec<Box<dyn Invokable>>,
-    ) -> Self {
+    async fn new() -> Self {
         Self {
-            storage,
-            systems,
-            super_systems,
-            render,
+            storage: Storage::new(),
+            systems: Systems::new(),
+            super_systems: Vec::new(),
+            render: RenderResource::new().await.unwrap(),
+            meshes: MeshResource::new(),
+            cameras: AHashMap::new(),
         }
     }
 
-    fn each(
-        &mut self,
-    ) -> (
-        &mut Storage,
-        &mut Systems,
-        &mut Vec<Box<dyn Invokable>>,
-        &mut RenderResource,
-    ) {
-        (
-            &mut self.storage,
-            &mut self.systems,
-            &mut self.super_systems,
-            &mut self.render,
-        )
+    #[inline]
+    fn each(&mut self) -> AppStateEach {
+        AppStateEach {
+            storage: &mut self.storage,
+            systems: &mut self.systems,
+            super_systems: &mut self.super_systems,
+            render: &mut self.render,
+            meshes: &mut self.meshes,
+            cameras: &mut self.cameras,
+        }
     }
 }
 
 pub struct App {
-    input: RCell<Input>,
-    meshes: Vec<(Mesh, InterleavedVertexInfo)>,
+    ev_mgr: RCell<EventManager>,
     state: RCell<AppState>,
-    perf: Rc<Performance>,
+    main_loop: RCell<Loop>,
+    // perf: Rc<Performance>,
 }
 
 impl App {
     pub async fn new() -> Self {
         set_panic_hook();
 
-        let input = Input::new();
-        let meshes = vec![];
-
-        let storage = Storage::new();
-        let systems = Systems::new();
-        let render = RenderResource::new(None, None).await.unwrap();
-        let super_systems = vec![];
-        let state = AppState::new(storage, systems, render, super_systems);
-
-        let perf = crate::util::get_window()
-            .performance()
-            .expect_throw(crate::errmsg::WEBSYS_GET_PERFORMANCE);
+        let ev_mgr = EventManager::new();
+        let state = AppState::new().await;
+        let main_loop = Loop::new();
+        // let perf = crate::util::get_window()
+        //     .performance()
+        //     .expect_throw(crate::errmsg::WEBSYS_GET_PERFORMANCE);
 
         Self {
-            input: RCell::new(input).with_tag("input"),
-            meshes,
-            state: RCell::new(state),
-            perf: Rc::new(perf),
+            ev_mgr: RCell::new(ev_mgr).with_tag("ev_mgr"),
+            state: RCell::new(state).with_tag("state"),
+            main_loop: RCell::new(main_loop).with_tag("main_loop"),
+            // perf: Rc::new(perf),
         }
     }
 
-    /// Inserts a canvas having the given `id`.
-    /// Returns canvas handle, which starts from 1 and always increases whenever you insert.
-    pub fn register_canvas(&mut self, id: &str) -> u32 {
-        self.state.borrow_mut().render.register_canvas(id)
+    /// Finds out the first canvas using the given CSS selectors and registers the canvas.
+    pub fn add_canvas(&mut self, selectors: &str) -> CanvasReturn {
+        let ret = self.state.borrow_mut().render.add_canvas(selectors);
+        CanvasReturn { app: self, ret }
     }
 
-    pub fn unregister_canvas(&mut self, id: &str) {
-        self.state.borrow_mut().render.unregister_canvas(id)
-    }
-
-    pub fn register_entity<E: Entity>(&mut self) -> &mut Self {
-        self.state.borrow_mut().storage.insert_default::<E>();
-        self
-    }
-
-    pub fn insert_entity(&mut self, key: usize, ent: impl Entity) -> &mut Self {
-        self.state.borrow_mut().storage.insert_entity(key, ent);
-        self
-    }
-
-    pub fn register_system<S: System>(&mut self, sys: S) -> &mut Self {
+    /// Adds a system.
+    pub fn add_system<S: System>(&mut self, system: S) -> &mut Self {
         let skey = S::key();
         let sinfo = S::info();
-        self.state.borrow_mut().systems.insert(skey, Box::new(sys));
+        self.state
+            .borrow_mut()
+            .systems
+            .insert(skey, Box::new(system));
         self.state.borrow_mut().storage.insert_sinfo(skey, sinfo);
         self
     }
 
-    pub fn register_super_system<S: System>(&mut self, sys: S) -> &mut Self {
+    /// Adds a super system.
+    pub fn add_super_system<S: System>(&mut self, sys: S) -> &mut Self {
         let skey = S::key();
         let sinfo = S::info();
         self.state.borrow_mut().super_systems.push(Box::new(sys));
@@ -137,68 +142,249 @@ impl App {
         self
     }
 
-    pub fn insert_mesh(&mut self, mesh: Mesh) -> usize {
-        // Test Uniform data.
-        let uniform = UniformData {
-            view_proj: Default::default(),
-        };
-
-        let wgsl;
-        {
-            use my_wgsl::*;
-            let mut builder = Builder::new();
-
-            #[wgsl_decl_struct]
-            struct UniformData {
-                view_proj: mat4x4<f32>,
-            }
-
-            #[wgsl_decl_struct]
-            struct VertexInput {
-                #[location(0)] point: vec3<f32>,
-                #[location(1)] normal: vec3<f32>,
-                #[location(2)] color: vec4<f32>,
-            }
-
-            #[wgsl_decl_struct]
-            struct VertexOutput {
-                #[builtin(position)] point: vec4<f32>,
-                #[location(1)] color: vec4<f32>
-            }
-
-            wgsl_structs!(builder, UniformData, VertexInput, VertexOutput);
-
-            wgsl_bind!(builder, group(0) binding(0) var<uniform> uni : UniformData);
-
-            wgsl_fn!(builder,
-                #[vertex]
-                fn v_main(input: VertexInput) -> VertexOutput {
-                    var output: VertexOutput;
-                    output.point = uni.view_proj * vec4f(input.point, 1.0);
-                    output.color = input.color;
-                    return output;
-                }
-            );
-
-            wgsl_fn!(builder,
-                #[fragment]
-                fn f_main(input: VertexOutput) -> #[location(0)] vec4<f32> {
-                    return input.color;
-                }
-            );
-
-            wgsl = builder.build();
+    /// Adds a list of events.  
+    /// Please refer to [`Self::add_listen_event()`] for more details.
+    pub fn add_listen_events<'a>(
+        &mut self,
+        selectors: &str,
+        event_types: impl Iterator<Item = &'a str>,
+    ) -> &mut Self {
+        for event_type in event_types {
+            self.add_listen_event(selectors, event_type);
         }
-        
-        // Render resource
+        self
+    }
+
+    /// Finds out the first element using the given CSS selectors and
+    /// tells the app to listen to `event_type` event.
+    /// Use empty string selectors to designate window itself.  
+    ///
+    /// Events are stacked in a queue, and you can use them in systems,
+    /// but they won't be consumed automatically.
+    /// So that it's recommended to add `system::ClearInput` system
+    /// to clean unused input events on a frame basis.
+    pub fn add_listen_event(&mut self, selectors: &str, event_type: &str) -> &mut Self {
+        let ev_mgr = RCell::clone(&self.ev_mgr);
+        let handle = self
+            .state
+            .borrow()
+            .render
+            .get_canvas(selectors)
+            .map(|canvas| canvas.handle())
+            .unwrap_or(0);
+
+        macro_rules! helper {
+            ("resize") => {{
+                self.add_noarg_event_listener(selectors, event_type, move || {
+                    ev_mgr.borrow_mut().push(Event::Resized(handle));
+                });
+            }};
+            ("mouse") => {{
+                self.add_mouse_event_listener(
+                    selectors,
+                    event_type,
+                    move |event: web_sys::MouseEvent| {
+                        ev_mgr.borrow_mut().push((handle, event).into());
+                    },
+                );
+            }};
+            ("keyboard") => {{
+                self.add_keyboard_event_listener(
+                    selectors,
+                    event_type,
+                    move |event: web_sys::KeyboardEvent| {
+                        ev_mgr.borrow_mut().push((handle, event).into());
+                    },
+                );
+            }};
+            ($($t:tt)*) => {
+                Unreachable
+            };
+        }
+
+        match event_type {
+            "resize" => helper!("resize"),
+            "click" => helper!("mouse"),
+            "mousemove" => helper!("mouse"),
+            "keydown" => helper!("keyboard"),
+            "keyup" => helper!("keyboard"),
+            _ => panic!("Unsupported event type {}", event_type),
+        }
+
+        self
+    }
+
+    #[inline]
+    pub fn add_geometry<'a, 'b: 'a>(
+        &'a mut self,
+        label: impl Into<OptionStr<'b>>,
+        geo: impl Into<Geometry>,
+    ) -> GeometryReturn {
+        let label = label.into().as_rc_str();
+        let index = self
+            .state
+            .borrow_mut()
+            .meshes
+            .add_geometry(label.as_ref(), GeometryVar::from(Box::new(geo.into())));
+        GeometryReturn {
+            app: self,
+            ret: (label, index),
+        }
+    }
+
+    #[inline]
+    pub fn add_material<'a, 'b: 'a>(
+        &'a mut self,
+        label: impl Into<OptionStr<'b>>,
+        mat: impl Into<Material>,
+    ) -> MaterialReturn {
+        let label = label.into().as_rc_str();
+        let index = self
+            .state
+            .borrow_mut()
+            .meshes
+            .add_material(label.as_ref(), mat);
+        MaterialReturn {
+            app: self,
+            ret: (label, index),
+        }
+    }
+
+    /// # Panics
+    ///
+    /// Panics if `label` is empty.
+    #[inline]
+    pub fn add_mesh<'a, 'b, S1: Borrow<str> + 'a, S2: Borrow<str> + 'b>(
+        &mut self,
+        label: &str,
+        geo: impl Into<LabelOrGenIndexRc<'a, S1>>,
+        mat: impl Into<LabelOrGenIndexRc<'b, S2>>,
+    ) -> MeshReturn {
+        let label: Rc<str> = label.into();
+        let ret = self.state.borrow_mut().meshes.add_mesh(&label, geo, mat);
+        MeshReturn { app: self, ret }
+    }
+
+    #[inline]
+    pub fn add_camera<'a, 'b: 'a>(
+        &'a mut self,
+        label: &'b str,
+        camera: impl Into<Camera>,
+    ) -> CameraReturn {
+        let label1: Rc<str> = label.into();
+        let label2 = Rc::clone(&label1);
         self.state
             .borrow_mut()
-            .render
-            .example(uniform, &wgsl, "v_main", "f_main", mesh.clone());
+            .cameras
+            .insert(label1, camera.into());
+        CameraReturn {
+            app: self,
+            ret: label2,
+        }
+    }
 
-        let vertex_info = mesh.create_interleaved_vertex_info();
-        self.meshes.push((mesh, vertex_info));
-        self.meshes.len()
+    // TODO: Improve me. Implement more intelligent way to make it from current settings.
+    pub fn add_basic_shader(&mut self, label: &str) -> &mut Self {
+        use shaders::basic::*;
+
+        let label: Rc<str> = label.into();
+
+        // Constructs a temporary shader builder.
+        let mut builder = my_wgsl::Builder::new();
+        add_camera_struct(&mut builder);
+        add_material_struct(&mut builder);
+        add_vertex_input_struct(&mut builder);
+        add_vertex_output_struct(&mut builder);
+        add_fragment_input_struct(&mut builder);
+        add_fragment_output_struct(&mut builder);
+        add_camera_bind(&mut builder);
+        add_material_bind(&mut builder);
+        add_vertex_stage(&mut builder);
+        add_fragment_stage(&mut builder);
+
+        // Builds and remove the builder.
+        {
+            let render = &mut self.state.borrow_mut().render;
+            let index = render.add_shader_builder(builder);
+            render.build_shader(index, &label);
+            render.remove_shader_builder(index);
+        }
+
+        self
+    }
+
+    // TODO: Improve me. Implement more intelligent way to make it from current settings.
+    pub fn add_basic_pipeline(&mut self, label: &str) -> &mut Self {
+        {
+            let mut state = self.state.borrow_mut();
+            let AppStateEach { render, meshes, .. } = state.each();
+
+            // Constructs a temporary pipeline layout builder.
+            let mut layout_builder = PipelineLayoutBuilder::new();
+            for item in render.iter::<IterBindGroupLayout>() {
+                let layout = item.layout;
+                layout_builder.bind_group_layouts.push(Rc::clone(layout));
+            }
+            // Builds.
+            let layout_index = render.add_pipeline_layout_builder(layout_builder);
+            let layout = render.build_pipeline_layout(layout_index, label);
+
+            // Constructs a temporary pipeline builder.
+            let mut pipeline_builder = PipelineBuilder::new();
+
+            // Sets pipeline layout.
+            pipeline_builder.set_layout(layout);
+
+            // Sets vert and frag shaders.
+            for item in render.iter::<IterShader>() {
+                let shader = item.shader;
+                if shader.entry_point.vert().is_some() {
+                    pipeline_builder.set_vertex_shader(shader);
+                }
+                if shader.entry_point.frag().is_some() {
+                    pipeline_builder.set_fragment_shader(shader);
+                }
+            }
+
+            // Sets interleaved geo.
+            for geo in meshes.iter_geo() {
+                let int_geo = geo.as_interleaved().unwrap();
+                let vert_meta = VertexBufferMeta::from(int_geo);
+                pipeline_builder.vert_meta.push(vert_meta);
+            }
+
+            // Sets the first surf pack.
+            let surf_pack_index = render.surf_packs.iter_occupied_index().next().unwrap();
+            let surf_pack_index = GenIndexRc::from(surf_pack_index);
+            pipeline_builder.set_surface_pack_index(surf_pack_index.clone());
+
+            // Builds.
+            let pipeline_index = render.add_pipeline_builder(pipeline_builder);
+            render.build_pipeline(pipeline_index, label);
+
+            // Removes the temporary builders.
+            render.remove_pipeline_layout_builder(layout_index);
+            render.remove_pipeline_builder(pipeline_index);
+
+            // Render pass.
+            let mut pass = RenderPass::new(&render.gpu, "RenderPass");
+            pass.set_surface_pack_index(surf_pack_index);
+            render.add_render_pass(pass);
+        }
+
+        self
+    }
+
+    // TODO: Update
+    pub fn register_entity<E: Entity>(&mut self) -> &mut Self {
+        self.state.borrow_mut().storage.insert_default::<E>();
+        self
+    }
+
+    // TODO: Update
+    pub fn insert_entity(&mut self, key: usize, ent: impl Entity) -> &mut Self {
+        self.state.borrow_mut().storage.insert_entity(key, ent);
+        self
     }
 
     pub fn run(&mut self) {
@@ -206,18 +392,26 @@ impl App {
         self.state.borrow_mut().storage.invalidate_sinfo();
 
         // Clones to move into the animation loop;
-        let input = RCell::clone(&self.input);
+        let ev_mgr = RCell::clone(&self.ev_mgr);
         let state = RCell::clone(&self.state);
+        let main_loop = RCell::clone(&self.main_loop);
 
         // Loop.
         let mut time_prev = 0.0;
-        let animate_callback = Closure::<dyn FnMut(f64)>::new(move |time: f64| {
+        let callback = Closure::<dyn FnMut(f64)>::new(move |time: f64| {
             // Animation resources.
-            let mut input = input.borrow_mut();
+            let mut ev_mgr = ev_mgr.borrow_mut();
             let mut state = state.borrow_mut();
-            let (storage, systems, super_systems, render) = state.each();
+            let main_loop = main_loop.borrow_mut();
+            let AppStateEach {
+                storage,
+                systems,
+                super_systems,
+                render,
+                ..
+            } = state.each();
             let mut res_pack = ResourcePack {
-                input: &mut input,
+                ev_mgr: &mut ev_mgr,
                 storage,
                 render,
                 time: &mut TimeStamp(time),
@@ -234,94 +428,35 @@ impl App {
             for sys in super_systems.iter_mut() {
                 sys.invoke(&res_pack);
             }
-            // All commands should be processed.
-            debug_assert!(res_pack.input.is_command_empty());
+            // TODO: limit to the size of input.
+            debug_assert!(res_pack.ev_mgr.is_command_empty());
 
             // Requests next frame.
-            render.request_animation_frame();
+            main_loop.request_animation_frame();
+
             time_prev = time;
         });
 
-        let render = &mut self.state.borrow_mut().render;
-        render.register_animation_callback(animate_callback);
-        render.request_animation_frame();
-    }
-
-    pub fn register_events<'a>(
-        &mut self,
-        id: &str,
-        types: impl Iterator<Item = &'a str>,
-    ) -> &mut Self {
-        for type_ in types {
-            self.register_event(id, type_);
-        }
-        self
-    }
-
-    /// You can put empty `id` for window itself (e.g. resize event).
-    /// Otherwise put in proper HTML element `id`.
-    fn register_event(&mut self, id: &str, type_: &str) {
-        let input = RCell::clone(&self.input);
-        let handle = self
-            .state
-            .borrow()
-            .render
-            .get_canvas_handle(id)
-            .unwrap_or(0);
-
-        macro_rules! helper {
-            ("resize") => {{
-                self.add_noarg_event_listener(id, type_, move || {
-                    let mut input = input.borrow_mut();
-                    input.push(Event::Resized(handle));
-                });
-            }};
-            ("mouse") => {{
-                self.add_mouse_event_listener(id, type_, move |event: web_sys::MouseEvent| {
-                    let mut input = input.borrow_mut();
-                    input.push((handle, event).into());
-                });
-            }};
-            ("keyboard") => {{
-                self.add_keyboard_event_listener(
-                    id,
-                    type_,
-                    move |event: web_sys::KeyboardEvent| {
-                        let mut input = input.borrow_mut();
-                        input.push((handle, event).into());
-                    },
-                );
-            }};
-            ($($t:tt)*) => {
-                Unreachable
-            };
-        }
-
-        match type_ {
-            "resize" => helper!("resize"),
-            "click" => helper!("mouse"),
-            "mousemove" => helper!("mouse"),
-            "keydown" => helper!("keyboard"),
-            "keyup" => helper!("keyboard"),
-            _ => panic!("Unsupported event type {}", type_),
-        }
+        let mut main_loop = self.main_loop.borrow_mut();
+        main_loop.set_callback(callback);
+        main_loop.request_animation_frame();
     }
 
     pub fn unregister_events<'a>(
         &mut self,
-        id: &str,
+        selectors: &str,
         types: impl Iterator<Item = &'a str>,
     ) -> &mut Self {
         for type_ in types {
-            self.unregister_event(id, type_);
+            self.unregister_event(selectors, type_);
         }
         self
     }
 
-    fn unregister_event(&mut self, id: &str, type_: &str) {
-        let mut input = self.input.borrow_mut();
-        if let Some(old) = input.remove_event_listener(id, type_) {
-            let element = crate::util::get_element_by_id(id).unwrap();
+    pub fn unregister_event(&mut self, selectors: &str, type_: &str) {
+        let mut ev_mgr = self.ev_mgr.borrow_mut();
+        if let Some(old) = ev_mgr.remove_event_listener(selectors, type_) {
+            let element = crate::util::get_element_by_id(selectors).unwrap();
             let _ = match old {
                 EventListener::NoArg(listener) => element
                     .remove_event_listener_with_callback(type_, listener.as_ref().unchecked_ref()),
@@ -333,55 +468,224 @@ impl App {
         }
     }
 
-    fn add_noarg_event_listener(&mut self, id: &str, type_: &str, f: impl Fn() + 'static) {
+    fn add_noarg_event_listener(&mut self, selectors: &str, type_: &str, f: impl Fn() + 'static) {
         let listener = Closure::<dyn Fn()>::new(f);
-        self.add_event_listner(id, type_, listener.as_ref().unchecked_ref());
+        self.add_event_listner(selectors, type_, listener.as_ref().unchecked_ref());
 
-        self.input
+        self.ev_mgr
             .borrow_mut()
-            .add_event_listener(id, type_, listener.into());
+            .add_event_listener(selectors, type_, listener.into());
     }
 
     fn add_mouse_event_listener(
         &mut self,
-        id: &str,
+        selectors: &str,
         type_: &str,
         f: impl Fn(web_sys::MouseEvent) + 'static,
     ) {
         let listener = Closure::<dyn Fn(web_sys::MouseEvent)>::new(f);
-        self.add_event_listner(id, type_, listener.as_ref().unchecked_ref());
+        self.add_event_listner(selectors, type_, listener.as_ref().unchecked_ref());
 
-        self.input
+        self.ev_mgr
             .borrow_mut()
-            .add_event_listener(id, type_, listener.into());
+            .add_event_listener(selectors, type_, listener.into());
     }
 
     fn add_keyboard_event_listener(
         &mut self,
-        id: &str,
+        selectors: &str,
         type_: &str,
         f: impl Fn(web_sys::KeyboardEvent) + 'static,
     ) {
         let listener = Closure::<dyn Fn(web_sys::KeyboardEvent)>::new(f);
-        self.add_event_listner(id, type_, listener.as_ref().unchecked_ref());
+        self.add_event_listner(selectors, type_, listener.as_ref().unchecked_ref());
 
-        self.input
+        self.ev_mgr
             .borrow_mut()
-            .add_event_listener(id, type_, listener.into());
+            .add_event_listener(selectors, type_, listener.into());
     }
 
-    fn add_event_listner(&mut self, id: &str, type_: &str, listener: &js_sys::Function) {
-        if id.is_empty() {
+    fn add_event_listner(&mut self, selectors: &str, type_: &str, listener: &js_sys::Function) {
+        if selectors.is_empty() {
             let window = crate::util::get_window();
             window
                 .add_event_listener_with_callback(type_, listener)
                 .expect_throw(crate::errmsg::WEBSYS_ADD_LISTENER);
         } else {
-            let element = crate::util::get_element_by_id(id).unwrap();
+            let element = crate::util::query_selector(selectors).unwrap().unwrap();
             element
                 .add_event_listener_with_callback(type_, listener)
                 .expect_throw(crate::errmsg::WEBSYS_ADD_LISTENER);
         }
+    }
+}
+
+/// Declares and implements a struct for app's return type.
+/// The main purpose of the app's return type is to make a call chain.
+/// This implements [`std::ops::DerefMut`], and it returns the mutable reference of the `App`.
+/// So that it's possible to make a chain of calls on the app.
+macro_rules! decl_app_return {
+    ($id:ident, $ret_type:ty $(,$life:lifetime)?) => {
+        pub struct $id<'a $(,$life)?> {
+            pub app: &'a mut App,
+            pub ret: $ret_type,
+        }
+
+        impl<'a $(,$life)?> std::ops::Deref for $id<'a $(,$life)?> {
+            type Target = App;
+
+            fn deref(&self) -> &Self::Target {
+                self.app
+            }
+        }
+
+        impl<'a $(,$life)?> std::ops::DerefMut for $id<'a $(,$life)?> {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                self.app
+            }
+        }
+    };
+}
+
+decl_app_return!(CanvasReturn, Result<Rc<Canvas>, RenderError>);
+decl_app_return!(GeometryReturn, (Option<Rc<str>>, Option<GenIndexRc>));
+decl_app_return!(MaterialReturn, (Option<Rc<str>>, Option<GenIndexRc>));
+decl_app_return!(MeshReturn, bool);
+decl_app_return!(CameraReturn, Rc<str>);
+
+impl<'a> CanvasReturn<'a> {
+    /// Creates a default `Surface` and a `SurfacePack` from the canvas.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the canvas is not Ok.
+    pub fn with_default(self) -> &'a mut App {
+        let Self { app, ret } = self;
+        {
+            // Creates a default surface.
+            let canvas = ret.unwrap();
+            let render = &mut app.state.borrow_mut().render;
+            let surface = Surface::default(
+                &render.context.instance,
+                &render.context.adapter,
+                &render.gpu.device,
+                &canvas,
+            );
+            let index = render.add_surface(surface);
+
+            // Creates a default surface pack.
+            let mut surf_pack = SurfacePack::new();
+            surf_pack.add_surface_index(Some(index));
+            render.add_surface_pack(surf_pack);
+        }
+        app
+    }
+}
+
+impl<'a> GeometryReturn<'a> {
+    /// Creates default buffers and write the geometery data on the buffers immediately.
+    pub fn with_default(self) -> &'a mut App {
+        let Self { app, ret } = self;
+        {
+            // Gets the returned geometry a bit ago.
+            let mut state = app.state.borrow_mut();
+            let AppStateEach { render, meshes, .. } = state.each();
+            let label;
+            let key = if let Some(index) = &ret.1 {
+                LabelOrGenIndexRc::B(index)
+            } else {
+                label = ret.0.unwrap();
+                LabelOrGenIndexRc::A(label.as_ref())
+            };
+            let geo = meshes.sneak_get_geometry_mut(key).unwrap();
+
+            // Sorts it and creates interleaved geometry.
+            geo.sort();
+            let int_geo = geo.create_interleaved().unwrap();
+
+            // Creates vertex and index buffers.
+            let vert_buf = render.add_vertex_buffer(int_geo.as_bytes(0)).unwrap();
+            let index_buf = render.add_ro_index_buffer(int_geo.as_bytes(1)).unwrap();
+
+            // Makes geometry become buffer with interleaved attributes variant.
+            geo.into_buffer_interleaved(Some(int_geo), [vert_buf, index_buf]);
+        }
+        app
+    }
+
+    pub fn index(self) -> Option<GenIndexRc> {
+        self.ret.1
+    }
+}
+
+impl<'a> MaterialReturn<'a> {
+    /// Creates a default buffer and writes the material data on the buffer immediately.
+    /// Then, creates a bind group for the buffer.
+    pub fn with_default(self) -> &'a mut App {
+        let Self { app, ret } = self;
+        {
+            // Gets the returned material a bit ago.
+            let mut state = app.state.borrow_mut();
+            let AppStateEach { render, meshes, .. } = state.each();
+            let index;
+            let label: Rc<str>;
+            let key = if let Some(i) = ret.1 {
+                index = i;
+                label = index.index.index.to_string().into();
+                LabelOrGenIndexRc::B(&index)
+            } else {
+                label = ret.0.unwrap();
+                LabelOrGenIndexRc::A(label.as_ref())
+            };
+            let mat = meshes.sneak_get_material_mut(key).unwrap();
+
+            // Creates a read-only uniform buffer with the data.
+            let uni_buf = render.add_ro_uniform_buffer(mat.as_bytes()).unwrap();
+
+            // Creates a bind group.
+            let desc = descs::BufferBindDesc {
+                layout_label: Rc::clone(&label),
+                group_label: label,
+                bufs: &[&uni_buf],
+                ..Default::default()
+            };
+            render.add_default_buffer_bind(desc);
+        }
+        app
+    }
+
+    pub fn index(self) -> Option<GenIndexRc> {
+        self.ret.1
+    }
+}
+
+impl<'a> CameraReturn<'a> {
+    /// Creates a default buffer and writes the camera data on the buffer immediately.
+    /// Then, creates a bind group for the buffer.
+    pub fn with_default(self) -> &'a mut App {
+        let Self { app, ret } = self;
+        {
+            // Gets the returned camera a bit ago.
+            let mut state = app.state.borrow_mut();
+            let AppStateEach {
+                render, cameras, ..
+            } = state.each();
+            let cam = cameras.get(&ret).unwrap();
+
+            // Creates a uniform buffer with the data.
+            let uni_buf = render.add_uniform_buffer(cam).unwrap();
+
+            // Creates a bind group.
+            let label = ret;
+            let desc = descs::BufferBindDesc {
+                layout_label: Rc::clone(&label),
+                group_label: label,
+                bufs: &[&uni_buf],
+                ..Default::default()
+            };
+            render.add_default_buffer_bind(desc);
+        }
+        app
     }
 }
 

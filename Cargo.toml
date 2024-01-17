@@ -7,7 +7,7 @@ version = "0.0.0"
 edition = "2021"
 
 [lib]
-crate-type = ["rlib"]
+crate-type = ["cdylib", "rlib"]
 
 [profile.release]
 opt-level = "z"
@@ -63,6 +63,9 @@ version = "1.0.14"
 
 [dependencies.ahash]
 version = "0.8.6"
+
+[dependencies.smallvec]
+version = "1.11.2"
 
 # 0.5.2 is currently compatible with wgpu.
 [dependencies.raw-window-handle]

@@ -1,16 +1,16 @@
 use crate::ecs::traits::Resource;
 use std::{any::TypeId, mem::transmute_copy};
 
-// Exposes `Input` resource.
-pub use crate::app::input::Input;
-impl Resource for Input {}
+// Exposes `EventManager` resource.
+pub use crate::app::event::EventManager;
+impl Resource for EventManager {}
 
 // Exposes `Storage` resource.
 pub use crate::ecs::storage::Storage;
 impl Resource for Storage {}
 
 // Exposes `RenderResource` resource.
-pub use crate::render::RenderResource;
+pub use crate::render::resource::RenderResource;
 impl Resource for RenderResource {}
 
 // Exposes `TimeStamp` resource.
@@ -23,7 +23,7 @@ impl Resource for Systems {}
 
 /// Integrated resources.
 pub struct ResourcePack<'a> {
-    pub(crate) input: &'a mut Input,
+    pub(crate) ev_mgr: &'a mut EventManager,
     pub(crate) storage: &'a mut Storage,
     pub(crate) render: &'a mut RenderResource,
     pub(crate) time: &'a mut TimeStamp,
@@ -36,8 +36,8 @@ impl<'a> ResourcePack<'a> {
         let ty = TypeId::of::<R>();
         // Safety: Type checked.
         unsafe {
-            if ty == TypeId::of::<Input>() {
-                transmute_copy::<&mut Input, _>(&self.input)
+            if ty == TypeId::of::<EventManager>() {
+                transmute_copy::<&mut EventManager, _>(&self.ev_mgr)
             } else if ty == TypeId::of::<Storage>() {
                 transmute_copy::<&mut Storage, _>(&self.storage)
             } else if ty == TypeId::of::<RenderResource>() {

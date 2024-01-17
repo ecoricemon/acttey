@@ -1,17 +1,17 @@
 //! # A crate to generate WGSL text from rust code.
-//! 
+//!
 //! ## When to use
-//! 
+//!
 //! - When you want to compose multiple WGSL pieces into one WGSL text,
 //!   so that you can generate shader module from it.
 //! - When you want to modify WGSL piece such as deletion.
-//! 
+//!
 //! ## Example
-//! 
+//!
 //! ```
 //! // ref: https://www.w3.org/TR/WGSL/
 //! use my_wgsl::*;
-//! 
+//!
 //! #[wgsl_decl_struct]
 //! struct PointLight {
 //!     position: vec3f,
@@ -24,54 +24,53 @@
 //!     point: array<PointLight>,
 //! }
 //!
-//! fn foo() {
-//!     let mut builder = Builder::new();
-//! 
-//!     wgsl_structs![builder, PointLight, LightStorage];
+//! let mut builder = Builder::new();
 //!
-//!     wgsl_bind!(
-//!         builder, group(0) binding(0) var<storage> lights : LightStorage
-//!     );
-//!     wgsl_bind!(
-//!         builder, group(1) binding(0) var baseColorSampler : sampler
-//!     );
-//!     wgsl_bind!(
-//!         builder, group(1) binding(1) var baseColorTexture : texture_2d<f32>
-//!     );
+//! wgsl_structs![builder, PointLight, LightStorage];
 //!
-//!     wgsl_fn!(builder,
-//!         #[fragment]
-//!         fn fragmentMain(#[location(0)] worldPos : vec3f,
-//!                         #[location(1)] normal : vec3f,
-//!                         #[location(2)] uv : vec2f) -> #[location(0)] vec4f {
-//!             // Sample the base color of the surface from a texture.
-//!             let baseColor = textureSample(baseColorTexture, baseColorSampler, uv);
+//! wgsl_bind!(
+//!     builder, group(0) binding(0) var<storage> lights : LightStorage
+//! );
+//! wgsl_bind!(
+//!     builder, group(1) binding(0) var baseColorSampler : sampler
+//! );
+//! wgsl_bind!(
+//!     builder, group(1) binding(1) var baseColorTexture : texture_2d<f32>
+//! );
 //!
-//!             let N = normalize(normal);
-//!             var surfaceColor = vec3f(0);
+//! wgsl_fn!(builder,
+//!     #[fragment]
+//!     fn fragmentMain(#[location(0)] worldPos : vec3f,
+//!                     #[location(1)] normal : vec3f,
+//!                     #[location(2)] uv : vec2f) -> #[location(0)] vec4f {
+//!         // Sample the base color of the surface from a texture.
+//!         let baseColor = textureSample(baseColorTexture, baseColorSampler, uv);
 //!
-//!             // Loop over the scene point lights.
-//!             for (var i = 0u; i < lights.pointCount; ++i) {
-//!                 let worldToLight = lights.point[i].position - worldPos;
-//!                 let dist = length(worldToLight);
-//!                 let dir = normalize(worldToLight);
+//!         let N = normalize(normal);
+//!         var surfaceColor = vec3f(0);
 //!
-//!                 // Determine the contribution of this light to the surface color.
-//!                 let radiance = lights.point[i].color * (1 / pow(dist, 2));
-//!                 let nDotL = max(dot(N, dir), 0);
+//!         // Loop over the scene point lights.
+//!         for (var i = 0u; i < lights.pointCount; ++i) {
+//!             let worldToLight = lights.point[i].position - worldPos;
+//!             let dist = length(worldToLight);
+//!             let dir = normalize(worldToLight);
 //!
-//!                 // Accumulate light contribution to the surface color.
-//!                 surfaceColor += baseColor.rgb * radiance * nDotL;
-//!             }
+//!             // Determine the contribution of this light to the surface color.
+//!             let radiance = lights.point[i].color * (1 / pow(dist, 2));
+//!             let nDotL = max(dot(N, dir), 0);
 //!
-//!             // Return the accumulated surface color.
-//!             return vec4(surfaceColor, baseColor.a);
+//!             // Accumulate light contribution to the surface color.
+//!             surfaceColor += baseColor.rgb * radiance * nDotL;
 //!         }
-//!     );
-//! 
-//!     let wgsl: String = builder.build();
-//!     // You can use `wgsl` to make shader module.
-//! }
+//!
+//!         // Return the accumulated surface color.
+//!         return vec4(surfaceColor, baseColor.a);
+//!         
+//!     }
+//! );
+//!
+//! let wgsl: String = builder.build();
+//! // You can use `wgsl` to make shader module.
 //! ```
 #![allow(non_camel_case_types)]
 
@@ -88,15 +87,15 @@ pub use smallvec;
 const TAB_SIZE: usize = 2;
 
 pub trait ToIdent {
-    fn maybe_ident() -> &'static str {
-        ""
+    fn maybe_ident() -> Option<&'static str> {
+        None
     }
 
     fn to_ident() -> String;
 }
 
 pub trait ToIdentPretty: ToIdent {
-    fn maybe_ident_pretty() -> &'static str {
+    fn maybe_ident_pretty() -> Option<&'static str> {
         Self::maybe_ident()
     }
 
@@ -110,7 +109,7 @@ pub trait PutStr {
 
     fn put_str(&self, buf: &mut String);
 
-    // `to_string() can conflict with ToString, so use another name`
+    // `to_string()` can conflict with ToString, so use another name.
     fn to_str(&self) -> String {
         let mut buf = String::new();
         self.put_str(&mut buf);
@@ -118,6 +117,7 @@ pub trait PutStr {
     }
 }
 
+// Temporary pretty style printer.
 pub trait PutStrPretty: PutStr {
     fn put_ident_pretty(&self, buf: &mut String) {
         self.put_ident(buf)
@@ -183,7 +183,11 @@ impl Builder {
     /// Generates WGSL text with white space.
     pub fn build_pretty(&self) -> String {
         let mut res = String::new();
-        for entry in self.entries.iter().take(self.entries.len().saturating_sub(1)) {
+        for entry in self
+            .entries
+            .iter()
+            .take(self.entries.len().saturating_sub(1))
+        {
             entry.put_str_pretty(&mut res);
             res.push('\n');
         }
@@ -262,15 +266,96 @@ impl Builder {
     /// Inserts a new structure member attribure.
     /// If there was same attribute variant already,
     /// Its inner value is changed with the given `inner`.
-    pub fn insert_structure_member_attribute(&mut self, struct_ident: &str, member_ident: &str, attr_outer: &str, attr_inner: Option<&str>) {
+    pub fn insert_structure_member_attribute(
+        &mut self,
+        struct_ident: &str,
+        member_ident: &str,
+        attr_outer: &str,
+        attr_inner: Option<&str>,
+    ) {
         if let Some(st) = self.get_structure_mut(struct_ident) {
             if let Some(member) = st.get_member_mut(member_ident) {
                 if let Some(i) = member.attrs.find_attribute_partial(attr_outer, attr_inner) {
                     member.attrs.0[i].set_inner(attr_inner.unwrap_or_default());
                 } else {
-                    member.attrs.0.push(Attribute::from((attr_outer, attr_inner.unwrap_or_default())));
+                    member.attrs.0.push(Attribute::from((
+                        attr_outer,
+                        attr_inner.unwrap_or_default(),
+                    )));
                 }
             }
+        }
+    }
+
+    /// Retains only the specified members by the `member_idents` in the struct.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_wgsl::*;
+    ///
+    /// #[wgsl_decl_struct]
+    /// struct VertexInput {
+    ///     #[builtin(vertex_index)] vertexIndex: u32,
+    ///     #[builtin(instance_index)] instanceIndex: u32,
+    ///     #[location(0)] position: vec3<f32>,
+    ///     #[location(1)] normal: vec3<f32>
+    /// }
+    ///
+    /// let mut builder = Builder::new();
+    ///
+    /// // It has initially four members.
+    /// wgsl_structs!(builder, VertexInput);
+    /// assert_eq!(4, builder.get_structure("VertexInput").unwrap().members.len());
+    ///
+    /// // Retains only two members.
+    /// builder.retain_structure_members("VertexInput", &["position", "normal"]);
+    /// assert_eq!(2, builder.get_structure("VertexInput").unwrap().members.len());
+    /// ```
+    pub fn retain_structure_members<'a>(
+        &mut self,
+        struct_ident: &str,
+        member_idents: impl Iterator<Item = &'a str>,
+    ) {
+        if let Some(st) = self.get_structure_mut(struct_ident) {
+            st.retain_members(member_idents);
+        }
+    }
+
+    /// Reorders structure's members along the given `order`.
+    /// Caller should guarantee that all idents in `order` appear only once
+    /// and match with the structure's members.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_wgsl::*;
+    ///
+    /// #[wgsl_decl_struct]
+    /// struct VertexInput {
+    ///     #[location(0)] position: vec3<f32>,
+    ///     #[location(1)] normal: vec3<f32>,
+    ///     #[location(2)] color: vec3<f32>
+    /// }
+    ///
+    /// let mut builder = Builder::new();
+    ///
+    /// wgsl_structs!(builder, VertexInput);
+    ///
+    /// builder.reorder_structure_members("VertexInput", &["normal", "color", "position"]);
+    ///
+    /// let st = builder.get_structure("VertexInput").unwrap();
+    /// assert_eq!("normal", st.members[0].ident);
+    /// assert_eq!("color", st.members[1].ident);
+    /// assert_eq!("position", st.members[2].ident);
+    /// ```
+    pub fn reorder_structure_members<'a>(
+        &mut self,
+        struct_ident: &str,
+        order: impl Iterator<Item = &'a str>,
+    ) {
+        if let Some(st) = self.get_structure_mut(struct_ident) {
+            st.reorder_members(order);
         }
     }
 
@@ -368,12 +453,12 @@ impl Builder {
 
     /// Removes matched statements in the function with the given `fn_ident` name.
     /// Returns removed statements.
-    /// 
+    ///
     /// # Examples
-    /// 
+    ///
     /// ```
     /// use my_wgsl::*;
-    /// 
+    ///
     /// let mut builder = Builder::new();
     /// wgsl_fn!(builder,
     ///     fn foo() {
@@ -385,23 +470,89 @@ impl Builder {
     ///         }
     ///     }
     /// );
-    /// 
+    ///
     /// assert_eq!(2, builder.get_function("foo").unwrap().stmt.stmts.len());
-    /// 
+    ///
     /// // Removes statements that have attribute #[ID(0)]
     /// builder.remove_function_statement("foo", "ID", Some("0"));
     /// assert_eq!(1, builder.get_function("foo").unwrap().stmt.stmts.len());
-    /// 
+    ///
     /// // Removes statements that have attribute #[ID(anything)]
     /// builder.remove_function_statement("foo", "ID", None);
     /// assert_eq!(0, builder.get_function("foo").unwrap().stmt.stmts.len());
     /// ```
-    pub fn remove_function_statement(&mut self, fn_ident: &str, attr_outer: &str, attr_inner: Option<&str>) -> SmallVec<[CompoundStatement; 4]> {
+    pub fn remove_function_statement(
+        &mut self,
+        fn_ident: &str,
+        attr_outer: &str,
+        attr_inner: Option<&str>,
+    ) -> SmallVec<[CompoundStatement; 4]> {
         if let Some(f) = self.get_function_mut(fn_ident) {
-            f.stmt.remove_statement_recur_partial(attr_outer, attr_inner)
+            f.stmt
+                .remove_statement_recur_partial(attr_outer, attr_inner)
         } else {
             smallvec::smallvec![]
         }
+    }
+
+    /// Makes the specified statements bare statements, which don't output curly braces.
+    /// It finds all matching statements recursively even if the inside of matched statement.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_wgsl::*;
+    ///
+    /// let mut builder = Builder::new();
+    /// wgsl_fn!(builder,
+    ///     fn foo() {
+    ///         var color = #[ID(0)] { 0.0; } #[ID(1)] { 1.0; }
+    ///     }
+    /// );
+    ///
+    /// // Removes ID(0) statement and unwrap ID(1) statement.
+    /// builder.remove_function_statement("foo", "ID", Some("0"));
+    /// builder.into_bare_function_statement("foo", "ID", Some("1"));
+    /// assert_eq!(
+    ///     "fn foo(){var color=1.0;}",
+    ///     &builder.build()
+    /// );
+    /// ```
+    pub fn into_bare_function_statement(
+        &mut self,
+        fn_ident: &str,
+        attr_outer: &str,
+        attr_inner: Option<&str>,
+    ) {
+        if let Some(f) = self.get_function_mut(fn_ident) {
+            f.stmt.into_bare_statements_recur(attr_outer, attr_inner);
+        }
+    }
+
+    /// finds out the first function that has vertex attribute.
+    /// if found something, returns its ident, otherwise returns None.
+    pub fn get_vertex_stage_ident(&self) -> Option<&'static str> {
+        self.entries.iter().find_map(|entry| {
+            if let ShaderEntry::Function(f) = entry {
+                if f.attrs.has_attribute(&Attribute::Vertex) {
+                    return Some(f.ident);
+                }
+            }
+            None
+        })
+    }
+
+    /// finds out the first function that has fragment attribute.
+    /// if found something, returns its ident, otherwise returns None.
+    pub fn get_fragment_stage_ident(&self) -> Option<&'static str> {
+        self.entries.iter().find_map(|entry| {
+            if let ShaderEntry::Function(f) = entry {
+                if f.attrs.has_attribute(&Attribute::Fragment) {
+                    return Some(f.ident);
+                }
+            }
+            None
+        })
     }
 }
 
@@ -473,11 +624,11 @@ impl PutStrPretty for ShaderEntry {
 #[derive(Debug)]
 pub struct Structure {
     /// Name of the struct.
-    /// 
+    ///
     /// e.g. struct **Light** { ... }
     pub ident: &'static str,
     /// Structure members.
-    /// 
+    ///
     /// e.g. struct Light { **pos : vec3f**, **color : vec3f** }
     pub members: SmallVec<[StructureMember; 4]>,
 }
@@ -486,6 +637,11 @@ impl Structure {
     /// Retrieves the index of the structure member that has the given name.
     pub fn find_member(&self, ident: &str) -> Option<usize> {
         find_index(self.members.iter(), ident, |member| Some(member.ident))
+    }
+
+    /// Tests if there's the specified member.
+    pub fn has_member(&self, ident: &str) -> bool {
+        self.find_member(ident).is_some()
     }
 
     /// Retrieves the `my_wgsl::StructureMember` that has the given name.
@@ -506,6 +662,80 @@ impl Structure {
     /// If succeeded, returns removed one.
     pub fn remove_member(&mut self, ident: &str) -> Option<StructureMember> {
         self.find_member(ident).map(|i| self.members.remove(i))
+    }
+
+    /// Retains only the members in the given `idents`.
+    pub fn retain_members<'a>(&mut self, mut idents: impl Iterator<Item = &'a str>) {
+        for i in (0..self.members.len()).rev() {
+            if idents.all(|retain| retain != self.members[i].ident) {
+                self.members.remove(i);
+            }
+        }
+    }
+
+    /// Reorders members along the given `order`.
+    /// Caller should guarantee that all idents in `order` appear only once
+    /// and match with this members.
+    pub fn reorder_members<'a>(&mut self, order: impl Iterator<Item = &'a str>) {
+        let mut new_members = SmallVec::with_capacity(self.members.len());
+        for ident in order {
+            let i = self.find_member(ident).unwrap();
+            new_members.push(self.members[i].clone());
+        }
+        self.members = new_members;
+    }
+
+    /// Merges with the given structure.
+    /// Copies all members in the `rhs` and overwrite to this structure.
+    /// Copied and overwritten members are located at the end of this structure members,
+    /// and follow the order shown in `rhs`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_wgsl::*;
+    ///
+    /// #[wgsl_decl_struct]
+    /// struct A {
+    ///     a: f32,
+    ///     b: u32,
+    ///     c: bool,
+    /// }
+    ///
+    /// #[wgsl_decl_struct]
+    /// struct B {
+    ///     b: f32,
+    ///     a: u32,
+    ///     d: f16,
+    /// }
+    ///
+    /// let mut st_a = A::as_structure();
+    /// st_a.merge(&B::as_structure());
+    /// assert_eq!(4, st_a.members.len());
+    /// # assert_eq!("c", st_a.members[0].ident);
+    /// # assert_eq!("bool", st_a.members[0].ty);
+    /// # assert_eq!("b", st_a.members[1].ident);
+    /// # assert_eq!("f32", st_a.members[1].ty);
+    /// # assert_eq!("a", st_a.members[2].ident);
+    /// # assert_eq!("u32", st_a.members[2].ty);
+    /// # assert_eq!("d", st_a.members[3].ident);
+    /// # assert_eq!("f16", st_a.members[3].ty);
+    /// ```
+    pub fn merge(&mut self, rhs: &Structure) {
+        let num = self
+            .members
+            .iter()
+            .filter(|m| !rhs.has_member(m.ident))
+            .count()
+            + rhs.members.len();
+        let mut merged = SmallVec::with_capacity(num);
+        for member in self.members.iter() {
+            if !rhs.has_member(member.ident) {
+                merged.push(member.clone());
+            }
+        }
+        merged.extend(rhs.members.iter().cloned());
+        self.members = merged;
     }
 }
 
@@ -534,18 +764,18 @@ impl PutStrPretty for Structure {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StructureMember {
     /// Attributes of the structure member.
-    /// 
+    ///
     /// e.g. struct VertexInput { **@location(0)** pos : vec3f }
     pub attrs: Attributes,
     /// Name of the structure member.
-    /// 
+    ///
     /// e.g. struct VertexInput { **pos** : vec3f }
     pub ident: &'static str,
     /// Type of the structure member.
-    /// 
+    ///
     /// e.g. struct VertexInput { pos : **vec3f** }
     pub ty: &'static str,
 }
@@ -566,19 +796,19 @@ impl PutStr for StructureMember {
 #[derive(Debug)]
 pub struct GlobalVariable {
     /// Attributes of the global variable.
-    /// 
+    ///
     /// e.g. **group(0)** **binding(0)** var<storage> light : LightStorage.
     pub attrs: Attributes,
     /// Templates of the global variable.
-    /// 
+    ///
     /// e.g. group(0) binding(0) var<**storage**> light : LightStorage.
     pub templates: SmallVec<[String; 2]>,
     /// Name of the global variable.
-    /// 
+    ///
     /// e.g. group(0) binding(0) var<storage> **light** : LightStorage.
     pub ident: &'static str,
     /// Type of the global variable.
-    /// 
+    ///
     /// e.g. group(0) binding(0) var<storage> light : **LightStorage**.
     pub ty: Option<String>,
     /// Expression of the global variable.
@@ -588,12 +818,12 @@ pub struct GlobalVariable {
 impl GlobalVariable {
     /// Generates a new `my_wgsl::GlobalVariable`.
     /// Use `wgsl_global_var` macro for usual cases.
-    /// 
+    ///
     /// # Examples
-    /// 
+    ///
     /// ```
     /// use my_wgsl::*;
-    /// 
+    ///
     /// // Generates @group(0) @binding(0) var<storage> lights : LightStorage;
     /// let var = GlobalVariable::new(
     ///     [("group", 0).into(), ("binding", 0).into()].into_iter(),
@@ -602,7 +832,7 @@ impl GlobalVariable {
     ///     Some("LightStorage"),
     ///     None,
     /// );
-    /// 
+    ///
     /// let mut builder = Builder::new();
     /// builder.push_global_variable(var);
     /// ```
@@ -693,23 +923,23 @@ impl PutStrPretty for GlobalVariable {
 #[derive(Debug)]
 pub struct Function {
     /// Attributes of the function.
-    /// 
+    ///
     /// e.g. **@fragment** fn fragmentMain(...) {...}
     pub attrs: Attributes,
     /// Name of the function.
-    /// 
+    ///
     /// e.g. fn **foo**(...) {...}
     pub ident: &'static str,
     /// Inputs of the function.
-    /// 
+    ///
     /// e.g. fn foo(**input : Input**) {...}
     pub inputs: SmallVec<[FunctionParameter; 4]>,
     /// Output of the function.
-    /// 
+    ///
     /// e.g. fn foo(...) -> **Output** {...}
     pub output: Option<FunctionParameter>,
     /// Statements of the function.
-    /// 
+    ///
     /// e.g. fn foo(...) { **statement; { statement } ...** }
     pub stmt: CompoundStatement,
 }
@@ -773,15 +1003,15 @@ impl PutStrPretty for Function {
 #[derive(Debug)]
 pub struct FunctionParameter {
     /// Attributes of the function parameter.
-    /// 
+    ///
     /// e.g. fn @fragement fragementMain(**@location(0)** pos : vec3f, ...) -> **@location(0)** vec4f {...}
     pub attrs: Attributes,
     /// Name of the function parameter.
-    /// 
+    ///
     /// e.g. fn foo(**name** : vec3f) {...}
     pub ident: Option<&'static str>,
     /// type of the function parameter.
-    /// 
+    ///
     /// e.g. fn foo(name : **vec3f**) -> **vec4f** {...}
     pub ty: &'static str,
 }
@@ -817,7 +1047,7 @@ impl PutStrPretty for FunctionParameter {
 // 9.1. Compound Statement
 // https://www.w3.org/TR/WGSL/#compound-statement-section
 /// Compound statement is a set of statement wrapped with braces, {...}.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CompoundStatement {
     /// Attributes of the statement.
     pub attrs: Attributes,
@@ -911,6 +1141,50 @@ impl CompoundStatement {
         }
         removed
     }
+
+    /// Makes the specified statements bare statements.
+    /// It finds all matching statements recursively even if the inside of matched statement.
+    pub fn into_bare_statements_recur(&mut self, outer: &str, inner: Option<&str>) {
+        for stmt in self.stmts.iter_mut() {
+            match stmt {
+                Statement::Compound(comp_stmt) | Statement::BareCompound(comp_stmt) => {
+                    if comp_stmt.attrs.has_attribute_partial(outer, inner) {
+                        comp_stmt.into_bare_statements_recur(outer, inner);
+                        let mut bare = Statement::BareCompound(comp_stmt.clone());
+                        std::mem::swap(stmt, &mut bare);
+                    } else {
+                        comp_stmt.into_bare_statements_recur(outer, inner);
+                    }
+                }
+                _ => (),
+            }
+        }
+    }
+
+    /// Writes only inner statements without attributes and braces.
+    pub fn put_str_inner(&self, buf: &mut String) {
+        put_str_join(self.stmts.iter(), buf, "", "", "");
+    }
+
+    /// Writes only inner statements without attributes and braces in pretty style.
+    pub fn put_str_pretty_inner(&self, buf: &mut String) {
+        let non_ws = get_last_whitespaces(buf);
+        match buf.chars().nth_back(non_ws) {
+            Some('=') | Some(',') => {
+                popn(buf, non_ws);
+                let indent = get_last_indent(buf);
+                let indent = " ".repeat(indent);
+                put_str_pretty_join(self.stmts.iter().take(1), buf, " ", "", "\n");
+                put_str_pretty_join(self.stmts.iter().skip(1), buf, &indent, "", "");
+            }
+            _ => {
+                let indent = get_last_indent(buf);
+                let indent = " ".repeat(indent);
+                put_str_pretty_join(self.stmts.iter().take(1), buf, "", "", "\n");
+                put_str_pretty_join(self.stmts.iter().skip(1), buf, &indent, "", "");
+            }
+        }
+    }
 }
 
 impl PutStr for CompoundStatement {
@@ -941,11 +1215,14 @@ impl PutStrPretty for CompoundStatement {
 
 // 9.7. Statements Grammar Summary
 // https://www.w3.org/TR/WGSL/#statements-summary
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Statement {
     // Not fully implemented.
     /// Compoud statement is a set of statements wrapped with braces.
     Compound(CompoundStatement),
+    /// Compound statement, but doesn't output attributes and braces.
+    /// It's useful when you assign conditional compound statement to a variable.
+    BareCompound(CompoundStatement),
     /// Currently, all statements without braces belong to this.
     Other(Vec<String>),
 }
@@ -956,6 +1233,7 @@ impl PutStr for Statement {
     fn put_str(&self, buf: &mut String) {
         match self {
             Self::Compound(comp_stmt) => comp_stmt.put_str(buf),
+            Self::BareCompound(comp_stmt) => comp_stmt.put_str_inner(buf),
             Self::Other(others) => {
                 let mut prev = &String::from(".");
                 for cur in others.iter() {
@@ -993,8 +1271,9 @@ impl PutStrPretty for Statement {
         match self {
             Self::Compound(comp_stmt) => {
                 pushn(buf, ' ', TAB_SIZE);
-                comp_stmt.put_str_pretty(buf)
+                comp_stmt.put_str_pretty(buf);
             }
+            Self::BareCompound(comp_stmt) => comp_stmt.put_str_pretty_inner(buf),
             Self::Other(others) => {
                 let mut prev = &String::from(".");
                 for cur in others.iter() {
@@ -1039,12 +1318,12 @@ impl PutStrPretty for Statement {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Default)]
 pub struct Attributes(pub SmallVec<[Attribute; 2]>);
 
 impl Attributes {
     pub fn new() -> Self {
-        Self(smallvec::smallvec![])
+        Self::default()
     }
 
     /// Retrieves the index of the exactly matched attribute.
@@ -1318,7 +1597,7 @@ impl From<&str> for Attribute {
 #[derive(Debug, PartialEq, Default, Clone)]
 pub enum BuiltinValue {
     #[default]
-    VertexIndex,          // Vertex input
+    VertexIndex, // Vertex input
     InstanceIndex,        // Vertex input
     Position,             // Vertex output & Fragment input
     FrontFacing,          // Fragment input
@@ -1378,28 +1657,38 @@ impl From<&str> for BuiltinValue {
 macro_rules! impl_str {
     ($id:ident) => {
         impl ToIdent for $id {
-            fn maybe_ident() -> &'static str {
-                stringify!($id)
+            fn maybe_ident() -> Option<&'static str> {
+                Some(stringify!($id))
             }
 
             fn to_ident() -> String {
-                Self::maybe_ident().to_owned()
+                // Safety: Infallible.
+                unsafe { Self::maybe_ident().unwrap_unchecked().to_owned() }
             }
         }
 
         impl PutStr for $id {
             fn put_ident(&self, buf: &mut String) {
-                buf.push_str(Self::maybe_ident())
+                // Safety: Infallible.
+                unsafe { buf.push_str(Self::maybe_ident().unwrap_unchecked()) }
             }
 
             fn put_str(&self, buf: &mut String) {
-                buf.push_str(Self::maybe_ident())
+                // Safety: Infallible.
+                unsafe { buf.push_str(Self::maybe_ident().unwrap_unchecked()) }
             }
         }
     };
     ($id:ident<$t:ident>) => {
         impl<$t: ToIdent> ToIdent for $id<$t> {
-            // We can't implement maybe_ident()?
+            fn maybe_ident() -> Option<&'static str> {
+                ($t::maybe_ident() == Some(stringify!($t))).then_some(concat!(
+                    stringify!($id),
+                    '<',
+                    stringify!($t),
+                    '>'
+                ))
+            }
 
             fn to_ident() -> String {
                 let mut res = stringify!($id).to_owned();
@@ -1428,7 +1717,7 @@ macro_rules! impl_str {
                 let mut res = stringify!($id).to_owned();
                 res.push('<');
                 res.push_str(&$t::to_ident());
-                if (N != 0) {
+                if (N > 0) {
                     res.push(',');
                     res.push_str(&N.to_string());
                 }
@@ -1549,24 +1838,24 @@ pub struct sampler_comparison;
 impl_str!(sampler_comparison);
 
 /// Helps you to push structs into builder.
-/// 
+///
 /// # Examples
-/// 
+///
 /// ```
 /// use my_wgsl::*;
-/// 
+///
 /// #[wgsl_decl_struct]
 /// struct PointLight {
 ///     position: vec3f,
 ///     color: vec3f,
 /// }
-/// 
+///
 /// #[wgsl_decl_struct]
 /// struct LightStorage {
 ///     pointCount: u32,
 ///     point: array<PointLight>,
 /// }
-/// 
+///
 /// let mut builder = Builder::new();
 /// wgsl_structs![builder, PointLight, LightStorage];
 /// ```
@@ -1578,18 +1867,18 @@ macro_rules! wgsl_structs {
 }
 
 /// Helps you to create a global variable.
-/// 
+///
 /// # Examples
-/// 
+///
 /// ```
 /// use my_wgsl::*;
 /// # #[wgsl_decl_struct]
 /// # struct LightStorage;
-/// 
+///
 /// let var_a = wgsl_global_var!(0, 0, <storage>, lights, LightStorage);
 /// let var_b = wgsl_global_var!(1, 0, <>, baseColorSampler, sampler);
 /// let var_c = wgsl_global_var!(1, 1, <>, baseColorTexture, texture_2d<f32>);
-/// 
+///
 /// let mut builder = Builder::new();
 /// builder.push_global_variable(var_a);
 /// builder.push_global_variable(var_b);
@@ -1633,14 +1922,14 @@ macro_rules! wgsl_global_var {
 }
 
 /// Helps you to push a global variable into builder.
-/// 
+///
 /// # Examples
-/// 
+///
 /// ```
 /// use my_wgsl::*;
 /// # #[wgsl_decl_struct]
 /// # struct LightStorage;
-/// 
+///
 /// let mut builder = Builder::new();
 /// wgsl_bind!(builder, group(0) binding(0) var<storage> lights : LightStorage);
 /// wgsl_bind!(builder, group(1) binding(0) var baseColorSampler : sampler);
@@ -1656,12 +1945,12 @@ macro_rules! wgsl_bind {
 }
 
 /// Helps you to push a function into builder.
-/// 
+///
 /// # Examples
-/// 
+///
 /// ```
 /// use my_wgsl::*;
-/// 
+///
 /// let mut builder = Builder::new();
 /// wgsl_fn!(builder,
 ///     #[fragment]
@@ -1714,13 +2003,13 @@ mod util {
         II: 'a,
         F: FnMut(&II, &mut String),
     {
-        let prev_len = buf.len();
+        let prev = buf.len();
         for item in iter {
             buf.push_str(pre);
             put_fn(item, buf);
             buf.push_str(sep);
         }
-        if prev_len != buf.len() {
+        if buf.len() > prev {
             for _ in 0..sep.len() {
                 buf.pop();
             }
@@ -1768,7 +2057,7 @@ mod util {
     {
         let prev = buf.len();
         put_str_join(iter, buf, "", "", "");
-        if buf.len() != prev {
+        if buf.len() > prev {
             // Safety: `buf` is not empty.
             unsafe {
                 if buf.chars().last().unwrap_unchecked() != ')' {
@@ -1785,7 +2074,7 @@ mod util {
     {
         let prev = buf.len();
         put_str_join(iter, buf, "", " ", "");
-        if buf.len() != prev {
+        if buf.len() > prev {
             buf.push(' ');
         }
     }
@@ -1796,6 +2085,27 @@ mod util {
             .enumerate()
             .find_map(|(i, c)| (c != ' ').then_some(i))
             .unwrap_or_default()
+    }
+
+    pub(super) fn get_last_whitespaces(buf: &str) -> usize {
+        buf.chars()
+            .rev()
+            .enumerate()
+            .find_map(|(i, c)| (!c.is_whitespace()).then_some(i))
+            .unwrap_or_default()
+    }
+
+    pub(super) fn get_last_indent(buf: &str) -> usize {
+        let mut ns: isize = -1;
+        for (i, ch) in buf.chars().rev().enumerate() {
+            if ch == '\n' {
+                return i - (ns + 1) as usize;
+            }
+            if ch != ' ' {
+                ns = i as isize;
+            }
+        }
+        0
     }
 
     pub(super) fn pushn(buf: &mut String, ch: char, n: usize) {

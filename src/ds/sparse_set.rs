@@ -7,6 +7,7 @@ use ahash::AHashMap;
 use erased_generic_trait::{add_fn_table, generate_fn_table, inject_fn_table};
 use std::{
     any::{Any, TypeId},
+    borrow::Borrow,
     hash::Hash,
     mem::{swap, zeroed},
     ptr::copy_nonoverlapping,
@@ -371,6 +372,7 @@ impl Downcast for SparseSet {
     }
 }
 
+#[derive(Debug)]
 pub struct MonoSparseSet<K: Eq + Hash + Clone, V> {
     sparse: AHashMap<K, usize>,
     dense: Vec<(K, V)>,
@@ -421,13 +423,17 @@ impl<K: Eq + Hash + Clone, V> MonoSparseSet<K, V> {
     }
 
     #[inline]
-    pub fn remove(&mut self, k: &K) -> Option<V> {
-        if let Some(index) = self.sparse.get(&k).cloned() {
+    pub fn remove<Q>(&mut self, k: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        if let Some(index) = self.sparse.get(k).cloned() {
             let old_v = self.dense.swap_remove(index).1;
             self.sparse.remove(k);
             if let Some(last) = self.dense.get(index) {
                 unsafe {
-                    *self.sparse.get_mut(&last.0).unwrap_unchecked() = index;
+                    *self.sparse.get_mut(last.0.borrow()).unwrap_unchecked() = index;
                 }
             }
             Some(old_v)
@@ -437,12 +443,20 @@ impl<K: Eq + Hash + Clone, V> MonoSparseSet<K, V> {
     }
 
     #[inline]
-    pub fn get(&self, k: &K) -> Option<&V> {
+    pub fn get<Q>(&self, k: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         self.dense.get(*self.sparse.get(k)?).map(|(_, v)| v)
     }
 
     #[inline]
-    pub fn get_mut(&mut self, k: &K) -> Option<&mut V> {
+    pub fn get_mut<Q>(&mut self, k: &Q) -> Option<&mut V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         self.dense.get_mut(*self.sparse.get(k)?).map(|(_, v)| v)
     }
 
@@ -453,17 +467,23 @@ impl<K: Eq + Hash + Clone, V> MonoSparseSet<K, V> {
 
     #[inline]
     pub fn values(&self) -> impl Iterator<Item = &V> {
-        self.dense.iter().map(|(k, v)| v)
+        self.dense.iter().map(|(_, v)| v)
     }
 
     #[inline]
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
-        self.dense.iter_mut().map(|(k, v)| v)
+        self.dense.iter_mut().map(|(_, v)| v)
     }
 
     #[inline]
     pub fn iter(&self) -> std::slice::Iter<'_, (K, V)> {
         self.dense.iter()
+    }
+}
+
+impl<K: Eq + Hash + Clone, V> Default for MonoSparseSet<K, V> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -605,10 +625,10 @@ mod tests {
             let mut set_keys = set.keys().cloned().collect::<Vec<_>>();
             let mut set_values = set.values().cloned().collect::<Vec<_>>();
 
-            keys.sort();
-            values.sort();
-            set_keys.sort();
-            set_values.sort();
+            keys.sort_unstable();
+            values.sort_unstable();
+            set_keys.sort_unstable();
+            set_values.sort_unstable();
 
             assert_eq!(keys, set_keys);
             assert_eq!(values, set_values);

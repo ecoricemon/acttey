@@ -1,9 +1,38 @@
-use crate::primitive::{
-    constant::radian,
-    {matrix::Matrix4f, vector::Vector},
+use crate::{
+    impl_from_for_enum,
+    primitive::{
+        constant::radians,
+        {matrix::Matrix4f, vector::Vector},
+    },
+    util::AsBytes,
 };
 
-pub(super) struct PerspectiveCamera {
+#[derive(Debug)]
+pub enum Camera {
+    Perspective(PerspectiveCamera),
+    Orthographic(OrthographicCamera),
+}
+
+impl_from_for_enum!(Camera, Perspective, PerspectiveCamera);
+impl_from_for_enum!(Camera, Orthographic, OrthographicCamera);
+
+impl Default for Camera {
+    fn default() -> Self {
+        Camera::Perspective(PerspectiveCamera::default())
+    }
+}
+
+impl<'a> From<&'a Camera> for &'a [u8] {
+    fn from(value: &'a Camera) -> Self {
+        match value {
+            Camera::Perspective(cam) => cam.into(),
+            _ => todo!(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct PerspectiveCamera {
     camera: Vector<f32, 3>,
     at: Vector<f32, 3>,
     up: Vector<f32, 3>,
@@ -18,12 +47,12 @@ pub(super) struct PerspectiveCamera {
 
 impl PerspectiveCamera {
     #[inline]
-    pub(super) fn new() -> Self {
+    pub fn new() -> Self {
         Default::default()
     }
 
     #[rustfmt::skip]
-    pub(super) fn look_at(camera: Vector<f32, 3>, at: Vector<f32, 3>, up: Vector<f32, 3>) -> Matrix4f {
+    pub fn look_at(camera: Vector<f32, 3>, at: Vector<f32, 3>, up: Vector<f32, 3>) -> Matrix4f {
         let forward = (camera - at).unit();
         let right = up.normal(forward);
         let up = forward.cross(right);
@@ -36,7 +65,7 @@ impl PerspectiveCamera {
     }
 
     #[rustfmt::skip]
-    pub(super) fn project(fovy: f32, aspect: f32, near: f32, far: f32) -> Matrix4f {
+    pub fn project(fovy: f32, aspect: f32, near: f32, far: f32) -> Matrix4f {
         let cot_hfovy = 1.0 / (fovy / 2.0).tan();
         let n_f = near - far;
         Matrix4f::new([
@@ -47,7 +76,7 @@ impl PerspectiveCamera {
         ])
     }
 
-    pub(super) fn set_view(
+    pub fn set_view(
         &mut self,
         camera: Option<(f32, f32, f32)>,
         at: Option<(f32, f32, f32)>,
@@ -67,7 +96,7 @@ impl PerspectiveCamera {
         self.view_proj = &self.proj * &self.view;
     }
 
-    pub(super) fn set_proj(
+    pub fn set_proj(
         &mut self,
         fovy: Option<f32>,
         aspect: Option<f32>,
@@ -94,10 +123,10 @@ impl PerspectiveCamera {
 
 impl Default for PerspectiveCamera {
     fn default() -> Self {
-        let camera = [0.0, 0.0, 1.0].into();
-        let at = 0_f32.into();
-        let up = [0.0, 1.0, 0.0].into();
-        let fovy = radian::FRAC_PI_2;
+        let camera = Vector::<f32, 3>::from([0.0, 0.0, 1.0]);
+        let at = Vector::<f32, 3>::from(0.0);
+        let up = Vector::<f32, 3>::from([0.0, 1.0, 0.0]);
+        let fovy = radians::FRAC_PI_2;
         let aspect = 1.0;
         let near = 0.1;
         let far = 10.0;
@@ -118,4 +147,16 @@ impl Default for PerspectiveCamera {
             view_proj,
         }
     }
+}
+
+impl<'a> From<&'a PerspectiveCamera> for &'a [u8] {
+    fn from(value: &'a PerspectiveCamera) -> Self {
+        value.view_proj.as_bytes()
+    }
+}
+
+// TODO: Not implemented yet.
+#[derive(Debug)]
+pub struct OrthographicCamera {
+    pub dummy: PerspectiveCamera,
 }

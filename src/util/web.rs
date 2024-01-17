@@ -38,6 +38,11 @@ pub fn get_element_by_id(id: &str) -> Option<Element> {
     document.get_element_by_id(id)
 }
 
+pub fn query_selector(selectors: &str) -> Result<Option<Element>, JsValue> {
+    let document = get_document();
+    document.query_selector(selectors)
+}
+
 pub fn set_attributes<'a>(
     element: &Element,
     pairs: impl Iterator<Item = (&'a str, &'a str)>,

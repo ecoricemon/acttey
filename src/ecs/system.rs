@@ -8,7 +8,6 @@ use crate::{
         ComponentKey, QueryKey, SystemKey,
     },
 };
-use std::any::TypeId;
 
 pub trait Invokable {
     // Depends on DataPool for object safety.

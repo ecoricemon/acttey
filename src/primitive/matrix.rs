@@ -48,6 +48,12 @@ impl Default for Matrix4f {
     }
 }
 
+impl<'a> From<&'a Matrix4f> for &'a [u8] {
+    fn from(value: &'a Matrix4f) -> Self {
+        bytemuck::cast_slice(std::slice::from_ref(value))
+    }
+}
+
 impl<'a, 'b> ops::Mul<&'b Matrix4f> for &'a Matrix4f {
     type Output = Matrix4f;
 

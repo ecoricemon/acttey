@@ -382,7 +382,7 @@ impl<T: 'static> ChunkVec<T> {
         if self.is_empty() {
             None
         } else {
-            let (r, c) = self.chunk_index(self.len - 1);
+            let (r, _) = self.chunk_index(self.len - 1);
             // Safety: `r` and `c` are valid.
             let last_chunk = unsafe { self.chunks.get_unchecked_mut(r) };
 
@@ -463,7 +463,7 @@ pub struct ChunkVecIter<'a, T: 'static> {
 }
 
 impl<'a, T> ChunkVecIter<'a, T> {
-    fn new(data: &'a ChunkVec<T>) -> Self {
+    pub fn new(data: &'a ChunkVec<T>) -> Self {
         Self { data, index: 0 }
     }
 }
@@ -484,7 +484,7 @@ pub struct ChunkVecIterMut<'a, T: 'static> {
 }
 
 impl<'a, T> ChunkVecIterMut<'a, T> {
-    fn new(data: &'a mut ChunkVec<T>) -> Self {
+    pub fn new(data: &'a mut ChunkVec<T>) -> Self {
         Self { data, index: 0 }
     }
 }

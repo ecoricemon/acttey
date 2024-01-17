@@ -5,6 +5,7 @@ pub trait DepKey: PartialEq + Eq + Hash + Clone {}
 
 impl<T: PartialEq + Eq + Hash + Clone> DepKey for T {}
 
+#[derive(Debug)]
 pub struct DepNode<K: DepKey> {
     children: AHashSet<K>,
     rc: usize,
@@ -20,6 +21,7 @@ impl<K: DepKey> DepNode<K> {
     }
 }
 
+#[derive(Debug)]
 pub struct DepGraph<K: DepKey> {
     nodes: AHashMap<K, DepNode<K>>,
 }
@@ -97,6 +99,12 @@ impl<K: DepKey> DepGraph<K> {
                 }
             }
         }
+    }
+}
+
+impl<K: DepKey> Default for DepGraph<K> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

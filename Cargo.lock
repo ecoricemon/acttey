@@ -15,6 +15,7 @@ dependencies = [
  "my-wgsl",
  "paste",
  "raw-window-handle",
+ "smallvec",
  "thiserror",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -576,7 +577,7 @@ dependencies = [
 
 [[package]]
 name = "my-wgsl"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "my-wgsl-macros",
  "paste",

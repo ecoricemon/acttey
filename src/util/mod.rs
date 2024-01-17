@@ -2,15 +2,19 @@
 
 use std::{
     mem::{size_of, transmute},
+    ops::{Deref, DerefMut},
+    rc::Rc,
     thread,
 };
 
 pub mod macros;
 pub mod web;
 pub use web::*;
+pub mod wgpu;
+pub use wgpu::*;
 
 pub mod prelude {
-    pub use crate::log;
+    pub use crate::{log, ty};
 }
 
 use std::mem::{transmute_copy, MaybeUninit};
@@ -89,7 +93,7 @@ pub(crate) fn split<T, const N: usize>(mut v: &[T], mut indices: [usize; N]) -> 
         indices[i] -= indices[i - 1] + 1;
     }
 
-    // Safety: We're going to initialze right after.
+    // Safety: We're going to initialze right away.
     let mut arr: [MaybeUninit<&T>; N] = unsafe { MaybeUninit::uninit().assume_init() };
 
     for (i, mid) in indices.into_iter().enumerate() {
@@ -121,7 +125,7 @@ pub(crate) fn split_mut<T, const N: usize>(
         indices[i] -= indices[i - 1] + 1;
     }
 
-    // Safety: We're going to initialze right after.
+    // Safety: We're going to initialze right away.
     let mut arr: [MaybeUninit<&mut T>; N] = unsafe { MaybeUninit::uninit().assume_init() };
 
     for (i, mid) in indices.into_iter().enumerate() {
@@ -134,4 +138,98 @@ pub(crate) fn split_mut<T, const N: usize>(
     // Safety: Everything is initialized and type is correct.
     // I don't know why we can't use transmute here?
     unsafe { transmute_copy::<_, _>(&arr) }
+}
+
+pub(crate) fn concat_string(l: &str, r: &str) -> String {
+    let mut s = String::with_capacity(l.len() + r.len());
+    s.push_str(l);
+    s.push_str(r);
+    s
+}
+
+pub(crate) fn concat_opt_string(l: Option<&str>, r: &str) -> Option<String> {
+    l.map(|l| concat_string(l, r))
+}
+
+pub enum AorB<AA, BB> {
+    A(AA),
+    B(BB),
+}
+
+/// It's same with Into<&\[u8\>.
+/// Structs that implements Into<&\[u8\]> also implements this automatically.
+pub trait AsBytes {
+    fn as_bytes(&self) -> &[u8];
+}
+
+/// Blanket impl.
+impl<T> AsBytes for T
+where
+    for<'a> &'a T: Into<&'a [u8]>,
+{
+    #[inline]
+    fn as_bytes(&self) -> &[u8] {
+        self.into()
+    }
+}
+
+pub trait AsMultiBytes {
+    fn as_bytes(&self, index: usize) -> &[u8];
+}
+
+/// A wrapper of `Option<&str>`. Empty string is considered as None.
+/// This is interchangable with `Option<&str>` and `&str` using [`From::from()`] or [`Into::into()`].
+pub struct OptionStr<'a>(Option<&'a str>);
+
+impl<'a> OptionStr<'a> {
+    /// Creates `Option<Rc<str>>` from the [`OptionStr`].
+    /// You can use that for a shared string.
+    #[inline]
+    pub fn as_rc_str(&self) -> Option<Rc<str>> {
+        self.0.map(Rc::from)
+    }
+}
+
+impl<'a> Deref for OptionStr<'a> {
+    type Target = Option<&'a str>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+// &str -> OptionStr
+impl<'a> From<&'a str> for OptionStr<'a> {
+    #[inline]
+    fn from(value: &'a str) -> Self {
+        Self(if value.is_empty() { None } else { Some(value) })
+    }
+}
+
+// OptionStr -> &str
+impl<'a> From<OptionStr<'a>> for &'a str {
+    #[inline]
+    fn from(value: OptionStr<'a>) -> Self {
+        value.0.unwrap_or_default()
+    }
+}
+
+// Option<&str> -> OptionStr
+impl<'a> From<Option<&'a str>> for OptionStr<'a> {
+    #[inline]
+    fn from(value: Option<&'a str>) -> Self {
+        match value {
+            Some(s) if !s.is_empty() => Self(value),
+            _ => Self(None),
+        }
+    }
+}
+
+// OptionStr -> Option<&str>
+impl<'a> From<OptionStr<'a>> for Option<&'a str> {
+    #[inline]
+    fn from(value: OptionStr<'a>) -> Self {
+        value.0
+    }
 }

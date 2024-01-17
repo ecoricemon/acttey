@@ -65,17 +65,17 @@ struct MouseMove;
 impl System for MouseMove {
     type Ref = ();
     type Mut = ();
-    type ResRef = Input;
+    type ResRef = EventManager;
     type ResMut = ();
 
     fn run(
         &mut self,
         _: <Self::Ref as Query>::Output,
         _: <Self::Mut as QueryMut>::Output,
-        input: <Self::ResRef as ResQuery>::Output,
+        ev_mgr: <Self::ResRef as ResQuery>::Output,
         _: <Self::ResMut as ResQueryMut>::Output,
     ) {
-        for (handle, event) in input.iter_mouse_events() {
+        for (handle, event) in ev_mgr.iter_mouse_events() {
             let x = event.offset_x();
             let y = event.offset_y();
             crate::log!("mouse move from {handle}: ({x}, {y})");
@@ -111,56 +111,23 @@ impl MyApp {
     #[wasm_bindgen]
     pub async fn run(&mut self) {
         let mut app = App::new().await;
-        app.register_canvas("canvas0");
-        app.register_canvas("canvas1");
-
-        // Listen to some events.
-        app.register_events("canvas0", ["mousemove"].into_iter())
-            .register_events("canvas1", ["mousemove"].into_iter())
-            .register_events("", ["resize"].into_iter());
-
-        // Box
-        let mesh_key =
-            app.insert_mesh(shape::Box::new(1.0, 1.0, 1.0, [0, 0, 128, 255].into()).into());
-
-        app.register_entity::<Cube>().insert_entity(
-            0,
-            Cube {
-                renderable: component::Renderable {
-                    mesh_key,
-                    ..Default::default()
-                },
-                rot: Rotation {
-                    x: 0.1,
-                    y: 0.0,
-                    z: 0.0,
-                },
-            },
-        );
-
-        app.register_system(system::Resized)
-            .register_system(RotateCube { rot: 0.0 })
-            .register_system(MouseMove)
-            .register_system(system::Render)
-            .register_system(system::ClearInput)
-            .register_super_system(SuperSystem);
-
-        app.run();
+        app.add_canvas("#canvas0")
+            .with_default()
+            .add_listen_event("", "resize")
+            .add_listen_event("#canvas0", "mousemove")
+            .add_camera("MyCamera", cameras::PerspectiveCamera::default())
+            .with_default()
+            .add_geometry("BoxGeometry", shapes::Box::new(0.3, 0.3, 0.3))
+            .with_default()
+            .add_material("RedMaterial", colors::RED)
+            .with_default()
+            .add_mesh("RedBox", "BoxGeometry", "RedMaterial")
+            .add_basic_shader("MyShader")
+            .add_basic_pipeline("MyPipeline")
+            .add_system(systems::Resized)
+            .add_system(systems::Render::new())
+            .add_system(systems::ClearInput)
+            .run();
         self.0 = Some(app);
-    }
-
-    #[wasm_bindgen]
-    pub fn set_camera(
-        &mut self,
-        camera_x: f32,
-        camera_y: f32,
-        camera_z: f32,
-        at_x: f32,
-        at_y: f32,
-        at_z: f32,
-    ) {
-        if let Some(app) = self.0.as_mut() {
-            // app.set_camera(camera_x, camera_y, camera_z, at_x, at_y, at_z);
-        }
     }
 }
