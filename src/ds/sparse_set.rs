@@ -373,7 +373,7 @@ impl Downcast for SparseSet {
 }
 
 #[derive(Debug)]
-pub struct MonoSparseSet<K: Eq + Hash + Clone, V> {
+pub struct MonoSparseSet<K: Eq + Hash + Clone + ?Sized, V> {
     sparse: AHashMap<K, usize>,
     dense: Vec<(K, V)>,
 }
@@ -393,7 +393,11 @@ impl<K: Eq + Hash + Clone, V> MonoSparseSet<K, V> {
     }
 
     #[inline]
-    pub fn contains_key(&self, k: &K) -> bool {
+    pub fn contains_key<Q>(&self, k: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         self.sparse.contains_key(k)
     }
 
@@ -639,7 +643,7 @@ mod tests {
         let remove_order = [2, 4, 0, 1, 3];
 
         for i in remove_order {
-            let (k, v) = entries[i].take().unwrap();
+            let (k, _) = entries[i].take().unwrap();
             set.remove(&k);
             check(&entries, &set);
         }

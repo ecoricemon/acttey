@@ -4,7 +4,7 @@ mod r#loop;
 use crate::{
     app::event::{Event, EventListener, EventManager},
     ds::{
-        generational::{GenIndexRc, LabelOrGenIndexRc},
+        generational::GenIndexRc,
         refs::RCell,
     },
     ecs::{
@@ -27,10 +27,11 @@ use crate::{
         resource::RenderResource,
         shaders, IterBindGroupLayout, IterShader, RenderError,
     },
-    util::{AsBytes, AsMultiBytes, OptionStr},
+    util::{AsBytes, AsMultiBytes},
+    ResKey,
 };
 use ahash::AHashMap;
-use std::{borrow::Borrow, rc::Rc};
+use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 // use web_sys::Performance;
 
@@ -50,8 +51,8 @@ struct AppStateEach<'a> {
     storage: &'a mut Storage,
     systems: &'a mut Systems,
     super_systems: &'a mut Vec<Box<dyn Invokable>>,
-    render: &'a mut RenderResource,
-    meshes: &'a mut MeshResource,
+    render: &'a mut RenderResource<ResKey>,
+    meshes: &'a mut MeshResource<ResKey>,
     cameras: &'a mut AHashMap<Rc<str>, Camera>,
 }
 
@@ -59,8 +60,8 @@ struct AppState {
     storage: Storage,
     systems: Systems,
     super_systems: Vec<Box<dyn Invokable>>,
-    render: RenderResource,
-    meshes: MeshResource,
+    render: RenderResource<ResKey>,
+    meshes: MeshResource<ResKey>,
     cameras: AHashMap<Rc<str>, Camera>,
 }
 
@@ -215,81 +216,82 @@ impl App {
     }
 
     #[inline]
-    pub fn add_geometry<'a, 'b: 'a>(
-        &'a mut self,
-        label: impl Into<OptionStr<'b>>,
+    pub fn add_geometry(
+        &mut self,
+        key: impl Into<ResKey>,
         geo: impl Into<Geometry>,
     ) -> GeometryReturn {
-        let label = label.into().as_rc_str();
-        let index = self
-            .state
+        let key: ResKey = key.into();
+        self.state
             .borrow_mut()
             .meshes
-            .add_geometry(label.as_ref(), GeometryVar::from(Box::new(geo.into())));
+            .add_geometry(key.clone(), GeometryVar::from(Box::new(geo.into())));
         GeometryReturn {
             app: self,
-            ret: (label, index),
+            ret: key,
         }
     }
 
     #[inline]
-    pub fn add_material<'a, 'b: 'a>(
-        &'a mut self,
-        label: impl Into<OptionStr<'b>>,
+    pub fn add_material(
+        &mut self,
+        key: impl Into<ResKey>,
         mat: impl Into<Material>,
     ) -> MaterialReturn {
-        let label = label.into().as_rc_str();
-        let index = self
-            .state
+        let key: ResKey = key.into();
+        self.state
             .borrow_mut()
             .meshes
-            .add_material(label.as_ref(), mat);
+            .add_material(key.clone(), mat);
         MaterialReturn {
             app: self,
-            ret: (label, index),
+            ret: key,
         }
     }
 
-    /// # Panics
-    ///
-    /// Panics if `label` is empty.
     #[inline]
-    pub fn add_mesh<'a, 'b, S1: Borrow<str> + 'a, S2: Borrow<str> + 'b>(
+    pub fn add_mesh(
         &mut self,
-        label: &str,
-        geo: impl Into<LabelOrGenIndexRc<'a, S1>>,
-        mat: impl Into<LabelOrGenIndexRc<'b, S2>>,
+        mesh_key: impl Into<ResKey>,
+        geo_key: impl Into<ResKey>,
+        mat_key: impl Into<ResKey>,
     ) -> MeshReturn {
-        let label: Rc<str> = label.into();
-        let ret = self.state.borrow_mut().meshes.add_mesh(&label, geo, mat);
-        MeshReturn { app: self, ret }
+        let mesh_key: ResKey = mesh_key.into();
+        let geo_key: ResKey = geo_key.into();
+        let mat_key: ResKey = mat_key.into();
+        self.state
+            .borrow_mut()
+            .meshes
+            .add_mesh(mesh_key.clone(), geo_key, mat_key);
+        MeshReturn {
+            app: self,
+            ret: mesh_key,
+        }
     }
 
     #[inline]
-    pub fn add_camera<'a, 'b: 'a>(
-        &'a mut self,
-        label: &'b str,
+    pub fn add_camera(
+        &mut self,
+        key: impl Into<ResKey>,
         camera: impl Into<Camera>,
     ) -> CameraReturn {
-        let label1: Rc<str> = label.into();
-        let label2 = Rc::clone(&label1);
+        let key: ResKey = key.into();
         self.state
             .borrow_mut()
             .cameras
-            .insert(label1, camera.into());
+            .insert(key.clone(), camera.into());
         CameraReturn {
             app: self,
-            ret: label2,
+            ret: key,
         }
     }
 
     // TODO: Improve me. Implement more intelligent way to make it from current settings.
-    pub fn add_basic_shader(&mut self, label: &str) -> &mut Self {
-        use shaders::basic::*;
-
-        let label: Rc<str> = label.into();
+    pub fn add_basic_shader(&mut self, key: impl Into<ResKey>) -> &mut Self {
+        let key: ResKey = key.into();
 
         // Constructs a temporary shader builder.
+        use shaders::basic::*;
         let mut builder = my_wgsl::Builder::new();
         add_camera_struct(&mut builder);
         add_material_struct(&mut builder);
@@ -306,7 +308,7 @@ impl App {
         {
             let render = &mut self.state.borrow_mut().render;
             let index = render.add_shader_builder(builder);
-            render.build_shader(index, &label);
+            render.build_shader(index, key);
             render.remove_shader_builder(index);
         }
 
@@ -314,20 +316,22 @@ impl App {
     }
 
     // TODO: Improve me. Implement more intelligent way to make it from current settings.
-    pub fn add_basic_pipeline(&mut self, label: &str) -> &mut Self {
+    pub fn add_basic_pipeline(&mut self, key: impl Into<ResKey>) -> &mut Self {
+        let key: ResKey = key.into();
+
         {
             let mut state = self.state.borrow_mut();
             let AppStateEach { render, meshes, .. } = state.each();
 
             // Constructs a temporary pipeline layout builder.
             let mut layout_builder = PipelineLayoutBuilder::new();
-            for item in render.iter::<IterBindGroupLayout>() {
+            for item in render.iter::<IterBindGroupLayout<ResKey>>() {
                 let layout = item.layout;
                 layout_builder.bind_group_layouts.push(Rc::clone(layout));
             }
             // Builds.
             let layout_index = render.add_pipeline_layout_builder(layout_builder);
-            let layout = render.build_pipeline_layout(layout_index, label);
+            let layout = render.build_pipeline_layout(layout_index, key.clone());
 
             // Constructs a temporary pipeline builder.
             let mut pipeline_builder = PipelineBuilder::new();
@@ -336,7 +340,7 @@ impl App {
             pipeline_builder.set_layout(layout);
 
             // Sets vert and frag shaders.
-            for item in render.iter::<IterShader>() {
+            for item in render.iter::<IterShader<ResKey>>() {
                 let shader = item.shader;
                 if shader.entry_point.vert().is_some() {
                     pipeline_builder.set_vertex_shader(shader);
@@ -347,7 +351,7 @@ impl App {
             }
 
             // Sets interleaved geo.
-            for geo in meshes.iter_geo() {
+            for (_, geo) in meshes.iter_geo() {
                 let int_geo = geo.as_interleaved().unwrap();
                 let vert_meta = VertexBufferMeta::from(int_geo);
                 pipeline_builder.vert_meta.push(vert_meta);
@@ -360,7 +364,7 @@ impl App {
 
             // Builds.
             let pipeline_index = render.add_pipeline_builder(pipeline_builder);
-            render.build_pipeline(pipeline_index, label);
+            render.build_pipeline(pipeline_index, key);
 
             // Removes the temporary builders.
             render.remove_pipeline_layout_builder(layout_index);
@@ -548,10 +552,10 @@ macro_rules! decl_app_return {
 }
 
 decl_app_return!(CanvasReturn, Result<Rc<Canvas>, RenderError>);
-decl_app_return!(GeometryReturn, (Option<Rc<str>>, Option<GenIndexRc>));
-decl_app_return!(MaterialReturn, (Option<Rc<str>>, Option<GenIndexRc>));
-decl_app_return!(MeshReturn, bool);
-decl_app_return!(CameraReturn, Rc<str>);
+decl_app_return!(GeometryReturn, ResKey);
+decl_app_return!(MaterialReturn, ResKey);
+decl_app_return!(MeshReturn, ResKey);
+decl_app_return!(CameraReturn, ResKey);
 
 impl<'a> CanvasReturn<'a> {
     /// Creates a default `Surface` and a `SurfacePack` from the canvas.
@@ -590,14 +594,8 @@ impl<'a> GeometryReturn<'a> {
             // Gets the returned geometry a bit ago.
             let mut state = app.state.borrow_mut();
             let AppStateEach { render, meshes, .. } = state.each();
-            let label;
-            let key = if let Some(index) = &ret.1 {
-                LabelOrGenIndexRc::B(index)
-            } else {
-                label = ret.0.unwrap();
-                LabelOrGenIndexRc::A(label.as_ref())
-            };
-            let geo = meshes.sneak_get_geometry_mut(key).unwrap();
+            let key = ret;
+            let geo = meshes.get_geometry_mut(&key).unwrap();
 
             // Sorts it and creates interleaved geometry.
             geo.sort();
@@ -612,10 +610,6 @@ impl<'a> GeometryReturn<'a> {
         }
         app
     }
-
-    pub fn index(self) -> Option<GenIndexRc> {
-        self.ret.1
-    }
 }
 
 impl<'a> MaterialReturn<'a> {
@@ -627,35 +621,22 @@ impl<'a> MaterialReturn<'a> {
             // Gets the returned material a bit ago.
             let mut state = app.state.borrow_mut();
             let AppStateEach { render, meshes, .. } = state.each();
-            let index;
-            let label: Rc<str>;
-            let key = if let Some(i) = ret.1 {
-                index = i;
-                label = index.index.index.to_string().into();
-                LabelOrGenIndexRc::B(&index)
-            } else {
-                label = ret.0.unwrap();
-                LabelOrGenIndexRc::A(label.as_ref())
-            };
-            let mat = meshes.sneak_get_material_mut(key).unwrap();
+            let key = ret;
+            let mat = meshes.get_material_mut(&key).unwrap();
 
             // Creates a read-only uniform buffer with the data.
             let uni_buf = render.add_ro_uniform_buffer(mat.as_bytes()).unwrap();
 
             // Creates a bind group.
             let desc = descs::BufferBindDesc {
-                layout_label: Rc::clone(&label),
-                group_label: label,
+                layout_key: Rc::clone(&key),
+                group_key: key,
                 bufs: &[&uni_buf],
                 ..Default::default()
             };
             render.add_default_buffer_bind(desc);
         }
         app
-    }
-
-    pub fn index(self) -> Option<GenIndexRc> {
-        self.ret.1
     }
 }
 
@@ -676,10 +657,10 @@ impl<'a> CameraReturn<'a> {
             let uni_buf = render.add_uniform_buffer(cam).unwrap();
 
             // Creates a bind group.
-            let label = ret;
+            let key = ret;
             let desc = descs::BufferBindDesc {
-                layout_label: Rc::clone(&label),
-                group_label: label,
+                layout_key: Rc::clone(&key),
+                group_key: key,
                 bufs: &[&uni_buf],
                 ..Default::default()
             };

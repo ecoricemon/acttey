@@ -71,12 +71,12 @@ macro_rules! qkey {
 pub(crate) use qkey;
 
 #[derive(Hash, PartialEq, Eq, Clone, Copy, Debug)]
-pub struct FilterKey {
+pub struct FilteResKey {
     f_ty: TypeId,
     qkey: QueryKey,
 }
 
-impl FilterKey {
+impl FilteResKey {
     #[inline]
     pub fn new(f_ty: TypeId, qkey: QueryKey) -> Self {
         Self { f_ty, qkey }
@@ -86,13 +86,13 @@ impl FilterKey {
 #[allow(unused_macros)]
 macro_rules! fkey {
     (&$t:ident, $qkey:ident) => {
-        $crate::ecs::FilterKey::new($crate::ty!(&$t), $qkey)
+        $crate::ecs::FilteResKey::new($crate::ty!(&$t), $qkey)
     };
     (&&$t:ident, $qkey:ident) => {
-        $crate::ecs::FilterKey::new($crate::ty!(&&$t), $qkey)
+        $crate::ecs::FilteResKey::new($crate::ty!(&&$t), $qkey)
     };
     ($t:ty, $qkey:ident) => {
-        $crate::ecs::FilterKey::new($crate::ty!($t), $qkey)
+        $crate::ecs::FilteResKey::new($crate::ty!($t), $qkey)
     };
 }
 

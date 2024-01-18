@@ -1,3 +1,4 @@
+use crate::ResKey;
 use crate::ecs::traits::Resource;
 use std::{any::TypeId, mem::transmute_copy};
 
@@ -11,7 +12,7 @@ impl Resource for Storage {}
 
 // Exposes `RenderResource` resource.
 pub use crate::render::resource::RenderResource;
-impl Resource for RenderResource {}
+impl Resource for RenderResource<ResKey> {}
 
 // Exposes `TimeStamp` resource.
 pub struct TimeStamp(pub f64);
@@ -25,7 +26,7 @@ impl Resource for Systems {}
 pub struct ResourcePack<'a> {
     pub(crate) ev_mgr: &'a mut EventManager,
     pub(crate) storage: &'a mut Storage,
-    pub(crate) render: &'a mut RenderResource,
+    pub(crate) render: &'a mut RenderResource<ResKey>,
     pub(crate) time: &'a mut TimeStamp,
     pub(crate) systems: Option<&'a mut Systems>,
 }
@@ -40,8 +41,8 @@ impl<'a> ResourcePack<'a> {
                 transmute_copy::<&mut EventManager, _>(&self.ev_mgr)
             } else if ty == TypeId::of::<Storage>() {
                 transmute_copy::<&mut Storage, _>(&self.storage)
-            } else if ty == TypeId::of::<RenderResource>() {
-                transmute_copy::<&mut RenderResource, _>(&self.render)
+            } else if ty == TypeId::of::<RenderResource<ResKey>>() {
+                transmute_copy::<&mut RenderResource<ResKey>, _>(&self.render)
             } else if ty == TypeId::of::<TimeStamp>() {
                 transmute_copy::<&mut TimeStamp, _>(&self.time)
             } else if ty == TypeId::of::<Systems>() {

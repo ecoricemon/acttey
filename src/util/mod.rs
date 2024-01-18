@@ -2,7 +2,7 @@
 
 use std::{
     mem::{size_of, transmute},
-    ops::{Deref, DerefMut},
+    ops::Deref,
     rc::Rc,
     thread,
 };
@@ -154,6 +154,51 @@ pub(crate) fn concat_opt_string(l: Option<&str>, r: &str) -> Option<String> {
 pub enum AorB<AA, BB> {
     A(AA),
     B(BB),
+}
+
+/// Common [`AorB`] implementation for &str and String.
+impl Deref for AorB<&str, String> {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::A(s) => s,
+            Self::B(s) => &s,
+        }
+    }
+}
+
+/// Used to be shown as a string even if it's not a string type.
+pub trait ToStr {
+    fn to_str(&self) -> AorB<&str, String>;
+}
+
+/// Common [`ToStr`] implementation for [`str`].
+impl ToStr for str {
+    fn to_str(&self) -> AorB<&str, String> {
+        AorB::A(self)
+    }
+}
+
+/// Common [`ToStr`] implementation for [`String`].
+impl ToStr for String {
+    fn to_str(&self) -> AorB<&str, String> {
+        AorB::A(&self)
+    }
+}
+
+/// Common [`ToStr`] implementation for [`Rc<str>`].
+impl ToStr for Rc<str> {
+    fn to_str(&self) -> AorB<&str, String> {
+        AorB::A(&self)
+    }
+}
+
+/// Common [`ToStr`] implementation for [`Box<str>`].
+impl ToStr for Box<str> {
+    fn to_str(&self) -> AorB<&str, String> {
+        AorB::A(&self)
+    }
 }
 
 /// It's same with Into<&\[u8\>.

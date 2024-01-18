@@ -11,7 +11,7 @@ use crate::{
             IterBindGroup, IterIndexBuffer, IterRenderPass, IterRenderPipeline, IterVertexBuffer,
             RenderResource,
         },
-    },
+    }, ResKey,
 };
 
 /// A system to resize all surfaces to match with the new size.  
@@ -24,7 +24,7 @@ impl System for Resized {
     type Ref = ();
     type Mut = ();
     type ResRef = ();
-    type ResMut = (EventManager, RenderResource);
+    type ResMut = (EventManager, RenderResource<ResKey>);
 
     fn run(
         &mut self,
@@ -78,7 +78,7 @@ impl Render {
 impl System for Render {
     type Ref = ();
     type Mut = ();
-    type ResRef = (RenderResource, TimeStamp);
+    type ResRef = (RenderResource<ResKey>, TimeStamp);
     type ResMut = ();
 
     fn run(
@@ -96,7 +96,7 @@ impl System for Render {
                 &mut self.surf_pack_buf,
                 &render.surfaces,
                 |pass| {
-                    for (i, item) in render.iter::<IterBindGroup>().enumerate() {
+                    for (i, item) in render.iter::<IterBindGroup<ResKey>>().enumerate() {
                         pass.set_bind_group(i as u32, item.group, &[]);
                     }
                     for (i, item) in render.iter::<IterVertexBuffer>().enumerate() {
@@ -105,7 +105,7 @@ impl System for Render {
                     if let Some(item) = render.iter::<IterIndexBuffer>().next() {
                         pass.set_index_buffer(item.buf.slice(..), wgpu::IndexFormat::Uint16);
                     }
-                    if let Some(item) = render.iter::<IterRenderPipeline>().next() {
+                    if let Some(item) = render.iter::<IterRenderPipeline<ResKey>>().next() {
                         pass.set_pipeline(item.pipeline);
                     }
                     pass.draw_indexed(0..36, 0, 0..1);

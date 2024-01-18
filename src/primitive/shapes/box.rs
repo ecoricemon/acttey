@@ -1,6 +1,5 @@
 use std::{
-    borrow::{Borrow, BorrowMut},
-    ops::{Deref, DerefMut},
+    ops::Deref,
 };
 
 use crate::primitive::{mesh::Geometry, vector::Vector, Normal, Position};

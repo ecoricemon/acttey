@@ -1,17 +1,17 @@
-use crate::ds::generational::GenIndexRc;
-use std::{borrow::Borrow, rc::Rc};
+use crate::{ds::generational::GenIndexRc, AsResKey, ResKey, get_dummy_res_key};
+use std::rc::Rc;
 
 /// A descriptor for binding buffers to a bind group.
 /// This descriptor can help you to add bind group easily
 /// but it's hard to reuse resources such as builders.
 /// `layout_label`, `group_label`, and `bufs` are mandatory.
-pub struct BufferBindDesc<'a> {
+pub struct BufferBindDesc<'a, K: AsResKey> {
     // Label will be inserted into a map as a key.
     /// Required
-    pub layout_label: Rc<str>,
+    pub layout_key: K,
     // Label will be inserted into a map as a key.
     /// Required
-    pub group_label: Rc<str>,
+    pub group_key: K,
     /// Required
     pub bufs: &'a [&'a Rc<wgpu::Buffer>],
     /// Default is Uniform.
@@ -24,7 +24,7 @@ pub struct BufferBindDesc<'a> {
     pub viss: &'a [wgpu::ShaderStages],
 }
 
-impl<'a> BufferBindDesc<'a> {
+impl<'a, K: AsResKey> BufferBindDesc<'a, K> {
     /// Returns the length of `bufs`.
     #[inline]
     pub fn len(&self) -> usize {
@@ -65,16 +65,16 @@ impl<'a> BufferBindDesc<'a> {
     }
 }
 
-impl<'a> Default for BufferBindDesc<'a> {
+impl<'a> Default for BufferBindDesc<'a, ResKey> {
     fn default() -> Self {
-        crate::DUMMY_RC_STR.with(|label| Self {
-            layout_label: Rc::clone(label),
-            group_label: Rc::clone(label),
+        Self {
+            layout_key: get_dummy_res_key(),
+            group_key: get_dummy_res_key(),
             bufs: &[],
             bind_type: wgpu::BufferBindingType::Uniform,
             bindings: &[],
             viss: &[],
-        })
+        }
     }
 }
 

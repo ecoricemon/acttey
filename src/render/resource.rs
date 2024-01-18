@@ -10,7 +10,7 @@ use crate::{
         shaders::{Shader, ShaderPack},
         BufferPool, RenderError,
     },
-    ty,
+    ty, AsResKey,
 };
 use std::{mem::transmute_copy, rc::Rc};
 
@@ -20,20 +20,20 @@ use super::{
 };
 
 /// Top struct in render module.
-pub struct RenderResource {
+pub struct RenderResource<K: AsResKey> {
     pub gpu: Rc<Gpu>,
     pub canvases: CanvasPack,
     pub context: RenderContext,
     pub surfaces: GenVecRc<Surface>,
     pub surf_packs: GenVecRc<SurfacePack>,
     pub bufs: BufferPool,
-    pub shaders: ShaderPack,
-    pub binds: BindPack,
-    pub pipelines: PipelinePack,
+    pub shaders: ShaderPack<K>,
+    pub binds: BindPack<K>,
+    pub pipelines: PipelinePack<K>,
     pub render_passes: GenVecRc<RenderPass>,
 }
 
-impl RenderResource {
+impl<K: AsResKey> RenderResource<K> {
     pub async fn new() -> Result<Self, RenderError> {
         let canvases = CanvasPack::new();
         let context = RenderContext::new(canvases.get_dummy()).await?;
@@ -206,7 +206,7 @@ impl RenderResource {
     /// Adds a uniform or storage buffer binding with default settings.
     /// Handy, but it's lack of reusability.
     #[inline]
-    pub fn add_default_buffer_bind(&mut self, desc: descs::BufferBindDesc) {
+    pub fn add_default_buffer_bind(&mut self, desc: descs::BufferBindDesc<K>) {
         self.binds.create_default_buffer_bind(desc);
     }
 
@@ -235,8 +235,8 @@ impl RenderResource {
     }
 
     #[inline]
-    pub fn build_shader(&mut self, index: GenIndex, label: &Rc<str>) -> &Rc<Shader> {
-        self.shaders.create_shader(index, label)
+    pub fn build_shader(&mut self, index: GenIndex, key: K) -> &Rc<Shader> {
+        self.shaders.create_shader(index, key)
     }
 
     #[inline]
@@ -270,9 +270,9 @@ impl RenderResource {
     pub fn build_pipeline_layout(
         &mut self,
         index: GenIndex,
-        label: &str,
+        key: K
     ) -> &Rc<wgpu::PipelineLayout> {
-        self.pipelines.create_layout(index, label)
+        self.pipelines.create_layout(index, key)
     }
 
     #[inline]
@@ -300,9 +300,9 @@ impl RenderResource {
     }
 
     #[inline]
-    pub fn build_pipeline(&mut self, index: GenIndex, label: &str) -> &Rc<wgpu::RenderPipeline> {
+    pub fn build_pipeline(&mut self, index: GenIndex, key: K) -> &Rc<wgpu::RenderPipeline> {
         self.pipelines
-            .create_pipeline(index, label, &self.surf_packs, &self.surfaces)
+            .create_pipeline(index, key, &self.surf_packs, &self.surfaces)
     }
 
     /// Adds a new render pass.
@@ -337,26 +337,26 @@ impl RenderResource {
 
     pub fn iter<'a, T: 'static>(&'a self) -> Box<dyn Iterator<Item = T> + 'a> {
         // Safety: Type checked.
-        if ty!(T) == ty!(IterBindGroupLayout) {
-            Box::new(self.binds.layouts.iter().map(|(k, v)| unsafe {
+        if ty!(T) == ty!(IterBindGroupLayout<K>) {
+            Box::new(self.binds.layouts.iter().map(|(key, value)| unsafe {
                 transmute_copy(&IterBindGroupLayout {
-                    label: k,
-                    layout: v,
+                    key,
+                    layout: value,
                 })
             }))
-        } else if ty!(T) == ty!(IterBindGroup) {
-            Box::new(self.binds.groups.iter().map(|(k, v)| unsafe {
+        } else if ty!(T) == ty!(IterBindGroup<K>) {
+            Box::new(self.binds.groups.iter().map(|(key, value)| unsafe {
                 transmute_copy(&IterBindGroup {
-                    label: k,
-                    group: &v.0,
-                    bindings: &v.1,
+                    key,
+                    group: &value.0,
+                    bindings: &value.1,
                 })
             }))
-        } else if ty!(T) == ty!(IterShader) {
-            Box::new(self.shaders.shaders.iter().map(|(k, v)| unsafe {
+        } else if ty!(T) == ty!(IterShader<K>) {
+            Box::new(self.shaders.shaders.iter().map(|(key, value)| unsafe {
                 transmute_copy(&IterShader {
-                    label: k,
-                    shader: v,
+                    key,
+                    shader: value,
                 })
             }))
         } else if ty!(T) == ty!(IterIndexBuffer) {
@@ -391,11 +391,11 @@ impl RenderResource {
                     .iter_used()
                     .map(|buf| unsafe { transmute_copy(&IterStorageBuffer { buf }) }),
             )
-        } else if ty!(T) == ty!(IterRenderPipeline) {
-            Box::new(self.pipelines.pipelines.iter().map(|(k, v)| unsafe {
+        } else if ty!(T) == ty!(IterRenderPipeline<K>) {
+            Box::new(self.pipelines.pipelines.iter().map(|(key, value)| unsafe {
                 transmute_copy(&IterRenderPipeline {
-                    label: k,
-                    pipeline: v,
+                    key,
+                    pipeline: value,
                 })
             }))
         } else if ty!(T) == ty!(IterRenderPass) {
@@ -420,21 +420,21 @@ impl RenderResource {
 }
 
 #[derive(Debug)]
-pub struct IterBindGroupLayout<'a> {
-    pub label: &'a str,
+pub struct IterBindGroupLayout<'a, K: AsResKey> {
+    pub key: &'a K,
     pub layout: &'a Rc<wgpu::BindGroupLayout>,
 }
 
 #[derive(Debug)]
-pub struct IterBindGroup<'a> {
-    pub label: &'a str,
+pub struct IterBindGroup<'a, K: AsResKey> {
+    pub key: &'a K,
     pub group: &'a Rc<wgpu::BindGroup>,
     pub bindings: &'a Vec<Binding>,
 }
 
 #[derive(Debug)]
-pub struct IterShader<'a> {
-    pub label: &'a str,
+pub struct IterShader<'a, K: AsResKey> {
+    pub key: &'a K,
     pub shader: &'a Rc<Shader>,
 }
 
@@ -459,8 +459,8 @@ pub struct IterStorageBuffer<'a> {
 }
 
 #[derive(Debug)]
-pub struct IterRenderPipeline<'a> {
-    pub label: &'a String,
+pub struct IterRenderPipeline<'a, K: AsResKey> {
+    pub key: &'a K,
     pub pipeline: &'a Rc<wgpu::RenderPipeline>,
 }
 

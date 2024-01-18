@@ -4,7 +4,6 @@ use std::{
         vec_deque::{Drain, Iter},
         VecDeque,
     },
-    rc::Rc,
 };
 use wasm_bindgen::prelude::*;
 

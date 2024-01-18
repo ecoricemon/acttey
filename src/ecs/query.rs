@@ -1,7 +1,7 @@
 use crate::{
     ecs::{
         fkey, predefined::resource::ResourcePack, qkey, storage::Store, traits::Component,
-        FilterKey, QueryKey, SystemKey,
+        FilteResKey, QueryKey, SystemKey,
     },
     ty,
     util::{downcast_mut_slice, downcast_slice},
@@ -49,7 +49,7 @@ pub trait Filter: 'static {
 }
 
 pub struct FilterInfo {
-    pub fkey: FilterKey,
+    pub fkey: FilteResKey,
     pub target: TypeId,
     pub all: Vec<TypeId>,
     pub any: Vec<TypeId>,
@@ -88,7 +88,7 @@ pub trait Query<'a>: 'static {
     }
 
     fn query(storage: &mut impl Store, skey: SystemKey) -> Self::Output;
-    fn fkeys(skey: SystemKey) -> Vec<FilterKey>;
+    fn fkeys(skey: SystemKey) -> Vec<FilteResKey>;
     fn info(skey: SystemKey) -> QueryInfo;
 }
 
@@ -101,7 +101,7 @@ pub trait QueryMut<'a>: 'static {
     }
 
     fn query_mut(storage: &mut impl Store, skey: SystemKey) -> Self::Output;
-    fn fkeys_mut(skey: SystemKey) -> Vec<FilterKey>;
+    fn fkeys_mut(skey: SystemKey) -> Vec<FilteResKey>;
     fn info_mut(skey: SystemKey) -> QueryInfo;
 }
 
@@ -313,7 +313,7 @@ macro_rules! impl_query {
 
             #[inline]
             fn fkeys(_skey: $crate::acttey::ecs::SystemKey)
-                -> Vec<$crate::acttey::ecs::FilterKey>
+                -> Vec<$crate::acttey::ecs::FilteResKey>
             {
                 vec![]
             }
@@ -340,7 +340,7 @@ macro_rules! impl_query {
 
             #[inline]
             fn fkeys_mut(_skey: $crate::acttey::ecs::SystemKey)
-                -> Vec<$crate::acttey::ecs::FilterKey>
+                -> Vec<$crate::acttey::ecs::FilteResKey>
             {
                 vec![]
             }
@@ -371,9 +371,9 @@ macro_rules! impl_query {
 
             #[inline]
             fn fkeys(skey: $crate::acttey::ecs::SystemKey)
-                -> Vec<$crate::acttey::ecs::FilterKey>
+                -> Vec<$crate::acttey::ecs::FilteResKey>
             {
-                vec![$crate::acttey::ecs::FilterKey::new(
+                vec![$crate::acttey::ecs::FilteResKey::new(
                     std::any::TypeId::of::<$id>(),
                     Self::gen_key(skey)
                 )]
@@ -403,9 +403,9 @@ macro_rules! impl_query {
 
             #[inline]
             fn fkeys_mut(skey: $crate::acttey::ecs::SystemKey)
-                -> Vec<$crate::acttey::ecs::FilterKey>
+                -> Vec<$crate::acttey::ecs::FilteResKey>
             {
-                vec![$crate::acttey::ecs::FilterKey::new(
+                vec![$crate::acttey::ecs::FilteResKey::new(
                     std::any::TypeId::of::<$id>(),
                     Self::gen_key_mut(skey)
                 )]
@@ -437,11 +437,11 @@ macro_rules! impl_query {
 
             #[inline]
             fn fkeys(skey: $crate::acttey::ecs::SystemKey)
-                -> Vec<$crate::acttey::ecs::FilterKey>
+                -> Vec<$crate::acttey::ecs::FilteResKey>
             {
                 let qkey = Self::gen_key(skey);
                 vec![
-                    $( $crate::acttey::ecs::FilterKey::new(
+                    $( $crate::acttey::ecs::FilteResKey::new(
                         std::any::TypeId::of::<$id>(),
                         qkey
                     ) ),+
@@ -473,11 +473,11 @@ macro_rules! impl_query {
 
             #[inline]
             fn fkeys_mut(skey: $crate::acttey::ecs::SystemKey)
-                -> Vec<$crate::acttey::ecs::FilterKey>
+                -> Vec<$crate::acttey::ecs::FilteResKey>
             {
                 let qkey = Self::gen_key_mut(skey);
                 vec![
-                    $( $crate::acttey::ecs::FilterKey::new(
+                    $( $crate::acttey::ecs::FilteResKey::new(
                         std::any::TypeId::of::<$id>(),
                         qkey
                     ) ),+

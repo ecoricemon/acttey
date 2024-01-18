@@ -5,7 +5,7 @@ use crate::{
         query::{Filter, FilterInfo, QueryIter, QueryIterMut},
         system::SystemInfo,
         traits::{Collect, CollectGeneric, Component, Downcast, Entity},
-        ComponentKey, EntityKey, FilterKey, QueryKey, SystemKey,
+        ComponentKey, EntityKey, FilteResKey, QueryKey, SystemKey,
     },
     ty,
     util::upcast_slice,
@@ -41,17 +41,17 @@ pub struct Storage {
     /// A map holding query results.
     /// Key: `TypeId` combination of `(Filter, (Query, System))`.
     /// Value: Vec<ptr to slice of a collector's piece>, e.g. `AnyVec` as a slice as a ptr.
-    query_buffer: AHashMap<FilterKey, Vec<NonNull<[()]>>>,
+    query_buffer: AHashMap<FilteResKey, Vec<NonNull<[()]>>>,
 
     /// A map holding system info.
     /// Entries will never be removed from the map.
     sinfo: AHashMap<SystemKey, SystemInfo>,
 
     //
-    filtered_ekeys: AHashMap<FilterKey, Vec<EntityKey>>,
+    filtered_ekeys: AHashMap<FilteResKey, Vec<EntityKey>>,
 
     //
-    filtered_ekeys_mut: AHashMap<FilterKey, Vec<EntityKey>>,
+    filtered_ekeys_mut: AHashMap<FilteResKey, Vec<EntityKey>>,
 }
 
 impl Storage {

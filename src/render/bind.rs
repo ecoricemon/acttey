@@ -3,22 +3,22 @@ use crate::{
         generational::{GenIndex, GenIndexRc, GenVec},
         sparse_set::MonoSparseSet,
     },
-    render::{context::Gpu, descs},
+    render::{context::Gpu, descs}, AsResKey,
 };
 use std::{num::NonZeroU64, rc::Rc};
 
 #[derive(Debug)]
-pub struct BindPack {
+pub struct BindPack<K: AsResKey> {
     gpu: Rc<Gpu>,
     pub builders: GenVec<BindBuilder>,
-    pub layouts: MonoSparseSet<Rc<str>, Rc<wgpu::BindGroupLayout>>,
+    pub layouts: MonoSparseSet<K, Rc<wgpu::BindGroupLayout>>,
     /// Bind group label to pair of bind group and its bindings.
     /// Bindings grap Rc connected to the resources such as buffer.
     /// It guarantees that those resources live enough as long as the bind group lives.
-    pub groups: MonoSparseSet<Rc<str>, (Rc<wgpu::BindGroup>, Vec<Binding>)>,
+    pub groups: MonoSparseSet<K, (Rc<wgpu::BindGroup>, Vec<Binding>)>,
 }
 
-impl BindPack {
+impl<K: AsResKey> BindPack<K> {
     pub fn new(gpu: &Rc<Gpu>) -> Self {
         Self {
             gpu: Rc::clone(gpu),
@@ -33,21 +33,21 @@ impl BindPack {
     /// # Panics
     ///
     /// Panics if `builder_index` is invalid or overwriting fails.
-    pub fn create(&mut self, builder_index: GenIndex, layout_label: Rc<str>, group_label: Rc<str>) {
+    pub fn create(&mut self, builder_index: GenIndex, layout_key: K, group_key: K) {
         let builder = self.builders.get(builder_index).unwrap();
         let (layout, group, bindings) =
-            builder.build(&self.gpu.device, &layout_label, &group_label);
-        if let Some(old) = self.layouts.insert(layout_label, Rc::new(layout)) {
+            builder.build(&self.gpu.device, layout_key.clone(), group_key.clone());
+        if let Some(old) = self.layouts.insert(layout_key, Rc::new(layout)) {
             assert!(Rc::strong_count(&old) == 1);
         }
-        if let Some(old) = self.groups.insert(group_label, (Rc::new(group), bindings)) {
+        if let Some(old) = self.groups.insert(group_key, (Rc::new(group), bindings)) {
             assert!(Rc::strong_count(&old.0) == 1);
         }
     }
 
     /// Creates a builder temporarily and creates layout and group for a buffer binding.
     /// The temporary builder is destroyed right away.
-    pub fn create_default_buffer_bind(&mut self, desc: descs::BufferBindDesc) {
+    pub fn create_default_buffer_bind(&mut self, desc: descs::BufferBindDesc<K>) {
         // Constructs a temporary builder.
         let mut builder = BindBuilder::new();
         for i in 0..desc.len() {
@@ -70,7 +70,7 @@ impl BindPack {
 
         // Builds and removes the temporary builder.
         let builder_index = self.builders.insert(builder);
-        self.create(builder_index, desc.layout_label, desc.group_label);
+        self.create(builder_index, desc.layout_key, desc.group_key);
         self.builders.take(builder_index);
     }
 }
@@ -96,18 +96,18 @@ impl BindBuilder {
     /// # Panics
     ///
     /// Panics if the number of layouts is not equivalent to the number of bindings.
-    pub fn build(
+    pub fn build<K: AsResKey>(
         &self,
         device: &wgpu::Device,
-        layout_label: &str,
-        group_label: &str,
+        layout_key: K,
+        group_key: K,
     ) -> (wgpu::BindGroupLayout, wgpu::BindGroup, Vec<Binding>) {
         // layout entries and bindings should have the same length.
         assert_eq!(self.layout_entries.len(), self.bindings.len());
 
         // Creates `wgpu::BindGroupLayout`.
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some(layout_label),
+            label: Some(&layout_key.to_str()),
             entries: &self.layout_entries,
         });
 
@@ -121,7 +121,7 @@ impl BindBuilder {
 
         // Creates `wgpu::BindGroup`.
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(group_label),
+            label: Some(&group_key.to_str()),
             layout: &layout,
             entries: &entries,
         });

@@ -7,19 +7,19 @@ use crate::{
     },
     primitive::mesh::GeometryAttributeVariant,
     render::Gpu,
-    util::vertex_format_to_shader_str,
+    util::vertex_format_to_shader_str, AsResKey,
 };
 use my_wgsl::*;
 use smallvec::SmallVec;
 use std::{borrow::Cow, rc::Rc};
 
-pub struct ShaderPack {
+pub struct ShaderPack<K: AsResKey> {
     gpu: Rc<Gpu>,
     pub builders: GenVec<my_wgsl::Builder>,
-    pub shaders: MonoSparseSet<Rc<str>, Rc<Shader>>,
+    pub shaders: MonoSparseSet<K, Rc<Shader>>,
 }
 
-impl ShaderPack {
+impl<K: AsResKey> ShaderPack<K> {
     pub fn new(gpu: &Rc<Gpu>) -> Self {
         Self {
             gpu: Rc::clone(gpu),
@@ -34,7 +34,7 @@ impl ShaderPack {
     /// # Panics
     ///
     /// Panics if `builder_index` is invalid or overwrting fails.
-    pub fn create_shader(&mut self, builder_index: GenIndex, label: &Rc<str>) -> &Rc<Shader> {
+    pub fn create_shader(&mut self, builder_index: GenIndex, key: K) -> &Rc<Shader> {
         let builder = self.builders.get(builder_index).unwrap();
         let entry_point = match (
             builder.get_vertex_stage_ident(),
@@ -45,13 +45,13 @@ impl ShaderPack {
             (Some(vert), Some(frag)) => EntryPoint::VertFrag(vert, frag),
             _ => panic!(),
         };
-        let shader = Shader::new(label, &self.gpu.device, builder, entry_point);
-        if let Some(old) = self.shaders.insert(Rc::clone(label), Rc::new(shader)) {
+        let shader = Shader::new(key.clone(), &self.gpu.device, builder, entry_point);
+        if let Some(old) = self.shaders.insert(key.clone(), Rc::new(shader)) {
             assert!(Rc::strong_count(&old) == 1)
         }
 
         // Safety: Infallible.
-        unsafe { self.shaders.get(label).unwrap_unchecked() }
+        unsafe { self.shaders.get(&key).unwrap_unchecked() }
     }
 
     /// Clears unused shaders and returns the number of removed shaders.
@@ -76,8 +76,8 @@ pub struct Shader {
 }
 
 impl Shader {
-    pub fn new(
-        label: &str,
+    pub fn new<K: AsResKey>(
+        key: K,
         device: &wgpu::Device,
         builder: &Builder,
         entry_point: EntryPoint,
@@ -87,7 +87,7 @@ impl Shader {
 
         // Creates `wgpu::ShaderModule`.
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(label),
+            label: Some(&key.to_str()),
             source: wgpu::ShaderSource::Wgsl(Cow::from(wgsl)),
         });
 

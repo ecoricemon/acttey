@@ -8,20 +8,20 @@ use crate::{
         canvas::{Surface, SurfacePack},
         shaders::Shader,
         Gpu,
-    },
+    }, AsResKey,
 };
-use std::rc::Rc;
+use std::{rc::Rc, borrow::Borrow};
 
 #[derive(Debug)]
-pub struct PipelinePack {
+pub struct PipelinePack<K: AsResKey> {
     gpu: Rc<Gpu>,
     pub layout_builders: GenVec<PipelineLayoutBuilder>,
     pub pipeline_builders: GenVec<PipelineBuilder>,
-    pub layouts: MonoSparseSet<String, Rc<wgpu::PipelineLayout>>,
-    pub pipelines: MonoSparseSet<String, Rc<wgpu::RenderPipeline>>,
+    pub layouts: MonoSparseSet<K, Rc<wgpu::PipelineLayout>>,
+    pub pipelines: MonoSparseSet<K, Rc<wgpu::RenderPipeline>>,
 }
 
-impl PipelinePack {
+impl<K: AsResKey> PipelinePack<K> {
     pub fn new(gpu: &Rc<Gpu>) -> Self {
         Self {
             gpu: Rc::clone(gpu),
@@ -35,33 +35,33 @@ impl PipelinePack {
     pub fn create_layout(
         &mut self,
         builder_index: GenIndex,
-        label: &str,
+        key: K,
     ) -> &Rc<wgpu::PipelineLayout> {
         let builder = self.layout_builders.get(builder_index).unwrap();
-        let layout = builder.build(&self.gpu.device, label);
-        if let Some(old) = self.layouts.insert(label.to_owned(), Rc::new(layout)) {
+        let layout = builder.build(&self.gpu.device, key.clone());
+        if let Some(old) = self.layouts.insert(key.clone(), Rc::new(layout)) {
             assert!(Rc::strong_count(&old) == 1);
         }
 
         // Safety: Infallible.
-        unsafe { self.layouts.get(label).unwrap_unchecked() }
+        unsafe { self.layouts.get(key.borrow()).unwrap_unchecked() }
     }
 
     pub fn create_pipeline(
         &mut self,
         builder_index: GenIndex,
-        label: &str,
+        key: K,
         surf_packs: &GenVecRc<SurfacePack>,
         surfaces: &GenVecRc<Surface>,
     ) -> &Rc<wgpu::RenderPipeline> {
         let builder = self.pipeline_builders.get(builder_index).unwrap();
-        let pipeline = builder.build(&self.gpu.device, label, surf_packs, surfaces);
-        if let Some(old) = self.pipelines.insert(label.to_owned(), Rc::new(pipeline)) {
+        let pipeline = builder.build(&self.gpu.device, key.clone(), surf_packs, surfaces);
+        if let Some(old) = self.pipelines.insert(key.clone(), Rc::new(pipeline)) {
             assert!(Rc::strong_count(&old) == 1);
         }
 
         // Safety: Infallible.
-        unsafe { self.pipelines.get(label).unwrap_unchecked() }
+        unsafe { self.pipelines.get(key.borrow()).unwrap_unchecked() }
     }
 }
 
@@ -116,10 +116,10 @@ impl PipelineBuilder {
     /// # Panics
     ///
     /// Panics if vertex shader is unset.
-    pub fn build(
+    pub fn build<K: AsResKey>(
         &self,
         device: &wgpu::Device,
-        label: &str,
+        key: K,
         surf_packs: &GenVecRc<SurfacePack>,
         surfaces: &GenVecRc<Surface>,
     ) -> wgpu::RenderPipeline {
@@ -160,7 +160,7 @@ impl PipelineBuilder {
 
         // Creates pipeline.
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(label),
+            label: Some(&key.to_str()),
             layout: self.layout.as_ref().map(|layout| layout.as_ref()),
             vertex: vert_state,
             primitive: self.primitive,
@@ -221,14 +221,14 @@ impl PipelineLayoutBuilder {
         std::mem::take(self);
     }
 
-    pub fn build(&self, device: &wgpu::Device, label: &str) -> wgpu::PipelineLayout {
+    pub fn build<K: AsResKey>(&self, device: &wgpu::Device, key: K) -> wgpu::PipelineLayout {
         let bind_group_layouts = self
             .bind_group_layouts
             .iter()
             .map(|layout| layout.as_ref())
             .collect::<Vec<_>>();
         device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some(label),
+            label: Some(&key.to_str()),
             bind_group_layouts: &bind_group_layouts,
             push_constant_ranges: &self.push_constants,
         })

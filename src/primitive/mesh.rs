@@ -1,15 +1,15 @@
 //! Based on glTF 2.0
 
 use crate::{
-    ds::generational::{GenIndex, GenIndexRc, GenVecRc, LabelOrGenIndexRc},
+    ds::sparse_set::MonoSparseSet,
     impl_from_for_enum,
     primitive::{constant::colors, vector::Vector, Color},
     render::buffer::MultiBufferData,
-    util::{AorB, AsMultiBytes},
+    util::AsMultiBytes, AsResKey,
 };
 use ahash::AHashMap;
 use smallvec::SmallVec;
-use std::{borrow::Borrow, mem::size_of, rc::Rc};
+use std::{borrow::Borrow, hash::Hash, mem::size_of, rc::Rc};
 
 /// Geometry variants.
 #[derive(Debug)]
@@ -86,290 +86,157 @@ impl_from_for_enum!(GeometryVar, BufInt, MultiBufferData<InterleavedGeometry, 2>
 
 /// Top struct of geometries and materials.
 #[derive(Debug)]
-pub struct MeshResource {
-    // TODO: call clean for GenVecRc.
+pub struct MeshResource<K: AsResKey> {
     /// Geometries.
-    geos: GenVecRc<GeometryVar>,
+    geos: MonoSparseSet<K, GeometryVar>,
     /// Materials.
-    mats: GenVecRc<Material>,
-    /// Geometry name to its index.
-    /// If users put in a geometry with its name, Rc is kept only here.
-    /// Then users can remove a resource only by the name
-    /// because there's no one having the Rc except this map.
-    geo_map: AHashMap<Rc<str>, GenIndexRc>,
-    /// Material name to its index.
-    mat_map: AHashMap<Rc<str>, GenIndexRc>,
-    /// Mesh name to geometry and material indices.
-    /// This map doesn't own the resources so that it works like weak references.
-    /// And indices will be used without matching generations.
-    meshes: AHashMap<Rc<str>, (GenIndex, GenIndex)>,
+    mats: MonoSparseSet<K, Material>,
+    /// Mesh name to geometry and material.
+    meshes: AHashMap<K, (K, K)>,
 }
 
-impl MeshResource {
+impl<K: AsResKey> MeshResource<K> {
     pub fn new() -> Self {
         Self {
-            geos: GenVecRc::new(),
-            mats: GenVecRc::new(),
-            geo_map: AHashMap::new(),
-            mat_map: AHashMap::new(),
+            geos: MonoSparseSet::new(),
+            mats: MonoSparseSet::new(),
             meshes: AHashMap::new(),
         }
     }
 
     #[inline]
-    pub fn contains_geometry(&self, name: &str) -> bool {
-        self.geo_map.contains_key(name)
+    pub fn contains_geometry<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.geos.contains_key(key)
     }
 
     #[inline]
-    pub fn contains_material(&self, name: &str) -> bool {
-        self.mat_map.contains_key(name)
+    pub fn contains_material<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.mats.contains_key(key)
     }
 
     #[inline]
-    pub fn iter_geo(&self) -> impl Iterator<Item = &GeometryVar> {
-        self.geos.iter_occupied()
+    pub fn iter_geo(&self) -> impl Iterator<Item = &(K, GeometryVar)> {
+        self.geos.iter()
     }
 
     #[inline]
-    pub fn iter_mat(&self) -> impl Iterator<Item = &Material> {
-        self.mats.iter_occupied()
+    pub fn iter_mat(&self) -> impl Iterator<Item = &(K, Material)> {
+        self.mats.iter()
     }
 
-    /// Adds a new geometry.
-    /// Returns the index of instered position if `name` is not given.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `name` is given and conflicts with something.
-    pub fn add_geometry(
-        &mut self,
-        name: Option<&Rc<str>>,
-        geo: impl Into<GeometryVar>,
-    ) -> Option<GenIndexRc> {
-        let geo = geo.into();
-        if let Some(name) = name {
-            let index = self.geos.insert(geo);
-            assert!(self.geo_map.insert(Rc::clone(name), index).is_none());
-            None
-        } else {
-            Some(self.geos.insert(geo))
-        }
+    /// Adds a new geometry and returns optional old geometry.
+    #[inline]
+    pub fn add_geometry(&mut self, key: K, geo: impl Into<GeometryVar>) -> Option<GeometryVar> {
+        self.geos.insert(key, geo.into())
     }
 
-    pub fn get_geometry<'a, S: Borrow<str> + 'a>(
-        &self,
-        key: impl Into<LabelOrGenIndexRc<'a, S>>,
-    ) -> Option<&GeometryVar> {
-        match key.into() {
-            LabelOrGenIndexRc::A(label) => {
-                if let Some(index) = self.get_geometry_index(label.borrow()) {
-                    self.geos.get(index.index)
-                } else {
-                    None
-                }
-            }
-            LabelOrGenIndexRc::B(index) => self.geos.get(index.index),
-        }
+    /// Adds a new material and returns optional old material.
+    #[inline]
+    pub fn add_material(&mut self, key: K, mat: impl Into<Material>) -> Option<Material> {
+        self.mats.insert(key, mat.into())
     }
 
-    pub fn sneak_get_geometry_mut<'a, S: Borrow<str> + 'a>(
-        &mut self,
-        key: impl Into<LabelOrGenIndexRc<'a, S>>,
-    ) -> Option<&mut GeometryVar> {
-        match key.into() {
-            LabelOrGenIndexRc::A(label) => {
-                if let Some(index) = self.get_geometry_index(label.borrow()) {
-                    self.geos.sneak_get_mut(index.index)
-                } else {
-                    None
-                }
-            }
-            LabelOrGenIndexRc::B(index) => self.geos.sneak_get_mut(index.index),
-        }
-    }
-
-    pub fn update_geometry<'a, S: Borrow<str> + 'a, U>(
-        &mut self,
-        key: impl Into<LabelOrGenIndexRc<'a, S>>,
-        f: impl FnOnce(&mut GeometryVar) -> U,
-    ) -> Option<AorB<U, (GenIndexRc, U)>> {
-        match key.into() {
-            LabelOrGenIndexRc::A(label) => {
-                if let Some(index) = self.get_geometry_index(label.borrow()) {
-                    if let Some((new_index, u)) = self.geos.update(index.index, f) {
-                        // Safety: geo_map has the label.
-                        unsafe {
-                            *self.geo_map.get_mut(label.borrow()).unwrap_unchecked() = new_index;
-                        }
-                        return Some(AorB::A(u));
-                    }
-                }
-                None
-            }
-            LabelOrGenIndexRc::B(index) => self.geos.update(index.index, f).map(|res| AorB::B(res)),
-        }
-    }
-
-    pub fn remove_geometry(&mut self, label: &str) -> Option<GeometryVar> {
-        // Safety: A mapped index must be valid and points to the occupied item.
-        self.geo_map
-            .remove(label)
-            .map(|index| unsafe { self.geos.take(index.index).unwrap_unchecked() })
-    }
-
-    /// Adds a new material.
-    /// Returns the index of inserted position if `label` is not given.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `name` is given and conflicts with something.
-    pub fn add_material(
-        &mut self,
-        label: Option<&Rc<str>>,
-        mat: impl Into<Material>,
-    ) -> Option<GenIndexRc> {
-        let mat = mat.into();
-        if let Some(label) = label {
-            let index = self.mats.insert(mat);
-            assert!(self.mat_map.insert(Rc::clone(label), index).is_none());
-            None
-        } else {
-            Some(self.mats.insert(mat))
-        }
-    }
-
-    pub fn get_material<'a, S: Borrow<str> + 'a>(
-        &self,
-        key: impl Into<LabelOrGenIndexRc<'a, S>>,
-    ) -> Option<&Material> {
-        match key.into() {
-            LabelOrGenIndexRc::A(label) => {
-                if let Some(index) = self.get_material_index(label.borrow()) {
-                    self.mats.get(index.index)
-                } else {
-                    None
-                }
-            }
-            LabelOrGenIndexRc::B(index) => self.mats.get(index.index),
-        }
-    }
-
-    pub fn sneak_get_material_mut<'a, S: Borrow<str> + 'a>(
-        &mut self,
-        key: impl Into<LabelOrGenIndexRc<'a, S>>,
-    ) -> Option<&mut Material> {
-        match key.into() {
-            LabelOrGenIndexRc::A(label) => {
-                if let Some(index) = self.get_material_index(label.borrow()) {
-                    self.mats.sneak_get_mut(index.index)
-                } else {
-                    None
-                }
-            }
-            LabelOrGenIndexRc::B(index) => self.mats.sneak_get_mut(index.index),
-        }
-    }
-
-    pub fn update_material<'a, S: Borrow<str> + 'a, U>(
-        &mut self,
-        key: impl Into<LabelOrGenIndexRc<'a, S>>,
-        f: impl FnOnce(&mut Material) -> U,
-    ) -> Option<AorB<U, (GenIndexRc, U)>> {
-        match key.into() {
-            LabelOrGenIndexRc::A(label) => {
-                if let Some(index) = self.get_material_index(label.borrow()) {
-                    if let Some((new_index, u)) = self.mats.update(index.index, f) {
-                        // Safety: mat_map has the name.
-                        unsafe {
-                            *self.mat_map.get_mut(label.borrow()).unwrap_unchecked() = new_index;
-                        }
-                        return Some(AorB::A(u));
-                    }
-                }
-                None
-            }
-            LabelOrGenIndexRc::B(index) => self.mats.update(index.index, f).map(|res| AorB::B(res)),
-        }
-    }
-
-    pub fn remove_material(&mut self, label: &str) -> Option<Material> {
-        // Safety: A mapped index must be valid and points to the occupied item.
-        self.mat_map
-            .remove(label)
-            .map(|index| unsafe { self.mats.take(index.index).unwrap_unchecked() })
+    /// Adds a new mesh.
+    #[inline]
+    pub fn add_mesh(&mut self, mesh_key: K, geo_key: K, mat_key: K) -> Option<(K, K)> {
+        self.meshes.insert(mesh_key, (geo_key, mat_key))
     }
 
     #[inline]
-    pub fn add_mesh<'a, 'b, S1: Borrow<str> + 'a, S2: Borrow<str> + 'b>(
-        &mut self,
-        mesh_label: &Rc<str>,
-        geo_key: impl Into<LabelOrGenIndexRc<'a, S1>>,
-        mat_key: impl Into<LabelOrGenIndexRc<'b, S2>>,
-    ) -> bool {
-        self._add_mesh(mesh_label, geo_key.into(), mat_key.into())
+    pub fn get_geometry<Q>(&self, key: &Q) -> Option<&GeometryVar>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.geos.get(key)
     }
 
-    pub fn get_mesh_geometry(&self, label: &str) -> Option<&GeometryVar> {
-        if let Some((geo_index, _)) = self.meshes.get(label) {
-            self.geos.get(*geo_index)
-        } else {
-            None
-        }
-    }
-
-    pub fn get_mesh_material(&self, label: &str) -> Option<&Material> {
-        if let Some((_, mat_index)) = self.meshes.get(label) {
-            self.mats.get(*mat_index)
-        } else {
-            None
-        }
-    }
-
-    fn _add_mesh<'a, S1: Borrow<str>, S2: Borrow<str>>(
-        &mut self,
-        mesh_label: &Rc<str>,
-        geo_key: LabelOrGenIndexRc<'a, S1>,
-        mat_key: LabelOrGenIndexRc<'a, S2>,
-    ) -> bool {
-        let geo_index = match geo_key {
-            LabelOrGenIndexRc::A(label) => self.get_geometry_index(label.borrow()),
-            LabelOrGenIndexRc::B(index) => Some(index),
-        };
-        let mat_index = match mat_key {
-            LabelOrGenIndexRc::A(label) => self.get_material_index(label.borrow()),
-            LabelOrGenIndexRc::B(index) => Some(index),
-        };
-        if let (Some(geo_index), Some(mat_index)) = (geo_index, mat_index) {
-            // Put in forced `GenIndex`.
-            self.meshes.insert(
-                Rc::clone(mesh_label),
-                (geo_index.index.into_forced(), mat_index.index.into_forced()),
-            );
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Users can't acquire `GenIndexRc` from the its name.
-    /// Because [`Self::geo_map`] and [`Self::mat_map`] are the only one which have Rc.
-    /// It's important with respect to remove operations.
     #[inline]
-    fn get_geometry_index(&self, label: &str) -> Option<&GenIndexRc> {
-        self.geo_map.get(label)
+    pub fn get_material<Q>(&self, key: &Q) -> Option<&Material>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.mats.get(key)
     }
 
-    /// Users can't acquire `GenIndexRc` from the its name.
-    /// Because [`Self::geo_map`] and [`Self::mat_map`] are the only one which have Rc.
-    /// It's important with respect to remove operations.
     #[inline]
-    fn get_material_index(&self, label: &str) -> Option<&GenIndexRc> {
-        self.mat_map.get(label)
+    pub fn get_geometry_mut<Q>(&mut self, key: &Q) -> Option<&mut GeometryVar>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.geos.get_mut(key)
+    }
+
+    #[inline]
+    pub fn get_material_mut<Q>(&mut self, key: &Q) -> Option<&mut Material>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.mats.get_mut(key)
+    }
+
+    #[inline]
+    pub fn remove_geometry<Q>(&mut self, key: &Q) -> Option<GeometryVar>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.geos.remove(key)
+    }
+
+    #[inline]
+    pub fn remove_material<Q>(&mut self, key: &Q) -> Option<Material>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.mats.remove(key)
+    }
+
+    #[inline]
+    pub fn remove_mesh<Q>(&mut self, key: &Q) -> Option<(K, K)>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.meshes.remove(key)
+    }
+
+    pub fn get_mesh_geometry<Q>(&self, key: &Q) -> Option<&GeometryVar>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.meshes
+            .get(key)
+            .map(|(geo_key, _)| self.get_geometry(geo_key.borrow()))
+            .flatten()
+    }
+
+    pub fn get_mesh_material<Q>(&self, key: &Q) -> Option<&Material>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.meshes
+            .get(key)
+            .map(|(_, mat_key)| self.get_material(mat_key.borrow()))
+            .flatten()
     }
 }
 
-impl Default for MeshResource {
+impl<K: AsResKey> Default for MeshResource<K> {
     fn default() -> Self {
         Self::new()
     }
