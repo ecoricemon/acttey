@@ -87,18 +87,10 @@ pub use smallvec;
 const TAB_SIZE: usize = 2;
 
 pub trait ToIdent {
-    fn maybe_ident() -> Option<&'static str> {
-        None
-    }
-
     fn to_ident() -> String;
 }
 
 pub trait ToIdentPretty: ToIdent {
-    fn maybe_ident_pretty() -> Option<&'static str> {
-        Self::maybe_ident()
-    }
-
     fn to_ident_pretty() -> String {
         Self::to_ident()
     }
@@ -210,8 +202,16 @@ impl Builder {
     /// Retrieves the index of the structure that has the given name.
     pub fn find_structure(&self, ident: &str) -> Option<usize> {
         find_index(self.entries.iter(), ident, |entry| {
-            entry.as_structure().map(|structure| structure.ident)
+            entry
+                .as_structure()
+                .map(|structure| structure.ident.as_str())
         })
+    }
+
+    /// Determines if the structure exists.
+    #[inline]
+    pub fn has_structure(&self, ident: &str) -> bool {
+        self.find_structure(ident).is_some()
     }
 
     /// Retrieves the `my_wgsl::Structure` that has the given name.
@@ -275,14 +275,7 @@ impl Builder {
     ) {
         if let Some(st) = self.get_structure_mut(struct_ident) {
             if let Some(member) = st.get_member_mut(member_ident) {
-                if let Some(i) = member.attrs.find_attribute_partial(attr_outer, attr_inner) {
-                    member.attrs.0[i].set_inner(attr_inner.unwrap_or_default());
-                } else {
-                    member.attrs.0.push(Attribute::from((
-                        attr_outer,
-                        attr_inner.unwrap_or_default(),
-                    )));
-                }
+                member.insert_attribute(attr_outer, attr_inner);
             }
         }
     }
@@ -309,13 +302,21 @@ impl Builder {
     /// assert_eq!(4, builder.get_structure("VertexInput").unwrap().members.len());
     ///
     /// // Retains only two members.
-    /// builder.retain_structure_members("VertexInput", &["position", "normal"]);
+    /// builder.retain_structure_members("VertexInput", ["position", "normal"].into_iter());
     /// assert_eq!(2, builder.get_structure("VertexInput").unwrap().members.len());
+    /// assert_eq!(
+    ///     "position",
+    ///     builder.get_structure("VertexInput").unwrap().members[0].ident
+    /// );
+    /// assert_eq!(
+    ///     "normal",
+    ///     builder.get_structure("VertexInput").unwrap().members[1].ident
+    /// );
     /// ```
     pub fn retain_structure_members<'a>(
         &mut self,
         struct_ident: &str,
-        member_idents: impl Iterator<Item = &'a str>,
+        member_idents: impl Iterator<Item = &'a str> + Clone,
     ) {
         if let Some(st) = self.get_structure_mut(struct_ident) {
             st.retain_members(member_idents);
@@ -342,7 +343,7 @@ impl Builder {
     ///
     /// wgsl_structs!(builder, VertexInput);
     ///
-    /// builder.reorder_structure_members("VertexInput", &["normal", "color", "position"]);
+    /// builder.reorder_structure_members("VertexInput", ["normal", "color", "position"].into_iter());
     ///
     /// let st = builder.get_structure("VertexInput").unwrap();
     /// assert_eq!("normal", st.members[0].ident);
@@ -362,8 +363,14 @@ impl Builder {
     /// Retrieves the index of the global variable that has the given name.
     pub fn find_global_variable(&self, ident: &str) -> Option<usize> {
         find_index(self.entries.iter(), ident, |entry| {
-            entry.as_global_variable().map(|var| var.ident)
+            entry.as_global_variable().map(|var| var.ident.as_str())
         })
+    }
+
+    /// Determines if the global variable exists.
+    #[inline]
+    pub fn has_global_variable(&self, ident: &str) -> bool {
+        self.find_global_variable(ident).is_some()
     }
 
     /// Retrieves the `my_wgsl::GlobalVariable` that has the given name.
@@ -408,8 +415,14 @@ impl Builder {
     /// Retrieves the index of the function that has the given name.
     pub fn find_function(&self, ident: &str) -> Option<usize> {
         find_index(self.entries.iter(), ident, |entry| {
-            entry.as_function().map(|f| f.ident)
+            entry.as_function().map(|f| f.ident.as_str())
         })
+    }
+
+    /// Determines if the function exists.
+    #[inline]
+    pub fn has_function(&self, ident: &str) -> bool {
+        self.find_function(ident).is_some()
     }
 
     /// Retrieves the `my_wgsl::Function` that has the given name.
@@ -488,8 +501,7 @@ impl Builder {
         attr_inner: Option<&str>,
     ) -> SmallVec<[CompoundStatement; 4]> {
         if let Some(f) = self.get_function_mut(fn_ident) {
-            f.stmt
-                .remove_statement_recur_partial(attr_outer, attr_inner)
+            f.remove_statement(attr_outer, attr_inner)
         } else {
             smallvec::smallvec![]
         }
@@ -531,11 +543,11 @@ impl Builder {
 
     /// finds out the first function that has vertex attribute.
     /// if found something, returns its ident, otherwise returns None.
-    pub fn get_vertex_stage_ident(&self) -> Option<&'static str> {
+    pub fn get_vertex_stage_ident(&self) -> Option<&String> {
         self.entries.iter().find_map(|entry| {
             if let ShaderEntry::Function(f) = entry {
                 if f.attrs.has_attribute(&Attribute::Vertex) {
-                    return Some(f.ident);
+                    return Some(&f.ident);
                 }
             }
             None
@@ -544,11 +556,11 @@ impl Builder {
 
     /// finds out the first function that has fragment attribute.
     /// if found something, returns its ident, otherwise returns None.
-    pub fn get_fragment_stage_ident(&self) -> Option<&'static str> {
+    pub fn get_fragment_stage_ident(&self) -> Option<&String> {
         self.entries.iter().find_map(|entry| {
             if let ShaderEntry::Function(f) = entry {
                 if f.attrs.has_attribute(&Attribute::Fragment) {
-                    return Some(f.ident);
+                    return Some(&f.ident);
                 }
             }
             None
@@ -626,7 +638,8 @@ pub struct Structure {
     /// Name of the struct.
     ///
     /// e.g. struct **Light** { ... }
-    pub ident: &'static str,
+    pub ident: String,
+
     /// Structure members.
     ///
     /// e.g. struct Light { **pos : vec3f**, **color : vec3f** }
@@ -636,7 +649,9 @@ pub struct Structure {
 impl Structure {
     /// Retrieves the index of the structure member that has the given name.
     pub fn find_member(&self, ident: &str) -> Option<usize> {
-        find_index(self.members.iter(), ident, |member| Some(member.ident))
+        find_index(self.members.iter(), ident, |member| {
+            Some(member.ident.as_str())
+        })
     }
 
     /// Tests if there's the specified member.
@@ -665,9 +680,10 @@ impl Structure {
     }
 
     /// Retains only the members in the given `idents`.
-    pub fn retain_members<'a>(&mut self, mut idents: impl Iterator<Item = &'a str>) {
+    pub fn retain_members<'a>(&mut self, idents: impl Iterator<Item = &'a str> + Clone) {
         for i in (0..self.members.len()).rev() {
-            if idents.all(|retain| retain != self.members[i].ident) {
+            let mut iter = idents.clone();
+            if iter.all(|retain| *retain != self.members[i].ident) {
                 self.members.remove(i);
             }
         }
@@ -725,12 +741,12 @@ impl Structure {
         let num = self
             .members
             .iter()
-            .filter(|m| !rhs.has_member(m.ident))
+            .filter(|member| !rhs.has_member(member.ident.as_str()))
             .count()
             + rhs.members.len();
         let mut merged = SmallVec::with_capacity(num);
         for member in self.members.iter() {
-            if !rhs.has_member(member.ident) {
+            if !rhs.has_member(member.ident.as_str()) {
                 merged.push(member.clone());
             }
         }
@@ -741,7 +757,7 @@ impl Structure {
 
 impl PutStr for Structure {
     fn put_ident(&self, buf: &mut String) {
-        buf.push_str(self.ident);
+        buf.push_str(self.ident.as_str());
     }
 
     fn put_str(&self, buf: &mut String) {
@@ -770,26 +786,52 @@ pub struct StructureMember {
     ///
     /// e.g. struct VertexInput { **@location(0)** pos : vec3f }
     pub attrs: Attributes,
+
     /// Name of the structure member.
     ///
     /// e.g. struct VertexInput { **pos** : vec3f }
-    pub ident: &'static str,
+    pub ident: String,
+
     /// Type of the structure member.
     ///
     /// e.g. struct VertexInput { pos : **vec3f** }
-    pub ty: &'static str,
+    pub ty: String,
+}
+
+impl StructureMember {
+    /// Creates a new structure member.
+    pub fn new(ident: String, ty: String) -> Self {
+        Self {
+            attrs: Attributes::new(),
+            ident,
+            ty,
+        }
+    }
+
+    /// Inserts a new structure member attribure.
+    /// If there was same attribute variant already,
+    /// Its inner value is changed with the given `inner`.
+    pub fn insert_attribute(&mut self, outer: &str, inner: Option<&str>) {
+        if let Some(i) = self.attrs.find_attribute_partial(outer, inner) {
+            self.attrs.0[i].set_inner(inner.unwrap_or_default());
+        } else {
+            self.attrs
+                .0
+                .push(Attribute::from((outer, inner.unwrap_or_default())));
+        }
+    }
 }
 
 impl PutStr for StructureMember {
     fn put_ident(&self, buf: &mut String) {
-        buf.push_str(self.ident);
+        buf.push_str(self.ident.as_str());
     }
 
     fn put_str(&self, buf: &mut String) {
         put_attrs(self.attrs.0.iter(), buf);
         self.put_ident(buf);
         buf.push(':');
-        buf.push_str(self.ty);
+        buf.push_str(&self.ty);
     }
 }
 
@@ -799,18 +841,22 @@ pub struct GlobalVariable {
     ///
     /// e.g. **group(0)** **binding(0)** var<storage> light : LightStorage.
     pub attrs: Attributes,
+
     /// Templates of the global variable.
     ///
     /// e.g. group(0) binding(0) var<**storage**> light : LightStorage.
     pub templates: SmallVec<[String; 2]>,
+
     /// Name of the global variable.
     ///
     /// e.g. group(0) binding(0) var<storage> **light** : LightStorage.
-    pub ident: &'static str,
+    pub ident: String,
+
     /// Type of the global variable.
     ///
     /// e.g. group(0) binding(0) var<storage> light : **LightStorage**.
     pub ty: Option<String>,
+
     /// Expression of the global variable.
     pub expr: Option<String>,
 }
@@ -828,8 +874,8 @@ impl GlobalVariable {
     /// let var = GlobalVariable::new(
     ///     [("group", 0).into(), ("binding", 0).into()].into_iter(),
     ///     std::iter::once("storage"),
-    ///     "lights",
-    ///     Some("LightStorage"),
+    ///     "lights".to_owned(),
+    ///     Some("LightStorage".to_owned()),
     ///     None,
     /// );
     ///
@@ -839,16 +885,16 @@ impl GlobalVariable {
     pub fn new<'a>(
         attrs: impl Iterator<Item = Attribute>,
         templates: impl Iterator<Item = &'a str>,
-        ident: &'static str,
-        ty: Option<&str>,
-        expr: Option<&str>,
+        ident: String,
+        ty: Option<String>,
+        expr: Option<String>,
     ) -> Self {
         Self {
             attrs: Attributes(attrs.collect()),
             templates: templates.map(|v| v.to_owned()).collect(),
             ident,
-            ty: ty.map(|v| v.to_owned()),
-            expr: expr.map(|v| v.to_owned()),
+            ty,
+            expr,
         }
     }
 
@@ -858,8 +904,8 @@ impl GlobalVariable {
     }
 
     /// Appends the given template.
-    pub fn push_template(&mut self, template: &str) {
-        self.templates.push(template.to_owned())
+    pub fn push_template(&mut self, template: String) {
+        self.templates.push(template)
     }
 
     /// Tries to remove the template that has the given name.
@@ -871,7 +917,7 @@ impl GlobalVariable {
 
 impl PutStr for GlobalVariable {
     fn put_ident(&self, buf: &mut String) {
-        buf.push_str(self.ident)
+        buf.push_str(self.ident.as_str())
     }
 
     fn put_str(&self, buf: &mut String) {
@@ -926,27 +972,54 @@ pub struct Function {
     ///
     /// e.g. **@fragment** fn fragmentMain(...) {...}
     pub attrs: Attributes,
+
     /// Name of the function.
     ///
     /// e.g. fn **foo**(...) {...}
-    pub ident: &'static str,
+    pub ident: String,
+
     /// Inputs of the function.
     ///
     /// e.g. fn foo(**input : Input**) {...}
     pub inputs: SmallVec<[FunctionParameter; 4]>,
+
     /// Output of the function.
     ///
     /// e.g. fn foo(...) -> **Output** {...}
     pub output: Option<FunctionParameter>,
+
     /// Statements of the function.
     ///
     /// e.g. fn foo(...) { **statement; { statement } ...** }
     pub stmt: CompoundStatement,
 }
 
+impl Function {
+    /// Tries to remove the statement.
+    pub fn remove_statement(
+        &mut self,
+        attr_outer: &str,
+        attr_inner: Option<&str>,
+    ) -> SmallVec<[CompoundStatement; 4]> {
+        self.stmt
+            .remove_statement_recur_partial(attr_outer, attr_inner)
+    }
+
+    /// Appends `stmt` at the end of statements.
+    /// If the last statement is [`Statement::Other`], `stmt` is appended to it.
+    /// Otherwise, new `Other` is generated.
+    pub fn append_statement(&mut self, stmt: String) {
+        if let Some(Statement::Other(last_stmt)) = self.stmt.stmts.last_mut() {
+            last_stmt.push(stmt);
+        } else {
+            self.stmt.stmts.push(Statement::Other(vec![stmt]));
+        }
+    }
+}
+
 impl PutStr for Function {
     fn put_ident(&self, buf: &mut String) {
-        buf.push_str(self.ident);
+        buf.push_str(self.ident.as_str());
     }
 
     fn put_str(&self, buf: &mut String) {
@@ -1006,14 +1079,16 @@ pub struct FunctionParameter {
     ///
     /// e.g. fn @fragement fragementMain(**@location(0)** pos : vec3f, ...) -> **@location(0)** vec4f {...}
     pub attrs: Attributes,
+
     /// Name of the function parameter.
     ///
     /// e.g. fn foo(**name** : vec3f) {...}
-    pub ident: Option<&'static str>,
+    pub ident: Option<String>,
+
     /// type of the function parameter.
     ///
     /// e.g. fn foo(name : **vec3f**) -> **vec4f** {...}
-    pub ty: &'static str,
+    pub ty: String,
 }
 
 impl PutStr for FunctionParameter {
@@ -1029,7 +1104,7 @@ impl PutStr for FunctionParameter {
             buf.push_str(ident);
             buf.push(':');
         }
-        buf.push_str(self.ty);
+        buf.push_str(&self.ty);
     }
 }
 
@@ -1040,7 +1115,7 @@ impl PutStrPretty for FunctionParameter {
             buf.push_str(ident);
             buf.push_str(" : ");
         }
-        buf.push_str(self.ty);
+        buf.push_str(&self.ty);
     }
 }
 
@@ -1051,6 +1126,7 @@ impl PutStrPretty for FunctionParameter {
 pub struct CompoundStatement {
     /// Attributes of the statement.
     pub attrs: Attributes,
+
     /// Statements inside this block.
     pub stmts: Vec<Statement>,
 }
@@ -1220,9 +1296,11 @@ pub enum Statement {
     // Not fully implemented.
     /// Compoud statement is a set of statements wrapped with braces.
     Compound(CompoundStatement),
+
     /// Compound statement, but doesn't output attributes and braces.
     /// It's useful when you assign conditional compound statement to a variable.
     BareCompound(CompoundStatement),
+
     /// Currently, all statements without braces belong to this.
     Other(Vec<String>),
 }
@@ -1599,7 +1677,7 @@ pub enum BuiltinValue {
     #[default]
     VertexIndex, // Vertex input
     InstanceIndex,        // Vertex input
-    Position,             // Vertex output & Fragment input
+    Position,             // Vertex output(mandatory) & Fragment input(Not mandatory)
     FrontFacing,          // Fragment input
     FragDepth,            // Fragment output
     SampleIndex,          // Fragment input
@@ -1657,39 +1735,23 @@ impl From<&str> for BuiltinValue {
 macro_rules! impl_str {
     ($id:ident) => {
         impl ToIdent for $id {
-            fn maybe_ident() -> Option<&'static str> {
-                Some(stringify!($id))
-            }
-
             fn to_ident() -> String {
-                // Safety: Infallible.
-                unsafe { Self::maybe_ident().unwrap_unchecked().to_owned() }
+                stringify!($id).to_owned()
             }
         }
 
         impl PutStr for $id {
             fn put_ident(&self, buf: &mut String) {
-                // Safety: Infallible.
-                unsafe { buf.push_str(Self::maybe_ident().unwrap_unchecked()) }
+                buf.push_str(&Self::to_ident());
             }
 
             fn put_str(&self, buf: &mut String) {
-                // Safety: Infallible.
-                unsafe { buf.push_str(Self::maybe_ident().unwrap_unchecked()) }
+                self.put_ident(buf);
             }
         }
     };
     ($id:ident<$t:ident>) => {
         impl<$t: ToIdent> ToIdent for $id<$t> {
-            fn maybe_ident() -> Option<&'static str> {
-                ($t::maybe_ident() == Some(stringify!($t))).then_some(concat!(
-                    stringify!($id),
-                    '<',
-                    stringify!($t),
-                    '>'
-                ))
-            }
-
             fn to_ident() -> String {
                 let mut res = stringify!($id).to_owned();
                 res.push('<');
@@ -1711,8 +1773,6 @@ macro_rules! impl_str {
     };
     ($id:ident<$t:ident, N>) => {
         impl<$t: ToIdent, const N: usize> ToIdent for $id<$t, N> {
-            // We can't implement maybe_ident()?
-
             fn to_ident() -> String {
                 let mut res = stringify!($id).to_owned();
                 res.push('<');
@@ -1890,7 +1950,7 @@ macro_rules! wgsl_global_var {
         my_wgsl::GlobalVariable::new(
             [("group", $gi).into(), ("binding", $bi).into()].into_iter(),
             std::iter::empty(),
-            stringify!($id),
+            stringify!($id).to_owned(),
             None,
             None,
         )
@@ -1900,7 +1960,7 @@ macro_rules! wgsl_global_var {
             #[allow(unused_mut)]
             let mut var = my_wgsl::wgsl_global_var!($gi, $bi, $id);
             $(
-                var.push_template(stringify!($temp));
+                var.push_template(stringify!($temp).to_owned());
             )*
             var
         }

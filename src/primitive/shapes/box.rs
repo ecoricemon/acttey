@@ -1,8 +1,6 @@
-use std::{
-    ops::Deref,
-};
+use std::ops::Deref;
 
-use crate::primitive::{mesh::Geometry, vector::Vector, Normal, Position};
+use crate::primitive::{mesh::SeparateGeometry, vector::Vector, Normal, Position};
 
 #[derive(Debug)]
 pub struct Box {
@@ -34,7 +32,7 @@ impl From<[f32; 3]> for Box {
     }
 }
 
-impl From<Box> for Geometry {
+impl From<Box> for SeparateGeometry {
     /// Creates `Geometry` from `Box` centered at origin(0, 0, 0).
     fn from(value: Box) -> Self {
         create_box_geometry(value, Vector::<f32, 3>::new(0.0, 0.0, 0.0))
@@ -42,7 +40,7 @@ impl From<Box> for Geometry {
 }
 
 /// Creates `Geometry` from the given `Box` and locates its center at the `center`.
-pub fn create_box_geometry(box_: Box, center: Vector<f32, 3>) -> Geometry {
+pub fn create_box_geometry(box_: Box, center: Vector<f32, 3>) -> SeparateGeometry {
     const DEFAULT: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
     let (hw, hh, hd) = (box_.width / 2.0, box_.height / 2.0, box_.depth / 2.0);
     let fbl = center + Vector::<f32, 3>::new(-hw, -hh, hd);
@@ -91,7 +89,7 @@ pub fn create_box_geometry(box_: Box, center: Vector<f32, 3>) -> Geometry {
         .flat_map(|i| [i, i + 1, i + 2, i + 2, i + 1, i + 3])
         .collect();
 
-    Geometry::new()
+    SeparateGeometry::new()
         .with_position(positions.into())
         .with_normal(normals.into())
         .with_indices(indices.into())

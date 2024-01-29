@@ -1,4 +1,3 @@
-use crate::{ntimes, util::AorB};
 use ahash::AHashMap;
 use std::{borrow::Borrow, hash::Hash, rc::Rc};
 
@@ -10,20 +9,20 @@ const GEN_IGNORE: u64 = u64::MAX - 1;
 /// However, generation increases whenever modificaions occur.
 /// Therefore, you can notice that the value has been changed.
 #[derive(Debug)]
-pub struct GenMap<K: Eq + Hash + Clone, V> {
-    pairs: AHashMap<K, (V, u64)>,
+pub struct GenMap<K, V> {
+    items: AHashMap<K, (V, u64)>,
 }
 
 impl<K: Eq + Hash + Clone, V> GenMap<K, V> {
     pub fn new() -> Self {
         Self {
-            pairs: AHashMap::new(),
+            items: AHashMap::new(),
         }
     }
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.pairs.len()
+        self.items.len()
     }
 
     #[inline]
@@ -33,49 +32,73 @@ impl<K: Eq + Hash + Clone, V> GenMap<K, V> {
 
     #[inline]
     pub fn capacity(&self) -> usize {
-        self.pairs.capacity()
+        self.items.capacity()
     }
 
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
-        self.pairs.iter().map(|(k, (v, _))| (k, v))
+        self.items.iter().map(|(k, (v, _))| (k, v))
     }
 
     #[inline]
-    pub fn pairs(&self) -> impl Iterator<Item = &V> {
-        self.pairs.values().map(|(v, _)| v)
+    pub fn values(&self) -> impl Iterator<Item = &V> {
+        self.items.values().map(|(v, _)| v)
     }
 
     #[inline]
-    pub fn get(&self, key: &K) -> Option<&(V, u64)> {
-        self.pairs.get(key)
+    pub fn get<Q>(&self, key: &Q) -> Option<&(V, u64)>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.items.get(key)
     }
 
     #[inline]
-    pub fn get_value(&self, key: &K) -> Option<&V> {
+    pub fn get_value<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         self.get(key).map(|(v, _)| v)
     }
 
     #[inline]
-    pub fn sneak_get_value_mut(&mut self, key: &mut K) -> Option<&mut V> {
-        self.pairs.get_mut(key).map(|(v, _)| v)
+    pub fn sneak_get_value_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.items.get_mut(key).map(|(v, _)| v)
     }
 
     #[inline]
-    pub fn get_gen(&self, key: &K) -> Option<u64> {
+    pub fn get_gen<Q>(&self, key: &Q) -> Option<u64>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         self.get(key).map(|(_, gen)| *gen)
     }
 
     #[inline]
-    pub fn contains_key(&self, key: &K) -> bool {
-        self.pairs.contains_key(key)
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.items.contains_key(key)
     }
 
     /// Updates the value using the given function.
     /// Returns new generation of the value if update succeeded.
     /// Otherwise, returns None.
-    pub fn update<U>(&mut self, key: &K, f: impl FnOnce(&mut V) -> U) -> Option<u64> {
-        if let Some((value, gen)) = self.pairs.get_mut(key) {
+    pub fn update<Q, U>(&mut self, key: &Q, f: impl FnOnce(&mut V) -> U) -> Option<u64>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        if let Some((value, gen)) = self.items.get_mut(key) {
             f(value);
             *gen += 1;
             Some(*gen)
@@ -84,8 +107,12 @@ impl<K: Eq + Hash + Clone, V> GenMap<K, V> {
         }
     }
 
-    pub fn sneak_update(&mut self, key: &K, f: impl FnOnce(&mut V)) -> bool {
-        if let Some((value, _)) = self.pairs.get_mut(key) {
+    pub fn sneak_update<Q>(&mut self, key: &Q, f: impl FnOnce(&mut V)) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        if let Some((value, _)) = self.items.get_mut(key) {
             f(value);
             true
         } else {
@@ -97,21 +124,25 @@ impl<K: Eq + Hash + Clone, V> GenMap<K, V> {
     /// Returns old value if it was.
     pub fn insert(&mut self, key: K, value: V) -> Option<(V, u64)> {
         let next_gen = self.get_gen(&key).map(|gen| gen + 1).unwrap_or_default();
-        self.pairs.insert(key, (value, next_gen))
+        self.items.insert(key, (value, next_gen))
     }
 
     /// Removes the value from the map and forgets about it.
     /// If you insert another value with the same key after calling this function,
     /// The value will have generation 0 and it will grow again.
-    pub fn remove(&mut self, key: &K) -> Option<(V, u64)> {
-        self.pairs.remove(key)
+    pub fn remove<Q>(&mut self, key: &Q) -> Option<(V, u64)>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.items.remove(key)
     }
 }
 
-impl<K: Eq + Hash + Clone, V> Default for GenMap<K, V> {
+impl<K, V> Default for GenMap<K, V> {
     fn default() -> Self {
         Self {
-            pairs: AHashMap::new(),
+            items: AHashMap::new(),
         }
     }
 }
@@ -210,15 +241,13 @@ impl<T> GenVecRc<T> {
         }
     }
 
-    /// Declares use of unused item.
-    /// Returns new index only if `index` points to an unused item.
-    /// Otherwise, if it's used or vacant, returns None.
+    /// Owns and therefore gets its [`GenIndexRc`] if it's not vacant.
     ///
     /// # Panics
     ///
     /// Panics if `index` is out of bound.
-    pub fn reuse(&mut self, index: usize) -> Option<GenIndexRc> {
-        self.is_unused(index).then(|| {
+    pub fn own(&self, index: usize) -> Option<GenIndexRc> {
+        self.is_occupied(index).then(|| {
             let gen = self.values.get_gen(index);
             // Safety: index points to valid item.
             unsafe {
@@ -234,7 +263,7 @@ impl<T> GenVecRc<T> {
     /// could be shrink. But note that their capacities won't change.
     pub fn clear_vacancy(&mut self) -> usize {
         let removed = self.values.clear_vacancy();
-        ntimes!(removed, self.refs.pop());
+        self.refs.truncate(self.values.len() - removed);
         removed
     }
 
@@ -378,8 +407,8 @@ impl<T> GenVecRc<T> {
     }
 }
 
-/// A generational index owns the item in `GenVecRc`.
-/// See `GenIndex` if you're using `GenVec`.
+/// A generational index owns the item in [`GenVecRc`].
+/// See [`GenIndex`] if you're using [`GenVec`].
 #[derive(PartialEq, Debug, Clone)]
 pub struct GenIndexRc {
     pub index: GenIndex,
@@ -403,8 +432,8 @@ impl GenIndexRc {
     }
 
     #[inline]
-    pub fn is_dummy(index: &GenIndexRc) -> bool {
-        index == &Self::dummy()
+    pub fn is_dummy(&self) -> bool {
+        self.index.is_dummy()
     }
 }
 
@@ -850,8 +879,8 @@ impl GenIndex {
     }
 
     #[inline]
-    pub fn is_dummy(index: &GenIndex) -> bool {
-        index == &Self::dummy()
+    pub fn is_dummy(&self) -> bool {
+        self == &Self::dummy()
     }
 
     /// Ignores generation.
@@ -867,31 +896,37 @@ impl From<&GenIndexRc> for GenIndex {
     }
 }
 
-pub type LabelOrGenIndexRc<'a, S> = AorB<S, &'a GenIndexRc>;
+pub enum LabelOrGenIndexRc<'a, S> {
+    Label(S),
+    Index(&'a GenIndexRc),
+}
 
 impl<'a, S: Borrow<str>> From<S> for LabelOrGenIndexRc<'a, S> {
     fn from(value: S) -> Self {
-        Self::A(value)
+        Self::Label(value)
     }
 }
 
 impl<'a, S: Borrow<str>> From<&'a GenIndexRc> for LabelOrGenIndexRc<'a, S> {
     fn from(value: &'a GenIndexRc) -> Self {
-        Self::B(value)
+        Self::Index(value)
     }
 }
 
-pub type LabelOrGenIndex<'a, S> = AorB<S, &'a GenIndex>;
+pub enum LabelOrGenIndex<'a, S> {
+    Label(S),
+    Index(&'a GenIndex),
+}
 
 impl<'a, S: Borrow<str>> From<S> for LabelOrGenIndex<'a, S> {
     fn from(value: S) -> Self {
-        Self::A(value)
+        Self::Label(value)
     }
 }
 
 impl<'a, S: Borrow<str>> From<&'a GenIndex> for LabelOrGenIndex<'a, S> {
     fn from(value: &'a GenIndex) -> Self {
-        Self::B(value)
+        Self::Index(value)
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::primitive::{mesh::Geometry, vector::Vector};
+use crate::primitive::{mesh::SeparateGeometry, vector::Vector};
 
 #[derive(Debug)]
 pub struct Plane {
@@ -24,13 +24,13 @@ impl From<[f32; 2]> for Plane {
     }
 }
 
-impl From<Plane> for Geometry {
+impl From<Plane> for SeparateGeometry {
     fn from(value: Plane) -> Self {
         create_plane_geometry(value)
     }
 }
 
-pub fn create_plane_geometry(plane: Plane) -> Geometry {
+pub fn create_plane_geometry(plane: Plane) -> SeparateGeometry {
     let (hw, hh) = (plane.width / 2.0, plane.height / 2.0);
     let positions = vec![
         Vector::<f32, 3>::new(-hw, hh, 0.0),  // tl
@@ -39,7 +39,7 @@ pub fn create_plane_geometry(plane: Plane) -> Geometry {
         Vector::<f32, 3>::new(hw, -hh, 0.0),  // br
     ];
     let normal = Vector::<f32, 3>::new(0.0, 0.0, 1.0);
-    Geometry::new()
+    SeparateGeometry::new()
         .with_position(positions.into())
         .with_normal(vec![normal; 4].into())
         .with_indices(vec![0_u16, 1, 2, 2, 1, 3].into())

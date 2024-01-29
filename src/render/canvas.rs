@@ -1,6 +1,7 @@
 use crate::{
     ds::generational::{GenIndexRc, GenVecRc},
     render::RenderError,
+    util::web,
 };
 use ahash::AHashMap;
 use std::{collections::BTreeMap, mem::ManuallyDrop, rc::Rc};
@@ -83,7 +84,7 @@ impl SurfacePack {
             attachments.push(Some(wgpu::RenderPassColorAttachment {
                 view: &views[vi],
                 resolve_target: None,
-                ops: surface.create_color_operations(),
+                ops: surface.get_color_operations(),
             }));
         }
 
@@ -296,12 +297,19 @@ impl Surface {
         };
     }
 
+    #[inline]
     pub fn set_color_operations(&mut self, ops: wgpu::Operations<wgpu::Color>) {
         self.color_ops = ops;
     }
 
-    pub fn create_color_operations(&self) -> wgpu::Operations<wgpu::Color> {
+    #[inline]
+    pub fn get_color_operations(&self) -> wgpu::Operations<wgpu::Color> {
         self.color_ops
+    }
+
+    #[inline]
+    pub fn get_canvas_selectors(&self) -> &Rc<str> {
+        &self.canvas.selectors
     }
 
     /// Configures the surface.
@@ -391,15 +399,15 @@ impl CanvasPack {
         let dummy_id = "acttey-dummy-canvas";
         let dummy_selectors = "#acttey-dummy-canvas";
         let dummy_canvas: web_sys::HtmlCanvasElement =
-            crate::util::create_element("canvas").expect_throw(crate::errmsg::WEBSYS_ADD_ELEMENT);
-        crate::util::set_attributes(
+            web::create_element("canvas").expect_throw(crate::errmsg::WEBSYS_ADD_ELEMENT);
+        web::set_attributes(
             &dummy_canvas,
             [("id", dummy_id), ("hidden", "")].into_iter(),
         )
         .unwrap();
 
         // Adds dummy canvas.
-        inst.insert(dummy_selectors).unwrap();
+        inst.add(dummy_selectors).unwrap();
 
         // Handle starts from 1.
         inst.cur_handle = 1;
@@ -407,14 +415,17 @@ impl CanvasPack {
         inst
     }
 
-    /// Inserts a canvas selected by the given `selectors`.
-    pub fn insert(&mut self, selectors: &str) -> Result<Rc<Canvas>, RenderError> {
-        let canvas = Canvas::new(selectors, self.cur_handle)?;
-        let canvas1 = Rc::new(canvas);
-        let canvas2 = Rc::clone(&canvas1);
-        self.handle_to_canvas.insert(self.cur_handle, canvas1);
+    /// Adds the canvas selected by the given `selectors`.
+    pub fn add(&mut self, selectors: impl Into<Rc<str>>) -> Result<Rc<Canvas>, RenderError> {
+        let selectors = selectors.into();
+        let canvas = Rc::new(Canvas::new(Rc::clone(&selectors), self.cur_handle)?);
+        if let Some(orphan_handle) = self.selectors_to_handle.insert(selectors, self.cur_handle) {
+            self.handle_to_canvas.remove(&orphan_handle);
+        }
+        self.handle_to_canvas
+            .insert(self.cur_handle, Rc::clone(&canvas));
         self.cur_handle += 1;
-        Ok(canvas2)
+        Ok(canvas)
     }
 
     pub fn get_by_selectors(&self, selectors: &str) -> Option<&Rc<Canvas>> {
@@ -491,30 +502,41 @@ impl Default for CanvasPack {
 
 #[derive(Debug)]
 pub struct Canvas {
+    /// HTML element.
     element: web_sys::HtmlCanvasElement,
+
     // ref: https://docs.rs/raw-window-handle/0.5.0/raw_window_handle/struct.WebWindowHandle.html
+    /// Integer handle. This is automatically inserted as an element attribute.
     handle: u32,
+
+    /// CSS selectors that used to find this canvas.
+    selectors: Rc<str>,
 }
 
 impl Canvas {
-    pub fn new(selectors: &str, handle: u32) -> Result<Self, RenderError> {
+    pub fn new(selectors: impl Into<Rc<str>>, handle: u32) -> Result<Self, RenderError> {
         // 0 is reserved for window itself.
         assert!(handle > 0);
 
         // Injects `data-raw-handle` attribute into the canvas element.
         // This is required by `wgpu::Surface` and `raw-window-handle`.
-        let element = Self::get_canvas_element(selectors)?;
-        crate::util::set_attributes(
+        let selectors = selectors.into();
+        let element = Self::get_canvas_element(&selectors)?;
+        web::set_attributes(
             &element,
             [("data-raw-handle", handle.to_string().as_str())].into_iter(),
         )
         .unwrap();
 
-        Ok(Self { element, handle })
+        Ok(Self {
+            element,
+            handle,
+            selectors,
+        })
     }
 
     pub fn get_canvas_element(selectors: &str) -> Result<web_sys::HtmlCanvasElement, RenderError> {
-        let element = crate::util::query_selector(selectors)
+        let element = web::query_selector(selectors)
             .map_err(|_| RenderError::CanvasQueryError(selectors.to_owned()))?;
         let element = element.ok_or(RenderError::CanvasQueryError(selectors.to_owned()))?;
         let canvas = element
@@ -532,9 +554,14 @@ impl Canvas {
         Ok(canvas)
     }
 
-    #[inline(always)]
+    #[inline]
     pub fn handle(&self) -> u32 {
         self.handle
+    }
+
+    #[inline]
+    pub fn selectors(&self) -> &Rc<str> {
+        &self.selectors
     }
 }
 

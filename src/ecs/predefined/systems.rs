@@ -11,7 +11,8 @@ use crate::{
             IterBindGroup, IterIndexBuffer, IterRenderPass, IterRenderPipeline, IterVertexBuffer,
             RenderResource,
         },
-    }, ResKey,
+    },
+    util::key::ResKey,
 };
 
 /// A system to resize all surfaces to match with the new size.  
@@ -24,7 +25,7 @@ impl System for Resized {
     type Ref = ();
     type Mut = ();
     type ResRef = ();
-    type ResMut = (EventManager, RenderResource<ResKey>);
+    type ResMut = (EventManager, RenderResource);
 
     fn run(
         &mut self,
@@ -78,7 +79,7 @@ impl Render {
 impl System for Render {
     type Ref = ();
     type Mut = ();
-    type ResRef = (RenderResource<ResKey>, TimeStamp);
+    type ResRef = (RenderResource, TimeStamp);
     type ResMut = ();
 
     fn run(

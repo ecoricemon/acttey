@@ -101,6 +101,22 @@ impl System for SuperSystem {
     }
 }
 
+enum ResKey {
+    MyCamera,
+    BoxGeometry,
+    RedMaterial,
+    RedBox,
+    MyShader,
+    MyPipeline,
+    MyScene,
+}
+
+impl From<ResKey> for u32 {
+    fn from(value: ResKey) -> Self {
+        value as u32
+    }
+}
+
 #[wasm_bindgen]
 impl MyApp {
     #[wasm_bindgen(constructor)]
@@ -111,23 +127,27 @@ impl MyApp {
     #[wasm_bindgen]
     pub async fn run(&mut self) {
         let mut app = App::new().await;
+
         app.add_canvas("#canvas0")
-            .with_default()
             .add_listen_event("", "resize")
             .add_listen_event("#canvas0", "mousemove")
-            .add_camera("MyCamera", cameras::PerspectiveCamera::default())
-            .with_default()
-            .add_geometry("BoxGeometry", shapes::Box::new(0.3, 0.3, 0.3))
-            .with_default()
-            .add_material("RedMaterial", colors::RED)
-            .with_default()
-            .add_mesh("RedBox", "BoxGeometry", "RedMaterial")
-            .add_basic_shader("MyShader")
-            .add_basic_pipeline("MyPipeline")
-            .add_system(systems::Resized)
+            .add_geometry(ResKey::BoxGeometry, shapes::Box::new(0.3, 0.3, 0.3))
+            .add_material(ResKey::RedMaterial, colors::RED)
+            .add_mesh(ResKey::RedBox, ResKey::BoxGeometry, ResKey::RedMaterial);
+
+        let mut scene = Scene::new();
+        scene
+            .add_canvas("#canvas0")
+            .add_node(None)
+            .with_camera(ResKey::MyCamera, camera::PerspectiveCamera::default())
+            .with_mesh(ResKey::RedBox);
+        app.add_scene(ResKey::MyScene, scene).unwrap();
+
+        app.add_system(systems::Resized)
             .add_system(systems::Render::new())
             .add_system(systems::ClearInput)
             .run();
+
         self.0 = Some(app);
     }
 }

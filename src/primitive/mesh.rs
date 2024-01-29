@@ -1,37 +1,43 @@
 //! Based on glTF 2.0
 
+use my_wgsl::*;
+
 use crate::{
-    ds::sparse_set::MonoSparseSet,
+    ds::{refs::RcValue, sparse_set::MonoSparseSet},
     impl_from_for_enum,
     primitive::{constant::colors, vector::Vector, Color},
-    render::buffer::MultiBufferData,
-    util::AsMultiBytes, AsResKey,
+    util::{AsMultiBytes, key::ResKey},
 };
 use ahash::AHashMap;
-use smallvec::SmallVec;
-use std::{borrow::Borrow, hash::Hash, mem::size_of, rc::Rc};
+use std::{
+    borrow::Borrow,
+    hash::Hash,
+    mem::{discriminant, size_of, Discriminant},
+    rc::Rc,
+};
 
 /// Geometry variants.
 #[derive(Debug)]
-pub enum GeometryVar {
+pub enum Geometry {
     /// Geometry with seperate attributes.
-    Sep(Box<Geometry>),
+    Separate(SeparateGeometry),
     /// Geometry with interleaved attributes.
-    Int(InterleavedGeometry),
-    /// GPU buffer and geometry with interleaved attributes.
-    BufInt(MultiBufferData<InterleavedGeometry, 2>),
+    Interleaved(InterleavedGeometry),
 }
 
-impl GeometryVar {
+impl_from_for_enum!(Geometry, Separate, SeparateGeometry);
+impl_from_for_enum!(Geometry, Interleaved, InterleavedGeometry);
+
+impl Geometry {
     pub fn sort(&mut self) {
-        if let Self::Sep(geo) = self {
+        if let Self::Separate(geo) = self {
             geo.sort();
         }
     }
 
     pub fn create_interleaved(&self) -> Option<InterleavedGeometry> {
-        if let Self::Sep(geo) = self {
-            Some(InterleavedGeometry::from(&**geo))
+        if let Self::Separate(geo) = self {
+            Some(InterleavedGeometry::from(geo))
         } else {
             None
         }
@@ -40,62 +46,31 @@ impl GeometryVar {
     /// Makes this interleaved attributes variant.
     /// If caller gave `int_geo`, it will be used instead of generating it.
     pub fn into_interleaved(&mut self, int_geo: Option<InterleavedGeometry>) {
-        if let Self::Sep(geo) = self {
-            *self = Self::Int(int_geo.unwrap_or(InterleavedGeometry::from(&**geo)));
-        }
-    }
-
-    /// Makes this buffer and interleaved attributes variant.
-    /// If caller gave `int_geo`, it will be used instead of generating it.
-    /// If this was already interleaved and `int_geo` was given, `int_geo` will be used anyway.
-    /// Given value has priority always.
-    pub fn into_buffer_interleaved(
-        &mut self,
-        int_geo: Option<InterleavedGeometry>,
-        bufs: [Rc<wgpu::Buffer>; 2],
-    ) {
-        match self {
-            Self::Sep(geo) => {
-                *self = Self::BufInt(MultiBufferData::new(
-                    bufs,
-                    int_geo.unwrap_or(InterleavedGeometry::from(&**geo)),
-                ));
-            }
-            Self::Int(old_int_geo) => {
-                *self = Self::BufInt(MultiBufferData::new(
-                    bufs,
-                    int_geo.unwrap_or(old_int_geo.clone()),
-                ));
-            }
-            _ => (),
+        if let Self::Separate(geo) = self {
+            *self = Self::Interleaved(int_geo.unwrap_or(InterleavedGeometry::from(geo)));
         }
     }
 
     pub fn as_interleaved(&self) -> Option<&InterleavedGeometry> {
         match self {
-            Self::Int(int_geo) => Some(int_geo),
-            Self::BufInt(buf_int_geo) => Some(&buf_int_geo.data),
+            Self::Interleaved(int_geo) => Some(int_geo),
             _ => None,
         }
     }
 }
 
-impl_from_for_enum!(GeometryVar, Sep, Box<Geometry>);
-impl_from_for_enum!(GeometryVar, Int, InterleavedGeometry);
-impl_from_for_enum!(GeometryVar, BufInt, MultiBufferData<InterleavedGeometry, 2>);
-
 /// Top struct of geometries and materials.
 #[derive(Debug)]
-pub struct MeshResource<K: AsResKey> {
+pub struct MeshResource {
     /// Geometries.
-    geos: MonoSparseSet<K, GeometryVar>,
+    geos: MonoSparseSet<ResKey, RcValue<Geometry>>,
     /// Materials.
-    mats: MonoSparseSet<K, Material>,
+    mats: MonoSparseSet<ResKey, RcValue<Material>>,
     /// Mesh name to geometry and material.
-    meshes: AHashMap<K, (K, K)>,
+    meshes: AHashMap<ResKey, (ResKey, ResKey)>,
 }
 
-impl<K: AsResKey> MeshResource<K> {
+impl MeshResource {
     pub fn new() -> Self {
         Self {
             geos: MonoSparseSet::new(),
@@ -107,7 +82,7 @@ impl<K: AsResKey> MeshResource<K> {
     #[inline]
     pub fn contains_geometry<Q>(&self, key: &Q) -> bool
     where
-        K: Borrow<Q>,
+        ResKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.geos.contains_key(key)
@@ -116,106 +91,135 @@ impl<K: AsResKey> MeshResource<K> {
     #[inline]
     pub fn contains_material<Q>(&self, key: &Q) -> bool
     where
-        K: Borrow<Q>,
+        ResKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.mats.contains_key(key)
     }
 
     #[inline]
-    pub fn iter_geo(&self) -> impl Iterator<Item = &(K, GeometryVar)> {
-        self.geos.iter()
+    pub fn iter_geo(&self) -> impl Iterator<Item = (&ResKey, &Geometry)> {
+        self.geos.iter().map(|(k, v)| (k, &**v))
     }
 
     #[inline]
-    pub fn iter_mat(&self) -> impl Iterator<Item = &(K, Material)> {
-        self.mats.iter()
+    pub fn iter_mat(&self) -> impl Iterator<Item = (&ResKey, &Material)> {
+        self.mats.iter().map(|(k, v)| (k, &**v))
     }
 
     /// Adds a new geometry and returns optional old geometry.
     #[inline]
-    pub fn add_geometry(&mut self, key: K, geo: impl Into<GeometryVar>) -> Option<GeometryVar> {
-        self.geos.insert(key, geo.into())
+    pub fn add_geometry(
+        &mut self,
+        key: ResKey,
+        geo: impl Into<Geometry>,
+    ) -> Option<RcValue<Geometry>> {
+        self.geos.insert(key, RcValue::new(geo.into()))
     }
 
     /// Adds a new material and returns optional old material.
     #[inline]
-    pub fn add_material(&mut self, key: K, mat: impl Into<Material>) -> Option<Material> {
-        self.mats.insert(key, mat.into())
+    pub fn add_material(
+        &mut self,
+        key: ResKey,
+        mat: impl Into<Material>,
+    ) -> Option<RcValue<Material>> {
+        self.mats.insert(key, RcValue::new(mat.into()))
     }
 
     /// Adds a new mesh.
     #[inline]
-    pub fn add_mesh(&mut self, mesh_key: K, geo_key: K, mat_key: K) -> Option<(K, K)> {
+    pub fn add_mesh(
+        &mut self,
+        mesh_key: ResKey,
+        geo_key: ResKey,
+        mat_key: ResKey,
+    ) -> Option<(ResKey, ResKey)> {
         self.meshes.insert(mesh_key, (geo_key, mat_key))
     }
 
     #[inline]
-    pub fn get_geometry<Q>(&self, key: &Q) -> Option<&GeometryVar>
+    pub fn get_geometry<Q>(&self, key: &Q) -> Option<&RcValue<Geometry>>
     where
-        K: Borrow<Q>,
+        ResKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.geos.get(key)
     }
 
     #[inline]
-    pub fn get_material<Q>(&self, key: &Q) -> Option<&Material>
+    pub fn get_material<Q>(&self, key: &Q) -> Option<&RcValue<Material>>
     where
-        K: Borrow<Q>,
+        ResKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.mats.get(key)
     }
 
     #[inline]
-    pub fn get_geometry_mut<Q>(&mut self, key: &Q) -> Option<&mut GeometryVar>
+    pub fn get_geometry_mut<Q>(&mut self, key: &Q) -> Option<&mut RcValue<Geometry>>
     where
-        K: Borrow<Q>,
+        ResKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.geos.get_mut(key)
     }
 
     #[inline]
-    pub fn get_material_mut<Q>(&mut self, key: &Q) -> Option<&mut Material>
+    pub fn get_material_mut<Q>(&mut self, key: &Q) -> Option<&mut RcValue<Material>>
     where
-        K: Borrow<Q>,
+        ResKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.mats.get_mut(key)
     }
 
-    #[inline]
-    pub fn remove_geometry<Q>(&mut self, key: &Q) -> Option<GeometryVar>
+    /// Removes only if its reference count is 1.
+    pub fn remove_geometry<Q>(&mut self, key: &Q) -> Option<RcValue<Geometry>>
     where
-        K: Borrow<Q>,
+        ResKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        self.geos.remove(key)
+        if self
+            .get_geometry(key)
+            .filter(|geo| geo.strong_count() == 1)
+            .is_some()
+        {
+            self.geos.remove(key)
+        } else {
+            None
+        }
+    }
+
+    /// Removes only if its reference count is 1.
+    pub fn remove_material<Q>(&mut self, key: &Q) -> Option<RcValue<Material>>
+    where
+        ResKey: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        if self
+            .get_material(key)
+            .filter(|mat| mat.strong_count() == 1)
+            .is_some()
+        {
+            self.mats.remove(key)
+        } else {
+            None
+        }
     }
 
     #[inline]
-    pub fn remove_material<Q>(&mut self, key: &Q) -> Option<Material>
+    pub fn remove_mesh<Q>(&mut self, key: &Q) -> Option<(ResKey, ResKey)>
     where
-        K: Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
-    {
-        self.mats.remove(key)
-    }
-
-    #[inline]
-    pub fn remove_mesh<Q>(&mut self, key: &Q) -> Option<(K, K)>
-    where
-        K: Borrow<Q>,
+        ResKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.meshes.remove(key)
     }
 
-    pub fn get_mesh_geometry<Q>(&self, key: &Q) -> Option<&GeometryVar>
+    pub fn get_mesh_geometry<Q>(&self, key: &Q) -> Option<&RcValue<Geometry>>
     where
-        K: Borrow<Q>,
+        ResKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.meshes
@@ -224,9 +228,21 @@ impl<K: AsResKey> MeshResource<K> {
             .flatten()
     }
 
-    pub fn get_mesh_material<Q>(&self, key: &Q) -> Option<&Material>
+    pub fn get_mesh_geometry_mut<Q>(&mut self, key: &Q) -> Option<&mut RcValue<Geometry>>
     where
-        K: Borrow<Q>,
+        ResKey: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        if let Some((geo_key, _)) = self.meshes.get(key) {
+            self.geos.get_mut(geo_key.borrow())
+        } else {
+            None
+        }
+    }
+
+    pub fn get_mesh_material<Q>(&self, key: &Q) -> Option<&RcValue<Material>>
+    where
+        ResKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.meshes
@@ -234,9 +250,61 @@ impl<K: AsResKey> MeshResource<K> {
             .map(|(_, mat_key)| self.get_material(mat_key.borrow()))
             .flatten()
     }
+
+    pub fn get_mesh_material_mut<Q>(&mut self, key: &Q) -> Option<&mut RcValue<Material>>
+    where
+        ResKey: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        if let Some((_, mat_key)) = self.meshes.get(key) {
+            self.mats.get_mut(mat_key.borrow())
+        } else {
+            None
+        }
+    }
+
+    pub fn get_mesh_geometry_meta<Q>(&self, key: &Q) -> Option<(ResKey, Rc<()>)>
+    where
+        ResKey: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        if let Some((geo_key, _)) = self.meshes.get(key) {
+            if let Some(geo) = self.geos.get(geo_key.borrow()) {
+                return Some((geo_key.clone(), geo.clone_ref()));
+            }
+        }
+        None
+    }
+
+    pub fn get_mesh_material_meta<Q>(&self, key: &Q) -> Option<(ResKey, Rc<()>)>
+    where
+        ResKey: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        if let Some((_, mat_key)) = self.meshes.get(key) {
+            if let Some(mat) = self.mats.get(mat_key.borrow()) {
+                return Some((mat_key.clone(), mat.clone_ref()));
+            }
+        }
+        None
+    }
+
+    /// Makes the mesh's geometries to be interleaved geometries.
+    pub fn make_mesh_geometry_interleaved<'a, Q>(&mut self, keys: impl Iterator<Item = &'a Q>)
+    where
+        ResKey: Borrow<Q>,
+        Q: Hash + Eq + ?Sized + 'a,
+    {
+        for key in keys {
+            if let Some(geo) = self.get_mesh_geometry_mut(key) {
+                geo.sort();
+                geo.into_interleaved(None);
+            }
+        }
+    }
 }
 
-impl<K: AsResKey> Default for MeshResource<K> {
+impl Default for MeshResource {
     fn default() -> Self {
         Self::new()
     }
@@ -245,10 +313,9 @@ impl<K: AsResKey> Default for MeshResource<K> {
 /// Mesh.primitive.attributes(Geometry) in glTF.
 /// See https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#meshes
 #[derive(Debug, Clone, Default)]
-pub struct Geometry {
-    // 16 is the default limits on WebGPU and WebGL.
+pub struct SeparateGeometry {
     /// Geometry attributes such as position vector and normal vector.
-    attrs: SmallVec<[GeometryAttribute; 16]>,
+    attrs: Vec<GeometryAttribute>,
     indices: GeometryIndices,
     position_index: usize,
     normal_index: usize,
@@ -260,12 +327,12 @@ pub struct Geometry {
     user_indices: [usize; 4], // From A to D
 }
 
-impl Geometry {
+impl SeparateGeometry {
     const INVALID_INDEX: usize = usize::MAX;
 
     pub fn new() -> Self {
         Self {
-            attrs: SmallVec::new(),
+            attrs: Vec::new(),
             indices: GeometryIndices::new(),
             position_index: Self::INVALID_INDEX,
             normal_index: Self::INVALID_INDEX,
@@ -346,6 +413,13 @@ impl Geometry {
         self
     }
 
+    #[inline]
+    #[must_use]
+    pub fn with_indices(mut self, indices: GeometryIndices) -> Self {
+        self.indices = indices;
+        self
+    }
+
     pub fn get_attribute(&self, i: usize) -> Option<&GeometryAttribute> {
         self.attrs.get(i)
     }
@@ -420,13 +494,6 @@ impl Geometry {
         self.attrs
             .get_mut(self.color_index)
             .map(|attr| attr.as_values_mut(i))
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn with_indices(mut self, indices: GeometryIndices) -> Self {
-        self.indices = indices;
-        self
     }
 
     #[inline]
@@ -849,20 +916,36 @@ impl_from_for_geometry_attribute_values!(Vector<f32, 4>, VecFloat32x4);
 // TODO: With buffer, modification functions, and other utilities.
 #[derive(Debug, Default, Clone)]
 pub struct InterleavedGeometry {
+    /// Vertex data represented as byte array.
     pub vertex_bytes: Vec<u8>,
+
+    /// wgpu vertex attribute([`VertexAttribute`](wgpu::VertexAttribute)) array.  
+    /// You can see what kind of data is stored by referencing same index of `attr_kinds`.
     pub attrs: Vec<wgpu::VertexAttribute>,
+
+    /// [`GeometryAttributeVariant`] array.
     pub attr_kinds: Vec<GeometryAttributeVariant>,
+
+    /// Vertex size in bytes.
     pub vertex_size: usize,
+
+    /// Number of vertices.
     pub vertex_num: usize,
+
+    /// Index data represented as byte array.
     pub index_bytes: Vec<u8>,
+
+    /// Index format([`IndexFormat`](wgpu::IndexFormat)).
     pub index_format: wgpu::IndexFormat,
+
+    /// Number of indices.
     pub index_num: usize,
 }
 
-impl From<&Geometry> for InterleavedGeometry {
+impl From<&SeparateGeometry> for InterleavedGeometry {
     /// It's recommended to sort before generating `InterleavedGeometry`.
     // No padding.
-    fn from(value: &Geometry) -> Self {
+    fn from(value: &SeparateGeometry) -> Self {
         // Prepares buffers.
         let vertex_size = value.attrs.iter().fold(0, |acc, attr| {
             acc + (0..attr.num())
@@ -916,10 +999,10 @@ impl From<&Geometry> for InterleavedGeometry {
     }
 }
 
-impl From<&mut Geometry> for InterleavedGeometry {
+impl From<&mut SeparateGeometry> for InterleavedGeometry {
     #[inline]
-    fn from(value: &mut Geometry) -> Self {
-        InterleavedGeometry::from(value as &Geometry)
+    fn from(value: &mut SeparateGeometry) -> Self {
+        InterleavedGeometry::from(value as &SeparateGeometry)
     }
 }
 
@@ -1019,6 +1102,15 @@ pub enum Material {
     Simple(SimpleMaterial),
 }
 
+impl_from_for_enum!(Material, Simple, SimpleMaterial);
+
+impl Material {
+    #[inline]
+    pub fn variant(&self) -> Discriminant<Self> {
+        discriminant(self)
+    }
+}
+
 impl Default for Material {
     fn default() -> Self {
         Self::Simple(SimpleMaterial::default())
@@ -1037,9 +1129,7 @@ impl<'a> From<&'a Material> for &'a [u8] {
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SimpleMaterial {
     /// Color of the material.
-    /// Range: [0, 255]
-    /// Default: [0, 0, 0]
-    color: Color,
+    color: Vector<f32, 4>,
 }
 
 impl<'a> From<&'a SimpleMaterial> for &'a [u8] {
@@ -1051,20 +1141,14 @@ impl<'a> From<&'a SimpleMaterial> for &'a [u8] {
 impl Default for SimpleMaterial {
     fn default() -> Self {
         Self {
-            color: colors::BLACK,
+            color: colors::BLACK.into(),
         }
-    }
-}
-
-impl From<SimpleMaterial> for Material {
-    fn from(value: SimpleMaterial) -> Self {
-        Self::Simple(value)
     }
 }
 
 impl From<Color> for SimpleMaterial {
     fn from(value: Color) -> Self {
-        Self { color: value }
+        Self { color: value.into() }
     }
 }
 

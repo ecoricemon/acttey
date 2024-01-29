@@ -459,6 +459,33 @@ impl_vector!(2, {x: 0}, {y: 1});
 impl_vector!(3, {x: 0}, {y: 1}, {z: 2});
 impl_vector!(4, {x: 0}, {y: 1}, {z: 2}, {w: 3});
 
+/// Common normalized vector conversion.
+/// Converts from [u8; 3] to [f32; 3].
+impl From<Vector<u8, 3>> for Vector<f32, 3> {
+    /// 0..255 -> 0..1
+    fn from(value: Vector<u8, 3>) -> Self {
+        Self::new(
+            value.x() as f32 / 255 as f32,
+            value.y() as f32 / 255 as f32,
+            value.z() as f32 / 255 as f32,
+        )
+    }
+}
+
+/// Common normalized vector conversion.
+/// Converts from [u8; 3] to [f32; 4], the last element is filled with 1.0.
+impl From<Vector<u8, 3>> for Vector<f32, 4> {
+    /// 0..255 -> 0..1
+    fn from(value: Vector<u8, 3>) -> Self {
+        Self::new(
+            value.x() as f32 / 255 as f32,
+            value.y() as f32 / 255 as f32,
+            value.z() as f32 / 255 as f32,
+            1.0,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

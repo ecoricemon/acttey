@@ -1,25 +1,24 @@
 pub mod basic;
+pub mod helper;
 
 use crate::{
     ds::{
         generational::{GenIndex, GenVec},
         sparse_set::MonoSparseSet,
     },
-    primitive::mesh::GeometryAttributeVariant,
     render::Gpu,
-    util::vertex_format_to_shader_str, AsResKey,
+    util::{key::ResKey, ToStr},
 };
 use my_wgsl::*;
-use smallvec::SmallVec;
 use std::{borrow::Cow, rc::Rc};
 
-pub struct ShaderPack<K: AsResKey> {
+pub struct ShaderPack {
     gpu: Rc<Gpu>,
     pub builders: GenVec<my_wgsl::Builder>,
-    pub shaders: MonoSparseSet<K, Rc<Shader>>,
+    pub shaders: MonoSparseSet<ResKey, Rc<Shader>>,
 }
 
-impl<K: AsResKey> ShaderPack<K> {
+impl ShaderPack {
     pub fn new(gpu: &Rc<Gpu>) -> Self {
         Self {
             gpu: Rc::clone(gpu),
@@ -34,15 +33,15 @@ impl<K: AsResKey> ShaderPack<K> {
     /// # Panics
     ///
     /// Panics if `builder_index` is invalid or overwrting fails.
-    pub fn create_shader(&mut self, builder_index: GenIndex, key: K) -> &Rc<Shader> {
+    pub fn create_shader(&mut self, builder_index: GenIndex, key: ResKey) -> &Rc<Shader> {
         let builder = self.builders.get(builder_index).unwrap();
         let entry_point = match (
             builder.get_vertex_stage_ident(),
             builder.get_fragment_stage_ident(),
         ) {
-            (Some(vert), None) => EntryPoint::Vert(vert),
-            (None, Some(frag)) => EntryPoint::Frag(frag),
-            (Some(vert), Some(frag)) => EntryPoint::VertFrag(vert, frag),
+            (Some(vert), None) => EntryPoint::Vert(vert.to_owned()),
+            (None, Some(frag)) => EntryPoint::Frag(frag.to_owned()),
+            (Some(vert), Some(frag)) => EntryPoint::VertFrag(vert.to_owned(), frag.to_owned()),
             _ => panic!(),
         };
         let shader = Shader::new(key.clone(), &self.gpu.device, builder, entry_point);
@@ -76,8 +75,8 @@ pub struct Shader {
 }
 
 impl Shader {
-    pub fn new<K: AsResKey>(
-        key: K,
+    pub fn new(
+        key: ResKey,
         device: &wgpu::Device,
         builder: &Builder,
         entry_point: EntryPoint,
@@ -96,13 +95,33 @@ impl Shader {
             entry_point,
         }
     }
+
+    #[inline]
+    pub fn get_vertex_entry(&self) -> Option<&str> {
+        self.entry_point.vert()
+    }
+
+    #[inline]
+    pub fn has_vertex_stage(&self) -> bool {
+        self.get_vertex_entry().is_some()
+    }
+
+    #[inline]
+    pub fn get_fragment_entry(&self) -> Option<&str> {
+        self.entry_point.frag()
+    }
+
+    #[inline]
+    pub fn has_fragment_stage(&self) -> bool {
+        self.get_fragment_entry().is_some()
+    }
 }
 
 #[derive(Debug)]
 pub enum EntryPoint {
-    Vert(&'static str),
-    Frag(&'static str),
-    VertFrag(&'static str, &'static str),
+    Vert(String),
+    Frag(String),
+    VertFrag(String, String),
 }
 
 impl EntryPoint {
@@ -121,158 +140,6 @@ impl EntryPoint {
             _ => None,
         }
     }
-}
-
-/// Replace all members in the structure to be fit with the attributes.
-/// It actually drops old structure and assigns new structure.
-pub fn fit_wgsl_structure<'a>(
-    st: &mut my_wgsl::Structure,
-    attrs: impl Iterator<Item = &'a wgpu::VertexAttribute>,
-    attr_kinds: impl Iterator<Item = &'a GeometryAttributeVariant>,
-    builtin_vert_index: bool,
-    builtin_inst_index: bool,
-) {
-    *st = create_wgsl_structure(attrs, attr_kinds, builtin_vert_index, builtin_inst_index);
-}
-
-/// Creates `my_wgsl::Structure` from the given attributes,
-/// which can be obtained from `InterleavedVertexInfo`.
-/// `attrs` and `attr_kinds` should have the exactly same length.
-pub fn create_wgsl_structure<'a>(
-    mut attrs: impl Iterator<Item = &'a wgpu::VertexAttribute>,
-    mut attr_kinds: impl Iterator<Item = &'a GeometryAttributeVariant>,
-    builtin_vert_index: bool,
-    builtin_inst_index: bool,
-) -> my_wgsl::Structure {
-    // Creates a structure.
-    let mut st = Structure {
-        ident: "VertexInput",
-        members: SmallVec::new(),
-    };
-
-    // Adds built-in attributes.
-    let mut add_builtin = |ident: &'static str, value: BuiltinValue| {
-        let mut attrs = Attributes::new();
-        attrs.0.push(Attribute::Builtin(value));
-        st.members.push(StructureMember {
-            attrs,
-            ident,
-            ty: "u32",
-        });
-    };
-    if builtin_vert_index {
-        add_builtin("vertexIndex", BuiltinValue::VertexIndex);
-    }
-    if builtin_inst_index {
-        add_builtin("instanceIndex", BuiltinValue::InstanceIndex);
-    }
-
-    // Adds slot attributes.
-    let mut add_slot = |ident: &'static str, loc: u32, format: wgpu::VertexFormat| {
-        let mut attrs = Attributes::new();
-        attrs.0.push(Attribute::Location(loc));
-        st.members.push(StructureMember {
-            attrs,
-            ident,
-            ty: vertex_format_to_shader_str(format),
-        });
-    };
-    let mut uv_index = 0;
-    let mut color_index = 0;
-    let mut joint_index = 0;
-    let mut weight_index = 0;
-    let mut user_a_index = 0;
-    let mut user_b_index = 0;
-    let mut user_c_index = 0;
-    let mut user_d_index = 0;
-    const UV_IDENTS: [&str; 4] = ["uv_0", "uv_1", "uv_2", "uv_3"];
-    const COLOR_IDENTS: [&str; 4] = ["color_0", "color_1", "color_2", "color_3"];
-    const JOINT_IDENTS: [&str; 4] = ["joint_0", "joint_1", "joint_2", "joint_3"];
-    const WEIGHT_IDENTS: [&str; 4] = ["weight_0", "weight_1", "weight_2", "weight_3"];
-    const USER_A_IDENTS: [&str; 4] = ["usera_0", "usera_1", "usera_2", "usera_3"];
-    const USER_B_IDENTS: [&str; 4] = ["userb_0", "userb_1", "userb_2", "userb_3"];
-    const USER_C_IDENTS: [&str; 4] = ["userc_0", "userc_1", "userc_2", "userc_3"];
-    const USER_D_IDENTS: [&str; 4] = ["userd_0", "userd_1", "userd_2", "userd_3"];
-    for (loc, (attr, kind)) in (&mut attrs).zip(&mut attr_kinds).enumerate() {
-        let loc = loc as u32;
-        match kind {
-            GeometryAttributeVariant::Position => add_slot("position", loc, attr.format),
-            GeometryAttributeVariant::Normal => add_slot("normal", loc, attr.format),
-            GeometryAttributeVariant::Tangent => add_slot("tangent", loc, attr.format),
-            GeometryAttributeVariant::TexCoord => {
-                add_slot(UV_IDENTS[uv_index], loc, attr.format);
-                uv_index += 1;
-            }
-            GeometryAttributeVariant::Color => {
-                add_slot(COLOR_IDENTS[color_index], loc, attr.format);
-                color_index += 1;
-            }
-            GeometryAttributeVariant::Joint => {
-                add_slot(JOINT_IDENTS[joint_index], loc, attr.format);
-                joint_index += 1;
-            }
-            GeometryAttributeVariant::Weight => {
-                add_slot(WEIGHT_IDENTS[weight_index], loc, attr.format);
-                weight_index += 1;
-            }
-            GeometryAttributeVariant::UserA => {
-                add_slot(USER_A_IDENTS[user_a_index], loc, attr.format);
-                user_a_index += 1;
-            }
-            GeometryAttributeVariant::UserB => {
-                add_slot(USER_B_IDENTS[user_b_index], loc, attr.format);
-                user_b_index += 1;
-            }
-            GeometryAttributeVariant::UserC => {
-                add_slot(USER_C_IDENTS[user_c_index], loc, attr.format);
-                user_c_index += 1;
-            }
-            GeometryAttributeVariant::UserD => {
-                add_slot(USER_D_IDENTS[user_d_index], loc, attr.format);
-                user_d_index += 1;
-            }
-        }
-    }
-
-    // Rename if there's only one attribute among vector types.
-    if uv_index == 1 {
-        // Safety: Infallible.
-        unsafe { st.get_member_mut(UV_IDENTS[0]).unwrap_unchecked().ident = "uv" };
-    }
-    if color_index == 1 {
-        // Safety: Infallible.
-        unsafe { st.get_member_mut(COLOR_IDENTS[0]).unwrap_unchecked().ident = "color" };
-    }
-    if joint_index == 1 {
-        // Safety: Infallible.
-        unsafe { st.get_member_mut(JOINT_IDENTS[0]).unwrap_unchecked().ident = "joint" };
-    }
-    if weight_index == 1 {
-        // Safety: Infallible.
-        unsafe { st.get_member_mut(WEIGHT_IDENTS[0]).unwrap_unchecked().ident = "weight" };
-    }
-    if user_a_index == 1 {
-        // Safety: Infallible.
-        unsafe { st.get_member_mut(USER_A_IDENTS[0]).unwrap_unchecked().ident = "usera" };
-    }
-    if user_b_index == 1 {
-        // Safety: Infallible.
-        unsafe { st.get_member_mut(USER_B_IDENTS[0]).unwrap_unchecked().ident = "userb" };
-    }
-    if user_c_index == 1 {
-        // Safety: Infallible.
-        unsafe { st.get_member_mut(USER_C_IDENTS[0]).unwrap_unchecked().ident = "userc" };
-    }
-    if user_d_index == 1 {
-        // Safety: Infallible.
-        unsafe { st.get_member_mut(USER_D_IDENTS[0]).unwrap_unchecked().ident = "userd" };
-    }
-
-    // Checks out if two iterators had been consumed totally.
-    assert_eq!(0, attrs.count());
-    assert_eq!(0, attr_kinds.count());
-
-    st
 }
 
 // 12.3.1.1. Built-in Inputs and Outputs

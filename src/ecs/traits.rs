@@ -2,8 +2,10 @@ use crate::{ecs::storage::Storage, ty};
 use erased_generic_trait::erase_generic;
 use std::any::{Any, TypeId};
 
+/// Granular data such as position, speed, etc.
 pub trait Component: 'static {}
 
+/// Unique data over entire app such as event manager.
 pub trait Resource: 'static {}
 
 /// Entity must have distinct components in it.

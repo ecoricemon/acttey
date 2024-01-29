@@ -6,8 +6,9 @@ use crate::{
     },
     util::AsBytes,
 };
+use std::mem::{discriminant, Discriminant};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Camera {
     Perspective(PerspectiveCamera),
     Orthographic(OrthographicCamera),
@@ -15,6 +16,13 @@ pub enum Camera {
 
 impl_from_for_enum!(Camera, Perspective, PerspectiveCamera);
 impl_from_for_enum!(Camera, Orthographic, OrthographicCamera);
+
+impl Camera {
+    #[inline]
+    pub fn variant(&self) -> Discriminant<Self> {
+        discriminant(self)
+    }
+}
 
 impl Default for Camera {
     fn default() -> Self {
@@ -31,7 +39,7 @@ impl<'a> From<&'a Camera> for &'a [u8] {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PerspectiveCamera {
     camera: Vector<f32, 3>,
     at: Vector<f32, 3>,
@@ -156,7 +164,7 @@ impl<'a> From<&'a PerspectiveCamera> for &'a [u8] {
 }
 
 // TODO: Not implemented yet.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct OrthographicCamera {
     pub dummy: PerspectiveCamera,
 }

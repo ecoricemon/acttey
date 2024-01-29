@@ -2,23 +2,21 @@ use crate::{
     ds::{
         generational::{GenIndex, GenIndexRc, GenVec},
         sparse_set::MonoSparseSet,
-    },
-    render::{context::Gpu, descs}, AsResKey,
+    }, render::{context::Gpu, descs}, util::{ToStr, key::ResKey},
 };
 use std::{num::NonZeroU64, rc::Rc};
 
 #[derive(Debug)]
-pub struct BindPack<K: AsResKey> {
+pub struct BindPack {
     gpu: Rc<Gpu>,
     pub builders: GenVec<BindBuilder>,
-    pub layouts: MonoSparseSet<K, Rc<wgpu::BindGroupLayout>>,
-    /// Bind group label to pair of bind group and its bindings.
+    pub layouts: MonoSparseSet<ResKey, Rc<wgpu::BindGroupLayout>>,
     /// Bindings grap Rc connected to the resources such as buffer.
     /// It guarantees that those resources live enough as long as the bind group lives.
-    pub groups: MonoSparseSet<K, (Rc<wgpu::BindGroup>, Vec<Binding>)>,
+    pub groups: MonoSparseSet<ResKey, (Rc<wgpu::BindGroup>, Vec<Binding>)>,
 }
 
-impl<K: AsResKey> BindPack<K> {
+impl BindPack {
     pub fn new(gpu: &Rc<Gpu>) -> Self {
         Self {
             gpu: Rc::clone(gpu),
@@ -33,7 +31,7 @@ impl<K: AsResKey> BindPack<K> {
     /// # Panics
     ///
     /// Panics if `builder_index` is invalid or overwriting fails.
-    pub fn create(&mut self, builder_index: GenIndex, layout_key: K, group_key: K) {
+    pub fn create(&mut self, builder_index: GenIndex, layout_key: ResKey, group_key: ResKey) {
         let builder = self.builders.get(builder_index).unwrap();
         let (layout, group, bindings) =
             builder.build(&self.gpu.device, layout_key.clone(), group_key.clone());
@@ -47,7 +45,7 @@ impl<K: AsResKey> BindPack<K> {
 
     /// Creates a builder temporarily and creates layout and group for a buffer binding.
     /// The temporary builder is destroyed right away.
-    pub fn create_default_buffer_bind(&mut self, desc: descs::BufferBindDesc<K>) {
+    pub fn create_default_buffer_bind(&mut self, desc: descs::BufferBindDesc) {
         // Constructs a temporary builder.
         let mut builder = BindBuilder::new();
         for i in 0..desc.len() {
@@ -96,11 +94,11 @@ impl BindBuilder {
     /// # Panics
     ///
     /// Panics if the number of layouts is not equivalent to the number of bindings.
-    pub fn build<K: AsResKey>(
+    pub fn build(
         &self,
         device: &wgpu::Device,
-        layout_key: K,
-        group_key: K,
+        layout_key: ResKey,
+        group_key: ResKey,
     ) -> (wgpu::BindGroupLayout, wgpu::BindGroup, Vec<Binding>) {
         // layout entries and bindings should have the same length.
         assert_eq!(self.layout_entries.len(), self.bindings.len());

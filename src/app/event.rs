@@ -1,9 +1,7 @@
 use ahash::AHashMap;
-use std::{
-    collections::{
-        vec_deque::{Drain, Iter},
-        VecDeque,
-    },
+use std::collections::{
+    vec_deque::{Drain, Iter},
+    VecDeque,
 };
 use wasm_bindgen::prelude::*;
 

@@ -372,8 +372,10 @@ impl Downcast for SparseSet {
     }
 }
 
+/// Vector-like hash map.
+/// Values are in an actual vector, so that they are close to each other in memory.
 #[derive(Debug)]
-pub struct MonoSparseSet<K: Eq + Hash + Clone + ?Sized, V> {
+pub struct MonoSparseSet<K, V> {
     sparse: AHashMap<K, usize>,
     dense: Vec<(K, V)>,
 }
@@ -433,14 +435,14 @@ impl<K: Eq + Hash + Clone, V> MonoSparseSet<K, V> {
         Q: Hash + Eq + ?Sized,
     {
         if let Some(index) = self.sparse.get(k).cloned() {
-            let old_v = self.dense.swap_remove(index).1;
+            let old = self.dense.swap_remove(index).1;
             self.sparse.remove(k);
             if let Some(last) = self.dense.get(index) {
                 unsafe {
                     *self.sparse.get_mut(last.0.borrow()).unwrap_unchecked() = index;
                 }
             }
-            Some(old_v)
+            Some(old)
         } else {
             None
         }
@@ -465,8 +467,13 @@ impl<K: Eq + Hash + Clone, V> MonoSparseSet<K, V> {
     }
 
     #[inline]
-    pub fn keys(&self) -> std::collections::hash_map::Keys<'_, K, usize> {
-        self.sparse.keys()
+    pub fn iter(&self) -> std::slice::Iter<'_, (K, V)> {
+        self.dense.iter()
+    }
+
+    #[inline]
+    pub fn keys(&self) -> impl Iterator<Item = &K> {
+        self.dense.iter().map(|(k, _)| k)
     }
 
     #[inline]
@@ -477,11 +484,6 @@ impl<K: Eq + Hash + Clone, V> MonoSparseSet<K, V> {
     #[inline]
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
         self.dense.iter_mut().map(|(_, v)| v)
-    }
-
-    #[inline]
-    pub fn iter(&self) -> std::slice::Iter<'_, (K, V)> {
-        self.dense.iter()
     }
 }
 

@@ -91,20 +91,14 @@ pub fn wgsl_decl_struct(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // Implements `my_wgsl::AsStructure`
     let impl_as_structure = quote! {
         impl my_wgsl::ToIdent for #ident {
-            fn maybe_ident() -> Option<&'static str> {
-                Some(stringify!(#ident))
-            }
-
             fn to_ident() -> String {
-                // Safety:: Infallible.
-                unsafe { Self::maybe_ident().unwrap_unchecked().to_owned() }
+                stringify!(#ident).to_owned()
             }
         }
 
         impl my_wgsl::AsStructure for #ident {
             fn as_structure() -> my_wgsl::Structure {
-                // Safety: Infallible.
-                let ident = unsafe { Self::maybe_ident().unwrap_unchecked() };
+                let ident = Self::to_ident();
                 let mut members = smallvec::smallvec![];
                 #(
                     let attrs = my_wgsl::Attributes(smallvec::smallvec![#(
@@ -114,8 +108,8 @@ pub fn wgsl_decl_struct(_attr: TokenStream, item: TokenStream) -> TokenStream {
                     ),*]);
                     members.push(my_wgsl::StructureMember {
                         attrs,
-                        ident: #field_names,
-                        ty: #field_types,
+                        ident: #field_names.to_owned(),
+                        ty: #field_types.to_owned(),
                     });
                 )*
                 my_wgsl::Structure { ident, members }
@@ -211,7 +205,7 @@ pub fn wgsl_decl_fn(item: TokenStream) -> TokenStream {
                 my_wgsl::Attribute::from((#outer, #inner))
             ),*]),
             ident: None,
-            ty: #ty_str,
+            ty: #ty_str.to_owned(),
         })}
     } else {
         quote! { None }
@@ -233,14 +227,14 @@ pub fn wgsl_decl_fn(item: TokenStream) -> TokenStream {
                         (#input_attr_outers, #input_attr_inners)
                     )
                 ),*]),
-                ident: Some(stringify!(#input_idents)),
-                ty: stringify!(#input_types),
+                ident: Some(stringify!(#input_idents).to_owned()),
+                ty: stringify!(#input_types).to_owned(),
             }
         ),*];
 
         my_wgsl::Function {
             attrs,
-            ident: stringify!(#ident),
+            ident: stringify!(#ident).to_owned(),
             inputs,
             output: #output,
             stmt: #stmt,

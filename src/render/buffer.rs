@@ -1,5 +1,5 @@
 use crate::{
-    debug_format,
+    debug_format, impl_from_for_enum,
     primitive::mesh::InterleavedGeometry,
     render::{Gpu, RenderError},
     util::{AsBytes, AsMultiBytes},
@@ -77,8 +77,7 @@ impl BufferPool {
     pub fn request_buffer(
         &mut self,
         usage: wgpu::BufferUsages,
-        size: Option<u64>,
-        data: Option<&[u8]>,
+        size_or_data: SizeOrData,
     ) -> Result<Rc<wgpu::Buffer>, RenderError> {
         const TEST_FLAGS: wgpu::BufferUsages = wgpu::BufferUsages::INDEX
             .union(wgpu::BufferUsages::VERTEX)
@@ -97,7 +96,7 @@ impl BufferPool {
                 return Err(RenderError::BufferError(errmsg));
             }
         };
-        group.request_buffer(&self.gpu.device, usage, size, data)
+        group.request_buffer(&self.gpu.device, usage, size_or_data)
     }
 
     pub fn get_group(&self, group_index: usize) -> Option<&BufferGroup> {
@@ -278,11 +277,10 @@ impl BufferGroup {
         &mut self,
         device: &wgpu::Device,
         add_usage: wgpu::BufferUsages,
-        size: Option<u64>,
-        data: Option<&[u8]>,
+        size_or_data: SizeOrData,
     ) -> Result<Rc<wgpu::Buffer>, RenderError> {
         let usage = self.common_usage | add_usage;
-        self.request(device, usage, size, data)
+        self.request(device, usage, size_or_data)
     }
 
     #[inline]
@@ -317,14 +315,15 @@ impl BufferGroup {
         &mut self,
         device: &wgpu::Device,
         usage: wgpu::BufferUsages,
-        size: Option<u64>,
-        data: Option<&[u8]>,
+        size_or_data: SizeOrData,
     ) -> Result<Rc<wgpu::Buffer>, RenderError> {
         // Determines required size.
-        let need_size = if let Some(data) = data {
-            data.len() as u64
-        } else {
-            size.unwrap()
+        let need_size = match size_or_data {
+            SizeOrData::Size(size) => {
+                // If size was given, make it to be multiple of `wgpu::COPY_BUFFER_ALIGNMENT`.
+                to_aligned_size(size)
+            }
+            SizeOrData::Data(data) => data.len() as u64,
         };
         // If there's allocated and unused buffer.
         if let Some(i) = self.find_best_fit_unused(need_size, usage) {
@@ -335,7 +334,7 @@ impl BufferGroup {
         else if need_size < self.max_size && self.alloc_size + need_size <= self.quota {
             // Can we append?
             if self.bufs.len() < self.max_num {
-                Ok(Rc::clone(self.alloc(device, usage, size, data)))
+                Ok(Rc::clone(self.alloc(device, usage, size_or_data)))
             }
             // We can't append a new buffer.
             else {
@@ -377,22 +376,22 @@ impl BufferGroup {
         &mut self,
         device: &wgpu::Device,
         usage: wgpu::BufferUsages,
-        size: Option<u64>,
-        data: Option<&[u8]>,
+        size_or_data: SizeOrData,
     ) -> &Rc<wgpu::Buffer> {
-        let buf = if let Some(size) = size {
-            device.create_buffer(&wgpu::BufferDescriptor {
+        let buf = match size_or_data {
+            SizeOrData::Size(size) => device.create_buffer(&wgpu::BufferDescriptor {
                 label: self.label.as_deref(),
                 size,
                 usage,
-                mapped_at_creation: false,
-            })
-        } else {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: self.label.as_deref(),
-                contents: data.unwrap(),
-                usage,
-            })
+                mapped_at_creation: true,
+            }),
+            SizeOrData::Data(data) => {
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: self.label.as_deref(),
+                    contents: data,
+                    usage,
+                })
+            }
         };
         self.alloc_size += buf.size();
         self.bufs.push(Rc::new(buf));
@@ -404,6 +403,23 @@ impl BufferGroup {
 impl Default for BufferGroup {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+pub enum SizeOrData<'a> {
+    Size(u64),
+    Data(&'a [u8]),
+}
+
+impl<'a> From<u64> for SizeOrData<'a> {
+    fn from(value: u64) -> Self {
+        Self::Size(value)
+    }
+}
+
+impl<'a> From<&'a [u8]> for SizeOrData<'a> {
+    fn from(value: &'a [u8]) -> Self {
+        Self::Data(value)
     }
 }
 
@@ -442,56 +458,15 @@ pub struct UniformBufferMeta {
     pub vis: wgpu::ShaderStages,
 }
 
-/// A helper struct for easy updating GPU buffer.
-/// This owns the buffer, so that you should remove it when it's not needed any longer.
-#[derive(Debug)]
-pub struct BufferData<T: AsBytes> {
-    pub buf: Rc<wgpu::Buffer>,
-    pub data: T,
+#[inline]
+pub const fn to_aligned_size(size: u64) -> u64 {
+    debug_assert!(size > 0);
+    const MASK: wgpu::BufferAddress = wgpu::COPY_BUFFER_ALIGNMENT - 1;
+    (size + MASK) & (!MASK)
 }
 
-impl<T: AsBytes> BufferData<T> {
-    pub fn new(buf: Rc<wgpu::Buffer>, data: T) -> Self {
-        Self { buf, data }
-    }
-
-    // Wasm is currently based on 32-bit addressing.
-    /// # Panics
-    ///
-    /// Panics if `offset + size` is out of bound.
-    #[inline]
-    pub fn write_to_buffer(&self, queue: &wgpu::Queue, offset: usize, size: usize) {
-        queue.write_buffer(
-            &self.buf,
-            offset as u64,
-            &self.data.as_bytes()[offset..offset + size],
-        )
-    }
-}
-
-/// Similar to [`BufferData`], but multiple buffers.
-#[derive(Debug)]
-pub struct MultiBufferData<T: AsMultiBytes, const N: usize> {
-    pub bufs: [Rc<wgpu::Buffer>; N],
-    pub data: T,
-}
-
-impl<T: AsMultiBytes, const N: usize> MultiBufferData<T, N> {
-    pub fn new(bufs: [Rc<wgpu::Buffer>; N], data: T) -> Self {
-        Self { bufs, data }
-    }
-
-    // Wasm is currently based on 32-bit addressing.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `index` is out of bound, or `offset + size` is out of bound.
-    #[inline]
-    pub fn write_to_buffer(&self, queue: &wgpu::Queue, index: usize, offset: usize, size: usize) {
-        queue.write_buffer(
-            &self.bufs[index],
-            offset as u64,
-            &self.data.as_bytes(index)[offset..offset + size],
-        )
-    }
+/// Writes `bytes` to the mapped buffer.
+/// Call [`wgpu::Buffer::unmap`] after writing.
+pub fn write_to_mapped_buffer(buf: &wgpu::Buffer, bytes: &[u8], offset: usize) {
+    buf.slice(..).get_mapped_range_mut()[offset..offset + bytes.len()].copy_from_slice(bytes);
 }

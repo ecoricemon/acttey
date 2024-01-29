@@ -8,20 +8,21 @@ use crate::{
         canvas::{Surface, SurfacePack},
         shaders::Shader,
         Gpu,
-    }, AsResKey,
+    },
+    util::{key::ResKey, ToStr},
 };
-use std::{rc::Rc, borrow::Borrow};
+use std::{borrow::Borrow, rc::Rc};
 
 #[derive(Debug)]
-pub struct PipelinePack<K: AsResKey> {
+pub struct PipelinePack {
     gpu: Rc<Gpu>,
     pub layout_builders: GenVec<PipelineLayoutBuilder>,
     pub pipeline_builders: GenVec<PipelineBuilder>,
-    pub layouts: MonoSparseSet<K, Rc<wgpu::PipelineLayout>>,
-    pub pipelines: MonoSparseSet<K, Rc<wgpu::RenderPipeline>>,
+    pub layouts: MonoSparseSet<ResKey, Rc<wgpu::PipelineLayout>>,
+    pub pipelines: MonoSparseSet<ResKey, Rc<wgpu::RenderPipeline>>,
 }
 
-impl<K: AsResKey> PipelinePack<K> {
+impl PipelinePack {
     pub fn new(gpu: &Rc<Gpu>) -> Self {
         Self {
             gpu: Rc::clone(gpu),
@@ -35,7 +36,7 @@ impl<K: AsResKey> PipelinePack<K> {
     pub fn create_layout(
         &mut self,
         builder_index: GenIndex,
-        key: K,
+        key: ResKey,
     ) -> &Rc<wgpu::PipelineLayout> {
         let builder = self.layout_builders.get(builder_index).unwrap();
         let layout = builder.build(&self.gpu.device, key.clone());
@@ -50,7 +51,7 @@ impl<K: AsResKey> PipelinePack<K> {
     pub fn create_pipeline(
         &mut self,
         builder_index: GenIndex,
-        key: K,
+        key: ResKey,
         surf_packs: &GenVecRc<SurfacePack>,
         surfaces: &GenVecRc<Surface>,
     ) -> &Rc<wgpu::RenderPipeline> {
@@ -85,17 +86,17 @@ impl PipelineBuilder {
 
     pub fn set_layout(
         &mut self,
-        layout: &Rc<wgpu::PipelineLayout>,
+        layout: Rc<wgpu::PipelineLayout>,
     ) -> Option<Rc<wgpu::PipelineLayout>> {
-        self.layout.replace(Rc::clone(layout))
+        self.layout.replace(layout)
     }
 
-    pub fn set_vertex_shader(&mut self, shader: &Rc<Shader>) -> Option<Rc<Shader>> {
-        self.vert_shader.replace(Rc::clone(shader))
+    pub fn set_vertex_shader(&mut self, shader: Rc<Shader>) -> Option<Rc<Shader>> {
+        self.vert_shader.replace(shader)
     }
 
-    pub fn set_fragment_shader(&mut self, shader: &Rc<Shader>) -> Option<Rc<Shader>> {
-        self.frag_shader.replace(Rc::clone(shader))
+    pub fn set_fragment_shader(&mut self, shader: Rc<Shader>) -> Option<Rc<Shader>> {
+        self.frag_shader.replace(shader)
     }
 
     pub fn set_surface_pack_index(&mut self, index: GenIndexRc) -> Option<GenIndexRc> {
@@ -116,10 +117,10 @@ impl PipelineBuilder {
     /// # Panics
     ///
     /// Panics if vertex shader is unset.
-    pub fn build<K: AsResKey>(
+    pub fn build(
         &self,
         device: &wgpu::Device,
-        key: K,
+        key: ResKey,
         surf_packs: &GenVecRc<SurfacePack>,
         surfaces: &GenVecRc<Surface>,
     ) -> wgpu::RenderPipeline {
@@ -221,7 +222,7 @@ impl PipelineLayoutBuilder {
         std::mem::take(self);
     }
 
-    pub fn build<K: AsResKey>(&self, device: &wgpu::Device, key: K) -> wgpu::PipelineLayout {
+    pub fn build(&self, device: &wgpu::Device, key: ResKey) -> wgpu::PipelineLayout {
         let bind_group_layouts = self
             .bind_group_layouts
             .iter()

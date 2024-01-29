@@ -1,3 +1,4 @@
+use crate::util::web;
 use wasm_bindgen::prelude::*;
 
 pub struct Loop {
@@ -8,7 +9,7 @@ pub struct Loop {
 impl Loop {
     pub fn new() -> Self {
         Self {
-            window: crate::util::get_window(),
+            window: web::get_window(),
             callback: Closure::new(|_| {}),
         }
     }

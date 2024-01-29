@@ -2,8 +2,93 @@ use crate::ds::DsError;
 use smallvec::SmallVec;
 use std::{
     cell::{Ref, RefCell, RefMut},
+    ops::{Deref, DerefMut},
     rc::{Rc, Weak},
 };
+
+/// Value with reference counter.
+/// This helps you track usage of value itself.
+/// [`super::generational::GenIndexRc`] is similar, but its target is index, not value.
+/// But notice that this size is greater than normal value because of reference counter.
+/// So that using this as items in a vector will be a trade-off.
+///
+/// You can use inner value using deref coercion.  
+#[derive(Debug)]
+pub struct RcValue<T> {
+    value: T,
+    _ref: Rc<()>,
+}
+
+impl<T> RcValue<T> {
+    #[inline]
+    pub fn new(value: T) -> Self {
+        Self {
+            value,
+            _ref: Rc::new(()),
+        }
+    }
+
+    #[inline]
+    pub fn strong_count(&self) -> usize {
+        Rc::strong_count(&self._ref)
+    }
+
+    #[inline]
+    pub fn weak_count(&self) -> usize {
+        Rc::weak_count(&self._ref)
+    }
+
+    #[inline]
+    pub fn into_inner(self) -> T {
+        self.value
+    }
+
+    /// Clones inner reference only.
+    #[inline]
+    pub fn clone_ref(&self) -> Rc<()> {
+        Rc::clone(&self._ref)
+    }
+}
+
+impl<T: Default> Default for RcValue<T> {
+    #[inline]
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
+impl<T: Clone> Clone for RcValue<T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            value: self.value.clone(),
+            _ref: self.clone_ref(),
+        }
+    }
+}
+
+impl<T> Deref for RcValue<T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+impl<T> DerefMut for RcValue<T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.value
+    }
+}
+
+impl<T> From<T> for RcValue<T> {
+    #[inline]
+    fn from(value: T) -> Self {
+        Self::new(value)
+    }
+}
 
 /// For use of smallvec with const generic N.
 pub struct Array<T, const N: usize>(pub [T; N]);

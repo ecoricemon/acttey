@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::{
+    borrow::Cow,
     mem::{size_of, transmute},
     ops::Deref,
     rc::Rc,
@@ -9,12 +10,11 @@ use std::{
 
 pub mod macros;
 pub mod web;
-pub use web::*;
-pub mod wgpu;
-pub use wgpu::*;
+pub mod key;
 
 pub mod prelude {
     pub use crate::{log, ty};
+    pub use super::key::ResKey;
 }
 
 use std::mem::{transmute_copy, MaybeUninit};
@@ -151,54 +151,71 @@ pub(crate) fn concat_opt_string(l: Option<&str>, r: &str) -> Option<String> {
     l.map(|l| concat_string(l, r))
 }
 
-pub enum AorB<AA, BB> {
-    A(AA),
-    B(BB),
-}
-
-/// Common [`AorB`] implementation for &str and String.
-impl Deref for AorB<&str, String> {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        match self {
-            Self::A(s) => s,
-            Self::B(s) => &s,
-        }
-    }
+pub(crate) fn trim_end_digits(s: &mut String) {
+    let digit_num = s.chars().rev().take_while(|c| c.is_ascii_digit()).count();
+    s.truncate(s.len() - digit_num);
 }
 
 /// Used to be shown as a string even if it's not a string type.
 pub trait ToStr {
-    fn to_str(&self) -> AorB<&str, String>;
+    fn to_str(&self) -> Cow<str>;
 }
 
 /// Common [`ToStr`] implementation for [`str`].
 impl ToStr for str {
-    fn to_str(&self) -> AorB<&str, String> {
-        AorB::A(self)
+    fn to_str(&self) -> Cow<str> {
+        Cow::Borrowed(self)
     }
 }
 
 /// Common [`ToStr`] implementation for [`String`].
 impl ToStr for String {
-    fn to_str(&self) -> AorB<&str, String> {
-        AorB::A(&self)
+    fn to_str(&self) -> Cow<str> {
+        Cow::Borrowed(self.as_str())
     }
 }
 
 /// Common [`ToStr`] implementation for [`Rc<str>`].
 impl ToStr for Rc<str> {
-    fn to_str(&self) -> AorB<&str, String> {
-        AorB::A(&self)
+    fn to_str(&self) -> Cow<str> {
+        Cow::Borrowed(self)
     }
 }
 
 /// Common [`ToStr`] implementation for [`Box<str>`].
 impl ToStr for Box<str> {
-    fn to_str(&self) -> AorB<&str, String> {
-        AorB::A(&self)
+    fn to_str(&self) -> Cow<str> {
+        Cow::Borrowed(self)
     }
+}
+
+/// Encodes a single byte into base64.
+#[inline(always)]
+pub const fn encode_base64(byte: u8) -> u8 {
+    match byte {
+        0..=25 => b'A' + byte,
+        26..=51 => b'a' + byte - 26,
+        52..=61 => b'0' + byte - 52,
+        // URL safe version, standard: '+'
+        62 => b'-',
+        // URL safe version, standard: '/'
+        63 => b'_',
+        _ => panic!(),
+    }
+}
+
+/// Encodes a single u32 value into base64.
+#[inline]
+pub const fn encode_base64_u32(value: u32) -> [u8; 6] {
+    const MASK: u32 = (1 << 6) - 1;
+    [
+        encode_base64(((value >> 26) & MASK) as u8),
+        encode_base64(((value >> 20) & MASK) as u8),
+        encode_base64(((value >> 14) & MASK) as u8),
+        encode_base64(((value >> 8) & MASK) as u8),
+        encode_base64(((value >> 2) & MASK) as u8),
+        encode_base64(((value << 4) & MASK) as u8),
+    ]
 }
 
 /// It's same with Into<&\[u8\>.

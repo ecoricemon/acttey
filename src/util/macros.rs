@@ -126,3 +126,29 @@ macro_rules! impl_from_for_enum {
         }
     };
 }
+
+/// Declares and implements a struct to make a call chain.
+/// This macro implements [`std::ops::DerefMut`] for the struct,
+#[macro_export]
+macro_rules! decl_return_wrap {
+    ($struct_id:ident, $recv_type:ty, $ret_type:ty $(,$life:lifetime)?) => {
+        pub struct $struct_id<'a $(,$life)?> {
+            pub recv: &'a mut $recv_type,
+            pub ret: $ret_type,
+        }
+
+        impl<'a $(,$life)?> std::ops::Deref for $struct_id<'a $(,$life)?> {
+            type Target = $recv_type;
+
+            fn deref(&self) -> &Self::Target {
+                self.recv
+            }
+        }
+
+        impl<'a $(,$life)?> std::ops::DerefMut for $struct_id<'a $(,$life)?> {
+            fn deref_mut(&mut self) -> &mut Self::Target {
+                self.recv
+            }
+        }
+    };
+}

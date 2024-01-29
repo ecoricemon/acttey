@@ -1,39 +1,61 @@
 use crate::{
+    decl_return_wrap,
     ds::generational::{GenIndex, GenIndexRc, GenVecRc},
     render::{
-        bind::BindPack,
+        bind::{BindPack, Binding},
+        buffer::SizeOrData,
         canvas::{Canvas, CanvasPack, Surface, SurfacePack},
         context::{Gpu, RenderContext},
         descs,
-        pipeline::PipelinePack,
+        pipeline::{PipelineBuilder, PipelineLayoutBuilder, PipelinePack},
         renderer::RenderPass,
         shaders::{Shader, ShaderPack},
         BufferPool, RenderError,
     },
-    ty, AsResKey,
+    ty,
+    util::key::ResKey,
 };
-use std::{mem::transmute_copy, rc::Rc};
-
-use super::{
-    bind::Binding,
-    pipeline::{PipelineBuilder, PipelineLayoutBuilder},
-};
+use ahash::AHashMap;
+use smallvec::{smallvec, SmallVec};
+use std::{borrow::Borrow, hash::Hash, mem::transmute_copy, rc::Rc};
 
 /// Top struct in render module.
-pub struct RenderResource<K: AsResKey> {
+pub struct RenderResource {
+    /// [`wgpu::Device`] and [`wgpu::Queue`].
     pub gpu: Rc<Gpu>,
+
+    /// A set of [`Canvas`].
     pub canvases: CanvasPack,
+
+    /// [`web_sys::Window`], [`wgpu::Instance`] and [`wgpu::Adapter`].
     pub context: RenderContext,
+
+    /// An array of [`Surface`].
     pub surfaces: GenVecRc<Surface>,
+
+    /// An array of [`SurfacePack`].
     pub surf_packs: GenVecRc<SurfacePack>,
+
+    /// A map to find [`Surface`] from a canvas' CSS selectors.
+    pub canvas_to_surf: AHashMap<Rc<str>, SmallVec<[GenIndex; 1]>>,
+
+    /// All GPU buffers are here.
     pub bufs: BufferPool,
-    pub shaders: ShaderPack<K>,
-    pub binds: BindPack<K>,
-    pub pipelines: PipelinePack<K>,
+
+    /// A set of [`my_wgsl::Builder`] and [`Shader`].
+    pub shaders: ShaderPack,
+
+    /// TODO
+    pub binds: BindPack,
+
+    /// TODO
+    pub pipelines: PipelinePack,
+
+    /// TODO
     pub render_passes: GenVecRc<RenderPass>,
 }
 
-impl<K: AsResKey> RenderResource<K> {
+impl RenderResource {
     pub async fn new() -> Result<Self, RenderError> {
         let canvases = CanvasPack::new();
         let context = RenderContext::new(canvases.get_dummy()).await?;
@@ -59,6 +81,7 @@ impl<K: AsResKey> RenderResource<K> {
             context,
             surfaces: GenVecRc::new(),
             surf_packs: GenVecRc::new(),
+            canvas_to_surf: AHashMap::new(),
             bufs,
             shaders,
             binds,
@@ -83,12 +106,13 @@ impl<K: AsResKey> RenderResource<K> {
         Ok(())
     }
 
-    /// Adds a new canvas and returns `Rc<Canvas>`.
-    /// Use `Rc<Canvas>` to make a `Surface`.
-    /// Unused canvases will be removed when `clear_canvas()` called.
+    /// Adds a new canvas and returns [`Canvas`].
+    /// Use it to make a [`Surface`].
+    /// Unused canvases will be removed when [`Self::clear_unused_canvas`] called.
     #[inline]
-    pub fn add_canvas(&mut self, selectors: &str) -> Result<Rc<Canvas>, RenderError> {
-        self.canvases.insert(selectors)
+    pub fn add_canvas(&mut self, selectors: impl Into<Rc<str>>) -> CanvasReturn {
+        let ret = self.canvases.add(selectors);
+        CanvasReturn { recv: self, ret }
     }
 
     /// Gets the canvas.
@@ -133,10 +157,39 @@ impl<K: AsResKey> RenderResource<K> {
         removed
     }
 
-    /// Adds a new surface set.
+    /// Adds a new surface pack from the given canvas selectors.
+    /// Each canvas can have multiple surfaces, and the surface pack will be composed of
+    /// all surfaces from all canvases.
+    pub fn add_surface_pack_from<'a, I, II>(&mut self, canvases: I) -> GenIndexRc
+    where
+        I: Iterator<Item = &'a II> + Clone,
+        II: Borrow<str> + 'a,
+    {
+        // Fixes the mapping if it's broken.
+        for selectors in canvases.clone() {
+            self.fix_canvas_surfaces(selectors.borrow());
+        }
+
+        // Gathers all surfaces and make a surface pack from them.
+        let mut surf_pack = SurfacePack::new();
+        for selectors in canvases {
+            if let Some(surf_indices) = self.canvas_to_surf.get(selectors.borrow()) {
+                for index in surf_indices.iter() {
+                    // Vacant item will result in an empty slot in surface pack.
+                    let rc_index = self.surfaces.own(index.index);
+                    surf_pack.add_surface_index(rc_index);
+                }
+            }
+        }
+
+        // Adds the surface pack.
+        self.add_surface_pack(surf_pack)
+    }
+
+    /// Adds a new surface pack.
     #[inline]
-    pub fn add_surface_pack(&mut self, pack: SurfacePack) -> GenIndexRc {
-        self.surf_packs.insert(pack)
+    pub fn add_surface_pack(&mut self, surf_pack: SurfacePack) -> GenIndexRc {
+        self.surf_packs.insert(surf_pack)
     }
 
     /// Gets the surface pack.
@@ -163,51 +216,73 @@ impl<K: AsResKey> RenderResource<K> {
         removed
     }
 
-    /// Adds a writable vertex buffer initially filled with the data.
+    /// Requests a writable vertex buffer and then adds it.
     #[inline]
-    pub fn add_vertex_buffer(&mut self, data: &[u8]) -> Result<Rc<wgpu::Buffer>, RenderError> {
+    pub fn add_vertex_buffer(
+        &mut self,
+        size_or_data: SizeOrData,
+    ) -> Result<Rc<wgpu::Buffer>, RenderError> {
         self.bufs.request_buffer(
             wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            None,
-            Some(data),
+            size_or_data,
         )
     }
 
-    /// Adds an read-only index buffer initially filled with the data.
+    /// Requests a read-only index buffer and then adds it.
     #[inline]
-    pub fn add_ro_index_buffer(&mut self, data: &[u8]) -> Result<Rc<wgpu::Buffer>, RenderError> {
+    pub fn add_ro_index_buffer(
+        &mut self,
+        size_or_data: SizeOrData,
+    ) -> Result<Rc<wgpu::Buffer>, RenderError> {
         self.bufs
-            .request_buffer(wgpu::BufferUsages::INDEX, None, Some(data))
+            .request_buffer(wgpu::BufferUsages::INDEX, size_or_data)
     }
 
-    /// Adds a writable uniform buffer initially filled with the data.
+    /// Requests a writable uniform buffer and then adds it.
     #[inline]
     pub fn add_uniform_buffer<'a>(
         &mut self,
-        data: impl Into<&'a [u8]>,
+        size_or_data: SizeOrData,
     ) -> Result<Rc<wgpu::Buffer>, RenderError> {
         self.bufs.request_buffer(
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            None,
-            Some(data.into()),
+            size_or_data,
         )
     }
 
-    /// Adds a read-only uniform buffer initially filled with the data.
+    /// Requests a read-only uniform buffer and then adds it.
     #[inline]
     pub fn add_ro_uniform_buffer<'a>(
         &mut self,
-        data: impl Into<&'a [u8]>,
+        size_or_data: SizeOrData,
     ) -> Result<Rc<wgpu::Buffer>, RenderError> {
         self.bufs
-            .request_buffer(wgpu::BufferUsages::UNIFORM, None, Some(data.into()))
+            .request_buffer(wgpu::BufferUsages::UNIFORM, size_or_data)
     }
 
     /// Adds a uniform or storage buffer binding with default settings.
     /// Handy, but it's lack of reusability.
     #[inline]
-    pub fn add_default_buffer_bind(&mut self, desc: descs::BufferBindDesc<K>) {
+    pub fn add_default_buffer_bind(&mut self, desc: descs::BufferBindDesc) {
         self.binds.create_default_buffer_bind(desc);
+    }
+
+    #[inline]
+    pub fn get_bind_group_layout<Q>(&self, key: &Q) -> Option<&Rc<wgpu::BindGroupLayout>> 
+    where
+        ResKey: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.binds.layouts.get(key)
+    }
+
+    #[inline]
+    pub fn get_bind_group<Q>(&self, key: &Q) -> Option<&Rc<wgpu::BindGroup>> 
+    where
+        ResKey: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.binds.groups.get(key).map(|(group, _)| group)
     }
 
     #[inline]
@@ -235,7 +310,7 @@ impl<K: AsResKey> RenderResource<K> {
     }
 
     #[inline]
-    pub fn build_shader(&mut self, index: GenIndex, key: K) -> &Rc<Shader> {
+    pub fn build_shader(&mut self, index: GenIndex, key: ResKey) -> &Rc<Shader> {
         self.shaders.create_shader(index, key)
     }
 
@@ -270,7 +345,7 @@ impl<K: AsResKey> RenderResource<K> {
     pub fn build_pipeline_layout(
         &mut self,
         index: GenIndex,
-        key: K
+        key: ResKey,
     ) -> &Rc<wgpu::PipelineLayout> {
         self.pipelines.create_layout(index, key)
     }
@@ -300,7 +375,7 @@ impl<K: AsResKey> RenderResource<K> {
     }
 
     #[inline]
-    pub fn build_pipeline(&mut self, index: GenIndex, key: K) -> &Rc<wgpu::RenderPipeline> {
+    pub fn build_pipeline(&mut self, index: GenIndex, key: ResKey) -> &Rc<wgpu::RenderPipeline> {
         self.pipelines
             .create_pipeline(index, key, &self.surf_packs, &self.surfaces)
     }
@@ -335,16 +410,14 @@ impl<K: AsResKey> RenderResource<K> {
         removed
     }
 
+    /// Gets any iterator with a bit of inefficiency.
     pub fn iter<'a, T: 'static>(&'a self) -> Box<dyn Iterator<Item = T> + 'a> {
         // Safety: Type checked.
-        if ty!(T) == ty!(IterBindGroupLayout<K>) {
+        if ty!(T) == ty!(IterBindGroupLayout) {
             Box::new(self.binds.layouts.iter().map(|(key, value)| unsafe {
-                transmute_copy(&IterBindGroupLayout {
-                    key,
-                    layout: value,
-                })
+                transmute_copy(&IterBindGroupLayout { key, layout: value })
             }))
-        } else if ty!(T) == ty!(IterBindGroup<K>) {
+        } else if ty!(T) == ty!(IterBindGroup) {
             Box::new(self.binds.groups.iter().map(|(key, value)| unsafe {
                 transmute_copy(&IterBindGroup {
                     key,
@@ -352,13 +425,12 @@ impl<K: AsResKey> RenderResource<K> {
                     bindings: &value.1,
                 })
             }))
-        } else if ty!(T) == ty!(IterShader<K>) {
-            Box::new(self.shaders.shaders.iter().map(|(key, value)| unsafe {
-                transmute_copy(&IterShader {
-                    key,
-                    shader: value,
-                })
-            }))
+        } else if ty!(T) == ty!(IterShader) {
+            Box::new(
+                self.shaders.shaders.iter().map(|(key, value)| unsafe {
+                    transmute_copy(&IterShader { key, shader: value })
+                }),
+            )
         } else if ty!(T) == ty!(IterIndexBuffer) {
             Box::new(
                 self.bufs
@@ -391,7 +463,7 @@ impl<K: AsResKey> RenderResource<K> {
                     .iter_used()
                     .map(|buf| unsafe { transmute_copy(&IterStorageBuffer { buf }) }),
             )
-        } else if ty!(T) == ty!(IterRenderPipeline<K>) {
+        } else if ty!(T) == ty!(IterRenderPipeline) {
             Box::new(self.pipelines.pipelines.iter().map(|(key, value)| unsafe {
                 transmute_copy(&IterRenderPipeline {
                     key,
@@ -410,30 +482,113 @@ impl<K: AsResKey> RenderResource<K> {
     }
 
     pub fn resize_surfaces(&self) {
+        // TODO
         // dummy for now
     }
 
-    /// Changes all gpu references to the current gpu.
+    /// [`Self::canvas_to_surf`] is like weak references, its indices can be broken.
+    /// This fixes the mapping if it was broken.
+    pub fn fix_canvas_surfaces(&mut self, selectors: &str) {
+        // Checks if there's something broken.
+        let broken = if let Some(surf_indices) = self.canvas_to_surf.get(selectors) {
+            surf_indices.iter().any(|&index| {
+                if let Some(surf) = self.surfaces.get(index) {
+                    surf.canvas.selectors().as_ref() != selectors
+                } else {
+                    true
+                }
+            })
+        } else {
+            false
+        };
+
+        // Re-generate surface indices only if it was broken.
+        if broken {
+            // Safety: Infallible.
+            let surf_indices = unsafe { self.canvas_to_surf.get_mut(selectors).unwrap_unchecked() };
+            *surf_indices = self
+                .surfaces
+                .iter()
+                .enumerate()
+                .filter_map(|(index, surf)| {
+                    if let Some(surf) = surf.as_ref() {
+                        (surf.canvas.selectors().as_ref() == selectors)
+                            .then_some(GenIndex::new_forced(index))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+        }
+    }
+
+    /// Adds a mapping of canvas' CSS selectors to surface index.
+    /// The index becomes forced index, so that no generation check takes place.
+    pub(crate) fn add_canvas_to_surface(
+        &mut self,
+        selectors: impl Into<Rc<str>>,
+        surface_index: GenIndex,
+    ) {
+        let surface_index = surface_index.into_forced();
+        self.canvas_to_surf
+            .entry(selectors.into())
+            .and_modify(|indices| indices.push(surface_index))
+            .or_insert(smallvec![surface_index]);
+    }
+
+    /// Changes all sub-references to the current one.
     fn change_gpu(&mut self) {
         todo!()
     }
 }
 
+decl_return_wrap!(
+    CanvasReturn,
+    RenderResource,
+    Result<Rc<Canvas>, RenderError>
+);
+
+impl<'a> CanvasReturn<'a> {
+    /// Adds a default [`Surface`] with the canvas for render attachment.
+    ///
+    /// If you are going to make another type of `Surface`,
+    /// use [`RenderResource::add_surface`] instead.
+    pub fn with_default(self) -> Result<(), RenderError> {
+        let Self { recv: render, ret } = self;
+        {
+            // Creates a default surface.
+            let canvas = ret?;
+            let surface = Surface::default(
+                &render.context.instance,
+                &render.context.adapter,
+                &render.gpu.device,
+                &canvas,
+            );
+            let index = render.add_surface(surface);
+
+            // Adds a mapping of CSS selectors to surface index.
+            render.add_canvas_to_surface(Rc::clone(canvas.selectors()), index.index);
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
-pub struct IterBindGroupLayout<'a, K: AsResKey> {
+pub struct IterBindGroupLayout<'a, K = ResKey> {
     pub key: &'a K,
     pub layout: &'a Rc<wgpu::BindGroupLayout>,
 }
 
 #[derive(Debug)]
-pub struct IterBindGroup<'a, K: AsResKey> {
+pub struct IterBindGroup<'a, K = ResKey> {
     pub key: &'a K,
     pub group: &'a Rc<wgpu::BindGroup>,
     pub bindings: &'a Vec<Binding>,
 }
 
 #[derive(Debug)]
-pub struct IterShader<'a, K: AsResKey> {
+pub struct IterShader<'a, K = ResKey> {
     pub key: &'a K,
     pub shader: &'a Rc<Shader>,
 }
@@ -459,7 +614,7 @@ pub struct IterStorageBuffer<'a> {
 }
 
 #[derive(Debug)]
-pub struct IterRenderPipeline<'a, K: AsResKey> {
+pub struct IterRenderPipeline<'a, K = ResKey> {
     pub key: &'a K,
     pub pipeline: &'a Rc<wgpu::RenderPipeline>,
 }

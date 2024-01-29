@@ -1,4 +1,4 @@
-pub mod cameras;
+pub mod camera;
 pub mod constant;
 pub mod matrix;
 pub mod mesh;
@@ -8,7 +8,7 @@ pub mod transform;
 pub mod vector;
 
 pub mod prelude {
-    pub use super::{cameras, constant::colors, matrix::Matrix4f, shapes, transform};
+    pub use super::{camera, constant::colors, matrix::Matrix4f, shapes, transform};
 }
 
 /// Default position type is Vector<f32, 3>.

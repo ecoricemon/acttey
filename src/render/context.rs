@@ -1,6 +1,9 @@
-use crate::render::{
-    canvas::{Canvas, Surface},
-    RenderError,
+use crate::{
+    render::{
+        canvas::{Canvas, Surface},
+        RenderError,
+    },
+    util::web,
 };
 use std::rc::Rc;
 
@@ -13,7 +16,7 @@ pub struct RenderContext {
 impl RenderContext {
     pub async fn new(ref_canvas: &Rc<Canvas>) -> Result<Self, RenderError> {
         // web_sys::Window.
-        let window = crate::util::get_window();
+        let window = web::get_window();
 
         // wgpu::Instance.
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
