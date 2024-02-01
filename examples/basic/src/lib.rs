@@ -111,9 +111,9 @@ enum ResKey {
     MyScene,
 }
 
-impl From<ResKey> for u32 {
+impl From<ResKey> for u64 {
     fn from(value: ResKey) -> Self {
-        value as u32
+        value as u64
     }
 }
 

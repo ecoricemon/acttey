@@ -1,4 +1,7 @@
-use crate::ecs::traits::Resource;
+use crate::scene::scene::SceneManager;
+use crate::{
+    ecs::traits::Resource,
+};
 use std::{any::TypeId, mem::transmute_copy};
 
 // Exposes `EventManager` resource.
@@ -21,6 +24,9 @@ impl Resource for TimeStamp {}
 pub use crate::ecs::system::Systems;
 impl Resource for Systems {}
 
+// Exposes `SceneManager` resource.
+impl Resource for SceneManager {}
+
 /// Integrated resources.
 pub struct ResourcePack<'a> {
     pub(crate) ev_mgr: &'a mut EventManager,
@@ -28,6 +34,7 @@ pub struct ResourcePack<'a> {
     pub(crate) render: &'a mut RenderResource,
     pub(crate) time: &'a mut TimeStamp,
     pub(crate) systems: Option<&'a mut Systems>,
+    pub(crate) scene_mgr: &'a mut SceneManager,
 }
 
 impl<'a> ResourcePack<'a> {
@@ -46,6 +53,8 @@ impl<'a> ResourcePack<'a> {
                 transmute_copy::<&mut TimeStamp, _>(&self.time)
             } else if ty == TypeId::of::<Systems>() {
                 transmute_copy::<&mut Systems, _>(self.systems.as_ref().unwrap())
+            } else if ty == TypeId::of::<SceneManager>() {
+                transmute_copy::<&mut SceneManager, _>(&self.scene_mgr)
             } else {
                 panic!();
             }

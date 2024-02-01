@@ -8,11 +8,10 @@ use crate::{
     render::{
         canvas::SurfacePackBuffer,
         resource::{
-            IterBindGroup, IterIndexBuffer, IterRenderPass, IterRenderPipeline, IterVertexBuffer,
             RenderResource,
         },
     },
-    util::key::ResKey,
+    scene::scene::SceneManager,
 };
 
 /// A system to resize all surfaces to match with the new size.  
@@ -68,6 +67,7 @@ impl System for ClearInput {
 #[derive(Debug, Default)]
 pub struct Render {
     surf_pack_buf: SurfacePackBuffer,
+    visit_buf: Vec<bool>,
 }
 
 impl Render {
@@ -79,7 +79,7 @@ impl Render {
 impl System for Render {
     type Ref = ();
     type Mut = ();
-    type ResRef = (RenderResource, TimeStamp);
+    type ResRef = (SceneManager, RenderResource, TimeStamp);
     type ResMut = ();
 
     fn run(
@@ -89,28 +89,14 @@ impl System for Render {
         rr: <Self::ResRef as ResQuery>::Output,
         _rm: <Self::ResMut as ResQueryMut>::Output,
     ) {
-        let (render, _time) = rr;
-        // TODO: Hard coded.
-        for item in render.iter::<IterRenderPass>() {
-            item.pass.encode(
+        let (scene_mgr, render, _time) = rr;
+
+        for scene in scene_mgr.iter_active_scene() {
+            scene.run(
                 &render.surf_packs,
                 &mut self.surf_pack_buf,
                 &render.surfaces,
-                |pass| {
-                    for (i, item) in render.iter::<IterBindGroup<ResKey>>().enumerate() {
-                        pass.set_bind_group(i as u32, item.group, &[]);
-                    }
-                    for (i, item) in render.iter::<IterVertexBuffer>().enumerate() {
-                        pass.set_vertex_buffer(i as u32, item.buf.slice(..));
-                    }
-                    if let Some(item) = render.iter::<IterIndexBuffer>().next() {
-                        pass.set_index_buffer(item.buf.slice(..), wgpu::IndexFormat::Uint16);
-                    }
-                    if let Some(item) = render.iter::<IterRenderPipeline<ResKey>>().next() {
-                        pass.set_pipeline(item.pipeline);
-                    }
-                    pass.draw_indexed(0..36, 0, 0..1);
-                },
+                &mut self.visit_buf,
             );
         }
     }

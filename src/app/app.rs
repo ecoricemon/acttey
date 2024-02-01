@@ -4,27 +4,21 @@ use crate::{
         r#loop::Loop,
     },
     decl_return_wrap,
-    ds::{generational::GenIndexRc, refs::RCell},
+    ds::refs::RCell,
     ecs::{
         predefined::resource::{ResourcePack, TimeStamp},
         storage::Storage,
         system::{Invokable, System, Systems},
         traits::Entity,
     },
-    primitive::mesh::{self, Geometry, Material, MeshResource, SeparateGeometry},
+    primitive::mesh::{Geometry, Material, MeshResource, SeparateGeometry},
     render::{
-        buffer::{to_aligned_size, SizeOrData, VertexBufferMeta},
-        canvas::{Canvas, Surface, SurfacePack},
-        descs,
-        pipeline::{PipelineBuilder, PipelineLayoutBuilder},
-        renderer::RenderPass,
-        resource::RenderResource,
-        shaders, IterBindGroupLayout, IterShader, RenderError,
+        buffer::{SizeOrData, VertexBufferMeta}, descs, pass::PassGraph, pipeline::{PipelineBuilder, PipelineLayoutBuilder}, resource::RenderResource,
+        pass::{SetBindGroupCmd, SetVertexBufferCmd, SetIndexBufferCmd, SetPipelineCmd, DrawIndexedCmd}
     },
-    scene::{scene::Scene, SceneError},
-    util::{web, AsBytes, AsMultiBytes, key::ResKey},
+    scene::{scene::{Scene, SceneManager}, SceneError},
+    util::{key::ResKey, web, AsBytes, RcStr},
 };
-use ahash::AHashMap;
 use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 use web_sys::Performance;
@@ -69,7 +63,7 @@ impl App {
     /// # Panics
     ///
     /// Panics if it's failed to find a canvas.
-    pub fn add_canvas(&mut self, selectors: impl Into<Rc<str>>) -> &mut Self {
+    pub fn add_canvas(&mut self, selectors: impl Into<RcStr>) -> &mut Self {
         self.state
             .borrow_mut()
             .render
@@ -234,7 +228,7 @@ impl App {
         let AppState {
             render,
             meshes,
-            scenes,
+            scene_mgr,
             ..
         } = &mut *state;
 
@@ -249,7 +243,7 @@ impl App {
         // Creates shader builder, builds, and sets it to the scene.
         let builder = scene.create_shader_builder(meshes, &render.surf_packs, &render.surfaces);
         let builder_index = render.add_shader_builder(builder);
-        let shader = render.build_shader(builder_index, key.clone());
+        let shader = render.build_shader(builder_index, &key);
         scene.set_shader(Rc::clone(shader));
 
         // Calculates size for geometry buffers on consideration of alignment.
@@ -324,19 +318,18 @@ impl App {
         }
         builder.set_surface_pack_index(scene.surf_pack_index.clone());
         let pb_index = render.add_pipeline_builder(builder);
-        render.build_pipeline(pb_index, key.clone());
+        let pipeline = render.build_pipeline(pb_index, key.clone());
+        scene.pipelines.insert(key.clone(), Rc::clone(pipeline));
 
         // Removes temporary builders.
         render.remove_pipeline_layout_builder(plb_index);
         render.remove_pipeline_builder(pb_index);
 
-        // Render pass.
-        let mut pass = RenderPass::new(&render.gpu, "RenderPass");
-        pass.set_surface_pack_index(scene.surf_pack_index.clone());
-        render.add_render_pass(pass);
+        // PassGraph.
+        scene.build_pass_graph(&render.gpu, &key.label);
 
         // Adds the scene.
-        scenes.insert(key, scene);
+        scene_mgr.insert_active_scene(key, scene);
         Ok(())
     }
 
@@ -373,6 +366,7 @@ impl App {
                 systems,
                 super_systems,
                 render,
+                scene_mgr,
                 ..
             } = &mut *state;
             let mut res_pack = ResourcePack {
@@ -381,6 +375,7 @@ impl App {
                 render,
                 time: &mut TimeStamp(time),
                 systems: None,
+                scene_mgr,
             };
 
             // Runs all systems.
@@ -503,7 +498,7 @@ struct AppState {
     meshes: MeshResource,
 
     /// A resource managing all scenes.
-    scenes: AHashMap<ResKey, Scene>,
+    scene_mgr: SceneManager,
 }
 
 impl AppState {
@@ -514,7 +509,7 @@ impl AppState {
             super_systems: Vec::new(),
             render: RenderResource::new().await.unwrap(),
             meshes: MeshResource::new(),
-            scenes: AHashMap::new(),
+            scene_mgr: SceneManager::new(),
         }
     }
 }

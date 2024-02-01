@@ -4,7 +4,7 @@ pub mod canvas;
 pub mod context;
 pub mod descs;
 pub mod pipeline;
-pub mod renderer;
+pub mod pass;
 pub mod resource;
 pub mod shaders;
 

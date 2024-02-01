@@ -7,18 +7,41 @@ use crate::{
         mesh::{Geometry, MeshResource},
     },
     render::{
-        buffer::{to_aligned_size, write_to_mapped_buffer},
-        canvas::{Surface, SurfacePack},
-        shaders::{
+        buffer::{to_aligned_addr, to_padded_num, write_to_mapped_buffer}, canvas::{Surface, SurfacePack, SurfacePackBuffer}, context::Gpu, pass::{self, DrawIndexedCmd, PassDesc, PassGraph, RenderPassDesc, SetBindGroupCmd, SetIndexBufferCmd, SetPipelineCmd, SetVertexBufferCmd}, shaders::{
             helper::{BindableResource, ShaderHelper},
             Shader,
-        },
+        }
     },
     scene::SceneError,
-    util::{AsMultiBytes, key::ResKey},
+    util::{key::ResKey, AsMultiBytes, RcStr},
 };
 use ahash::{AHashMap, AHashSet};
 use std::rc::Rc;
+
+pub struct SceneManager {
+    pub(crate) scenes: AHashMap<ResKey, Scene>,
+    pub(crate) active: AHashSet<ResKey>,
+}
+
+impl SceneManager {
+    pub fn new() -> Self {
+        Self {
+            scenes: AHashMap::new(),
+            active: AHashSet::new(),
+        }
+    }
+
+    /// Inserts a new scene as active state.
+    pub fn insert_active_scene(&mut self, key: impl Into<ResKey>, scene: Scene) {
+        let key = key.into();
+        self.scenes.insert(key.clone(), scene);
+        self.active.insert(key);
+    }
+
+    pub fn iter_active_scene<'a>(&'a self) -> impl Iterator<Item = &'a Scene> {
+        self.active.iter().map(|key| self.scenes.get(key).unwrap())
+    }
+}
 
 /// Scene graph.  
 /// Scene graph describes all render relative information on CPU side, but it doesn't own real resources.
@@ -31,7 +54,7 @@ use std::rc::Rc;
 #[derive(Debug, Clone)]
 pub struct Scene {
     /// Canvas selectors.
-    pub(crate) canvases: Vec<Rc<str>>,
+    pub(crate) canvases: Vec<RcStr>,
 
     /// All nodes in the scene.
     pub(crate) nodes: Vec<Node>,
@@ -46,7 +69,10 @@ pub struct Scene {
     pub(crate) camera_binds: AHashMap<ResKey, Rc<wgpu::BindGroup>>,
 
     /// Meshes in the scene.
+    /// This is a subset of the meshes in [`MeshResource`].
     pub(crate) meshes: AHashSet<ResKey>,
+
+    pub(crate) mesh_map: AHashMap<ResKey, (ResKey, ResKey)>,
 
     /// Owned geometries in the scene.
     pub(crate) geos: AHashMap<ResKey, GeometryView>,
@@ -77,8 +103,10 @@ pub struct Scene {
     /// It can be changed to have multi-buffers in the future.
     pub(crate) index_buf: Option<Rc<wgpu::Buffer>>,
 
-    // Pipelines. There's only one pipeline for now.
-    // pub(crate) pipelines: 
+    /// Pipelines. One pipeline for now.
+    pub(crate) pipelines: AHashMap<ResKey, Rc<wgpu::RenderPipeline>>,
+
+    pub(crate) pass_graph: Option<PassGraph>,
 }
 
 impl Scene {
@@ -89,6 +117,7 @@ impl Scene {
             camera_bufs: AHashMap::new(),
             camera_binds: AHashMap::new(),
             meshes: AHashSet::new(),
+            mesh_map: AHashMap::new(),
             canvases: Vec::new(),
             geos: AHashMap::new(),
             mats: AHashMap::new(),
@@ -99,10 +128,12 @@ impl Scene {
             geo_buf_size: None,
             vert_buf: None,
             index_buf: None,
+            pipelines: AHashMap::new(),
+            pass_graph: None,
         }
     }
 
-    pub fn add_canvas(&mut self, selectors: impl Into<Rc<str>>) -> &mut Self {
+    pub fn add_canvas(&mut self, selectors: impl Into<RcStr>) -> &mut Self {
         self.canvases.push(selectors.into());
         self
     }
@@ -170,7 +201,7 @@ impl Scene {
             }
         }
 
-        // Fills geos and mats with newly appended mesh meta.
+        // Fills geos and mats with mesh meta.
         for mesh_key in self.meshes.iter() {
             let (geo_key, geo_ref) = mesh_res
                 .get_mesh_geometry_meta(mesh_key)
@@ -178,6 +209,7 @@ impl Scene {
             let (mat_key, mat_ref) = mesh_res
                 .get_mesh_material_meta(mesh_key)
                 .ok_or(SceneError::NotFoundResource)?;
+            self.mesh_map.insert(mesh_key.clone(), (geo_key.clone(), mat_key.clone()));
             self.geos.insert(geo_key, GeometryView::new(geo_ref));
             self.mats.insert(mat_key, mat_ref);
         }
@@ -303,16 +335,27 @@ impl Scene {
 
     /// Calculates vertex and index buffer sizes for all geometries in the scene.
     /// Each geometry has it's offset and length, so it can be written appropriately.
-    /// Also, they are located with alignment required by wgpu (multiple of 4 bytes).
+    /// Also, they are located with alignment required by WebGPU (multiple of 4 bytes).
     pub fn calc_geometry_buffer_size(&mut self, mesh_res: &MeshResource) -> (u64, u64) {
         // Calculate size for vertices.
         let geo_buf_size = self
             .iter_geometry(mesh_res)
             .map(|geo| {
                 let int_geo = geo.as_interleaved().unwrap();
-                let vert_size = int_geo.as_bytes(0).len();
-                let index_size = int_geo.as_bytes(1).len();
-                (to_aligned_size(vert_size as u64), to_aligned_size(index_size as u64))
+                let vert_padded_num = to_padded_num(
+                    int_geo.vertex_size, int_geo.vertex_num
+                ) as u64;
+                let index_size = match int_geo.index_format {
+                    wgpu::IndexFormat::Uint16 => 2,
+                    wgpu::IndexFormat::Uint32 => 4,
+                };
+                let index_padded_num = to_padded_num(
+                    index_size, int_geo.index_num
+                ) as u64;
+                (
+                    int_geo.vertex_size as u64 * vert_padded_num,
+                    index_size as u64 * index_padded_num,
+                )
             })
             .fold((0, 0), |mut acc, x| {
                 acc.0 += x.0;
@@ -343,7 +386,7 @@ impl Scene {
         assert!(need_index_size <= index_buf.size());
 
         // Writes each geometry.
-        let (mut vert_offset, mut index_offset) = (0, 0);
+        let (mut vert_buf_offset, mut index_buf_offset) = (0_usize, 0_usize);
         for (geo, view) in self
             .geos
             .iter_mut()
@@ -354,26 +397,127 @@ impl Scene {
             let index_bytes = int_geo.as_bytes(1);
 
             // Writes to the buffer.
-            write_to_mapped_buffer(&vert_buf, vert_bytes, vert_offset);
-            write_to_mapped_buffer(&index_buf, index_bytes, index_offset);
+            write_to_mapped_buffer(&vert_buf, vert_bytes, vert_buf_offset as usize);
+            write_to_mapped_buffer(&index_buf, index_bytes, index_buf_offset as usize);
 
             // Updates geometry view of the buffer.
-            view.vert_offset = vert_offset;
-            view.vert_size = to_aligned_size(vert_bytes.len() as u64);
-            view.index_offset = index_offset;
-            view.index_size = to_aligned_size(index_bytes.len() as u64);
+            view.vert_size = int_geo.vertex_size;
+            view.vert_num = int_geo.vertex_num;
+            view.vert_buf_offset = vert_buf_offset;
+            view.vert_buf_size = int_geo.vertex_size as u64 * to_padded_num(int_geo.vertex_size, int_geo.vertex_num) as u64;
+            view.index_format = int_geo.index_format;
+            view.index_num = int_geo.index_num;
+            view.index_buf_offset = index_buf_offset;
+            let index_size = match int_geo.index_format {
+                wgpu::IndexFormat::Uint16 => 2,
+                wgpu::IndexFormat::Uint32 => 4,
+            };
+            view.index_buf_size = index_size as u64 * to_padded_num(index_size, int_geo.index_num) as u64;
 
             // Prepares for the next.
-            vert_offset += view.vert_size as usize;
-            index_offset += view.index_size as usize;
+            vert_buf_offset += view.vert_buf_size as usize;
+            index_buf_offset += view.index_buf_size as usize;
         }
 
         // Unmaps the buffer.
         vert_buf.unmap();
         index_buf.unmap();
 
+        // Sets buffers.
         self.vert_buf = Some(vert_buf);
         self.index_buf = Some(index_buf);
+    }
+
+    // TODO: Improve me and sync with shader.
+    /// Builds pass graph and returns old value.
+    pub fn build_pass_graph(&mut self, gpu: &Rc<Gpu>, label: impl Into<RcStr>) -> Option<PassGraph> {
+        const INVALID: usize = usize::MAX;
+        let label = label.into();
+        let mut pass_graph = PassGraph::new(&label, gpu);
+
+        // Uses only one camera for now.
+        let cam_cmd = if let Some(cam) = self.camera_binds.values().next() {
+            let cmd = SetBindGroupCmd::new(0, Rc::clone(cam));
+            pass_graph.add_node(cmd)
+        } else {
+            INVALID
+        };
+
+        let vert_cmd = if let Some(buf) = &self.vert_buf {
+            let cmd = SetVertexBufferCmd::new(Rc::clone(buf), 0, 0, 0);
+            pass_graph.add_node(cmd)
+        } else {
+            INVALID
+        };
+
+        let index_cmd = if let Some(buf) = &self.index_buf {
+            let geo_view = self.geos.values().next().unwrap();
+            let format = geo_view.index_format;
+            let cmd = SetIndexBufferCmd::new(Rc::clone(buf), 0, 0, format);
+            pass_graph.add_node(cmd)
+        } else {
+            INVALID
+        };
+
+        // Uses only one pipeline for now.
+        let pipe_cmd = if let Some(pipe) = self.pipelines.values().next() {
+            let cmd = SetPipelineCmd::new(Rc::clone(pipe));
+            pass_graph.add_node(cmd)
+        } else {
+            INVALID
+        };
+
+        let mut pass = RenderPassDesc::new(label, Some(self.surf_pack_index.clone()));
+
+        for (geo_key, mat_key) in self.mesh_map.values() {
+            let mat_bind = self.mat_binds.get(mat_key).unwrap();
+            let cmd = SetBindGroupCmd::new(1, Rc::clone(mat_bind));
+            let mat_cmd = pass_graph.add_node(cmd);
+            let geo_view = self.geos.get(geo_key).unwrap();
+            // TODO
+            let base_vertex = 0;
+            // TODO
+            let indices = 0..36;
+            let cmd = DrawIndexedCmd::new(indices, base_vertex, 0..1);
+            let draw_cmd = pass_graph.add_node(cmd);
+            if cam_cmd != INVALID {
+                pass_graph.add_edge(draw_cmd, cam_cmd);
+            }
+            if vert_cmd != INVALID {
+                pass_graph.add_edge(draw_cmd, vert_cmd);
+            }
+            if index_cmd != INVALID {
+                pass_graph.add_edge(draw_cmd, index_cmd); 
+            }
+            if pipe_cmd != INVALID {
+                pass_graph.add_edge(draw_cmd, pipe_cmd);
+            }
+            pass_graph.add_edge(draw_cmd, mat_cmd);
+
+            pass.add_draw_command(draw_cmd);
+        }
+
+        pass_graph.add_pass(PassDesc::from(pass));
+
+        self.insert_pass_graph(pass_graph)
+    }
+
+    #[inline]
+    pub fn insert_pass_graph(&mut self, pass_graph: PassGraph) -> Option<PassGraph> {
+        self.pass_graph.replace(pass_graph)
+    }
+
+    /// Runs the pass graph.
+    pub fn run(
+        &self,
+        surf_packs: &GenVecRc<SurfacePack>,
+        surf_pack_buf: &mut SurfacePackBuffer,
+        surfaces: &GenVecRc<Surface>,
+        visit_buf: &mut Vec<bool>,
+    ) {
+        if let Some(pass_graph) = &self.pass_graph {
+            pass_graph.run(surf_packs, surf_pack_buf, surfaces, visit_buf);
+        }
     }
 }
 
@@ -383,34 +527,34 @@ impl<'a> NodeReturn<'a> {
     /// Sets transform matrix to the current node.
     pub fn with_transform(self, transform: Matrix4f) -> Self {
         let Self {
-            recv: desc,
+            recv: scene,
             ret: node_index,
         } = self;
 
         // Sets the transform matrix at the node.
-        desc.nodes[node_index].transform = transform;
+        scene.nodes[node_index].transform = transform;
 
         Self {
-            recv: desc,
+            recv: scene,
             ret: node_index,
         }
     }
 
     pub fn with_camera(self, key: impl Into<ResKey>, camera: impl Into<Camera>) -> Self {
         let Self {
-            recv: desc,
+            recv: scene,
             ret: node_index,
         } = self;
 
-        // Adds camera to the scene descriptor.
+        // Adds camera to the scene.
         let key = key.into();
-        desc.cameras.insert(key.clone(), camera.into());
+        scene.cameras.insert(key.clone(), camera.into());
 
         // Sets the camera at the node.
-        desc.nodes[node_index].camera = Some(key);
+        scene.nodes[node_index].camera = Some(key);
 
         Self {
-            recv: desc,
+            recv: scene,
             ret: node_index,
         }
     }
@@ -418,19 +562,19 @@ impl<'a> NodeReturn<'a> {
     /// Sets mesh to the current node.
     pub fn with_mesh(self, key: impl Into<ResKey>) -> Self {
         let Self {
-            recv: desc,
+            recv: scene,
             ret: node_index,
         } = self;
 
-        // Adds mesh to the scene descriptor.
+        // Adds mesh to the scene.
         let key = key.into();
-        desc.meshes.insert(key.clone());
+        scene.meshes.insert(key.clone());
 
         // Sets mesh at the node.
-        desc.nodes[node_index].mesh = Some(key);
+        scene.nodes[node_index].mesh = Some(key);
 
         Self {
-            recv: desc,
+            recv: scene,
             ret: node_index,
         }
     }
@@ -466,17 +610,31 @@ impl Default for Node {
 
 #[derive(Debug, Clone)]
 pub struct GeometryView {
-    /// Offset in bytes to the unified vertex buffer.
-    pub vert_offset: usize,
+    /// Single vertex size in bytes.
+    pub vert_size: usize,
 
-    /// Total vertex size in bytes.
-    pub vert_size: u64,
+    /// Number of vertices.
+    pub vert_num: usize,
+
+    /// Offset in bytes to the unified vertex buffer.
+    pub vert_buf_offset: usize,
+
+    /// Size in bytes from the offset. 
+    /// It may differ from `vert_size` x `vert_num` because of alignment.
+    pub vert_buf_size: u64,
+
+    /// Index format.
+    pub index_format: wgpu::IndexFormat,
+
+    /// Number of indices.
+    pub index_num: usize,
 
     /// Offset in bytes to the unified index buffer.
-    pub index_offset: usize,
+    pub index_buf_offset: usize,
 
-    /// Total index size in bytes.
-    pub index_size: u64,
+    /// Size in bytes from the offset.
+    /// It may differ from index size(2 or 4) x `index_num` because of alignment.
+    pub index_buf_size: u64,
 
     /// Geometry resource reference to own it.
     pub geo_ref: Rc<()>,
@@ -485,10 +643,14 @@ pub struct GeometryView {
 impl GeometryView {
     pub fn new(geo_ref: Rc<()>) -> Self {
         Self {
-            vert_offset: 0, // Dummy
-            vert_size: 0, // Dummy
-            index_offset: 0, // Dummy
-            index_size: 0, // Dummy
+            vert_size: 0,
+            vert_num: 0,
+            vert_buf_offset: 0,
+            vert_buf_size: 0,
+            index_format: wgpu::IndexFormat::Uint16,
+            index_num: 0,
+            index_buf_offset: 0,
+            index_buf_size: 0,
             geo_ref,
         }
     }

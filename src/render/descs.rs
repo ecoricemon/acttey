@@ -77,11 +77,3 @@ impl<'a> Default for BufferBindDesc<'a> {
         }
     }
 }
-
-pub struct RenderPassDesc<'a, M>
-where
-    M: Iterator<Item = &'a str>,
-{
-    pub surf_pack_index: GenIndexRc,
-    pub meshes: M,
-}

@@ -1,11 +1,7 @@
 #![allow(dead_code)]
 
 use std::{
-    borrow::Cow,
-    mem::{size_of, transmute},
-    ops::Deref,
-    rc::Rc,
-    thread,
+    borrow::{Borrow, Cow}, hash::Hash, mem::{size_of, transmute}, ops::{Deref, Mul, Rem, Div}, rc::Rc, thread
 };
 
 pub mod macros;
@@ -244,11 +240,11 @@ pub trait AsMultiBytes {
 pub struct OptionStr<'a>(Option<&'a str>);
 
 impl<'a> OptionStr<'a> {
-    /// Creates `Option<Rc<str>>` from the [`OptionStr`].
+    /// Creates `Option<RcStr>` from the [`OptionStr`].
     /// You can use that for a shared string.
     #[inline]
-    pub fn as_rc_str(&self) -> Option<Rc<str>> {
-        self.0.map(Rc::from)
+    pub fn as_rc_str(&self) -> Option<RcStr> {
+        self.0.map(RcStr::from)
     }
 }
 
@@ -294,4 +290,86 @@ impl<'a> From<OptionStr<'a>> for Option<&'a str> {
     fn from(value: OptionStr<'a>) -> Self {
         value.0
     }
+}
+
+/// Rc\<str\> with From implementations.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct RcStr(Rc<str>);
+
+impl From<&Rc<str>> for RcStr {
+    fn from(value: &Rc<str>) -> Self {
+        Self(Rc::clone(value))
+    }
+}
+
+impl From<Rc<str>> for RcStr {
+    fn from(value: Rc<str>) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&RcStr> for RcStr {
+    fn from(value: &RcStr) -> Self {
+        value.clone()
+    }
+}
+
+impl From<&str> for RcStr {
+    fn from(value: &str) -> Self {
+        Self(Rc::from(value))
+    }
+}
+
+impl From<String> for RcStr {
+    fn from(value: String) -> Self {
+        Self(Rc::from(value))
+    }
+}
+
+impl Deref for RcStr {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Borrow<str> for RcStr {
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for RcStr {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+pub fn gcd<T>(a: T, b: T) -> T 
+where
+    T: Default + PartialEq + PartialOrd + Rem<Output = T> + Copy
+{
+    let _gcd = |mut a: T, mut b: T| {
+        let zero = T::default();
+        while b != zero {
+            let r = a % b;
+            a = b;
+            b = r;
+        }
+        a
+    };
+
+    if a > b {
+        _gcd(a, b)
+    } else {
+        _gcd(b, a)
+    }
+}
+
+pub fn lcm<T>(a: T, b: T) -> T 
+where
+    T: Default + PartialEq + PartialOrd + Rem<Output = T> + Copy + Mul<Output = T> + Div<Output = T>,
+{
+    a * b / gcd(a, b)
 }

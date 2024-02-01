@@ -2,7 +2,8 @@ use crate::{
     ds::{
         generational::{GenIndex, GenIndexRc, GenVec},
         sparse_set::MonoSparseSet,
-    }, render::{context::Gpu, descs}, util::{ToStr, key::ResKey},
+    }, 
+    render::{context::Gpu, descs, buffer::BufferSlice}, util::{ToStr, key::ResKey},
 };
 use std::{num::NonZeroU64, rc::Rc};
 
@@ -36,10 +37,11 @@ impl BindPack {
         let (layout, group, bindings) =
             builder.build(&self.gpu.device, layout_key.clone(), group_key.clone());
         if let Some(old) = self.layouts.insert(layout_key, Rc::new(layout)) {
-            assert!(Rc::strong_count(&old) == 1);
+            assert_eq!(1, Rc::strong_count(&old));
         }
         if let Some(old) = self.groups.insert(group_key, (Rc::new(group), bindings)) {
-            assert!(Rc::strong_count(&old.0) == 1);
+            crate::log!("ref: {}", Rc::strong_count(&old.0));
+            assert_eq!(1, Rc::strong_count(&old.0));
         }
     }
 
@@ -59,7 +61,7 @@ impl BindPack {
                 },
                 count: None,
             });
-            builder.bindings.push(Binding::Buffer(BufferBinding {
+            builder.bindings.push(Binding::Buffer(BufferSlice {
                 buf: Rc::clone(desc.bufs[i]),
                 offset: 0,
                 size: 0, // Entire range
@@ -137,8 +139,8 @@ impl BindBuilder {
 /// Array variants exist just for that, it may be implemented for the future.
 #[derive(Debug, Clone)]
 pub enum Binding {
-    Buffer(BufferBinding),
-    BufferArray(Vec<BufferBinding>),
+    Buffer(BufferSlice),
+    BufferArray(Vec<BufferSlice>),
     Sampler(GenIndexRc),
     SamplerArray(Vec<GenIndexRc>),
     TextureView(GenIndexRc),
@@ -164,22 +166,5 @@ impl Binding {
             }
             _ => panic!(),
         }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct BufferBinding {
-    /// Buffer index. Owns the buffer.
-    pub buf: Rc<wgpu::Buffer>,
-    /// Offset in bytes.
-    pub offset: u64,
-    /// Size of binding in bytes, 0 for entire range from offset.
-    pub size: u64,
-}
-
-impl BufferBinding {
-    #[inline(always)]
-    pub fn size(&self) -> Option<NonZeroU64> {
-        NonZeroU64::new(self.size)
     }
 }

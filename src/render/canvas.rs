@@ -1,7 +1,7 @@
 use crate::{
     ds::generational::{GenIndexRc, GenVecRc},
     render::RenderError,
-    util::web,
+    util::{web, RcStr},
 };
 use ahash::AHashMap;
 use std::{collections::BTreeMap, mem::ManuallyDrop, rc::Rc};
@@ -308,7 +308,7 @@ impl Surface {
     }
 
     #[inline]
-    pub fn get_canvas_selectors(&self) -> &Rc<str> {
+    pub fn get_canvas_selectors(&self) -> &RcStr {
         &self.canvas.selectors
     }
 
@@ -379,7 +379,7 @@ pub struct CanvasPack {
     /// Handle to Canvas map.
     handle_to_canvas: BTreeMap<u32, Rc<Canvas>>,
     /// Selectors to Handle map.
-    selectors_to_handle: AHashMap<Rc<str>, u32>,
+    selectors_to_handle: AHashMap<RcStr, u32>,
     /// Monotonically increasing handle number.
     cur_handle: u32,
 }
@@ -416,9 +416,9 @@ impl CanvasPack {
     }
 
     /// Adds the canvas selected by the given `selectors`.
-    pub fn add(&mut self, selectors: impl Into<Rc<str>>) -> Result<Rc<Canvas>, RenderError> {
+    pub fn add(&mut self, selectors: impl Into<RcStr>) -> Result<Rc<Canvas>, RenderError> {
         let selectors = selectors.into();
-        let canvas = Rc::new(Canvas::new(Rc::clone(&selectors), self.cur_handle)?);
+        let canvas = Rc::new(Canvas::new(selectors.clone(), self.cur_handle)?);
         if let Some(orphan_handle) = self.selectors_to_handle.insert(selectors, self.cur_handle) {
             self.handle_to_canvas.remove(&orphan_handle);
         }
@@ -510,11 +510,11 @@ pub struct Canvas {
     handle: u32,
 
     /// CSS selectors that used to find this canvas.
-    selectors: Rc<str>,
+    selectors: RcStr,
 }
 
 impl Canvas {
-    pub fn new(selectors: impl Into<Rc<str>>, handle: u32) -> Result<Self, RenderError> {
+    pub fn new(selectors: impl Into<RcStr>, handle: u32) -> Result<Self, RenderError> {
         // 0 is reserved for window itself.
         assert!(handle > 0);
 
@@ -560,7 +560,7 @@ impl Canvas {
     }
 
     #[inline]
-    pub fn selectors(&self) -> &Rc<str> {
+    pub fn selectors(&self) -> &RcStr {
         &self.selectors
     }
 }

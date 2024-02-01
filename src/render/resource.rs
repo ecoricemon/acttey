@@ -8,12 +8,11 @@ use crate::{
         context::{Gpu, RenderContext},
         descs,
         pipeline::{PipelineBuilder, PipelineLayoutBuilder, PipelinePack},
-        renderer::RenderPass,
         shaders::{Shader, ShaderPack},
         BufferPool, RenderError,
     },
     ty,
-    util::key::ResKey,
+    util::{key::ResKey, RcStr},
 };
 use ahash::AHashMap;
 use smallvec::{smallvec, SmallVec};
@@ -37,7 +36,7 @@ pub struct RenderResource {
     pub surf_packs: GenVecRc<SurfacePack>,
 
     /// A map to find [`Surface`] from a canvas' CSS selectors.
-    pub canvas_to_surf: AHashMap<Rc<str>, SmallVec<[GenIndex; 1]>>,
+    pub canvas_to_surf: AHashMap<RcStr, SmallVec<[GenIndex; 1]>>,
 
     /// All GPU buffers are here.
     pub bufs: BufferPool,
@@ -50,9 +49,6 @@ pub struct RenderResource {
 
     /// TODO
     pub pipelines: PipelinePack,
-
-    /// TODO
-    pub render_passes: GenVecRc<RenderPass>,
 }
 
 impl RenderResource {
@@ -86,7 +82,6 @@ impl RenderResource {
             shaders,
             binds,
             pipelines,
-            render_passes: GenVecRc::new(),
         })
     }
 
@@ -110,7 +105,7 @@ impl RenderResource {
     /// Use it to make a [`Surface`].
     /// Unused canvases will be removed when [`Self::clear_unused_canvas`] called.
     #[inline]
-    pub fn add_canvas(&mut self, selectors: impl Into<Rc<str>>) -> CanvasReturn {
+    pub fn add_canvas(&mut self, selectors: impl Into<RcStr>) -> CanvasReturn {
         let ret = self.canvases.add(selectors);
         CanvasReturn { recv: self, ret }
     }
@@ -310,8 +305,8 @@ impl RenderResource {
     }
 
     #[inline]
-    pub fn build_shader(&mut self, index: GenIndex, key: ResKey) -> &Rc<Shader> {
-        self.shaders.create_shader(index, key)
+    pub fn build_shader(&mut self, index: GenIndex, key: impl Into<ResKey>) -> &Rc<Shader> {
+        self.shaders.create_shader(index, key.into())
     }
 
     #[inline]
@@ -345,9 +340,9 @@ impl RenderResource {
     pub fn build_pipeline_layout(
         &mut self,
         index: GenIndex,
-        key: ResKey,
+        key: impl Into<ResKey>,
     ) -> &Rc<wgpu::PipelineLayout> {
-        self.pipelines.create_layout(index, key)
+        self.pipelines.create_layout(index, key.into())
     }
 
     #[inline]
@@ -375,39 +370,9 @@ impl RenderResource {
     }
 
     #[inline]
-    pub fn build_pipeline(&mut self, index: GenIndex, key: ResKey) -> &Rc<wgpu::RenderPipeline> {
+    pub fn build_pipeline(&mut self, index: GenIndex, key: impl Into<ResKey>) -> &Rc<wgpu::RenderPipeline> {
         self.pipelines
-            .create_pipeline(index, key, &self.surf_packs, &self.surfaces)
-    }
-
-    /// Adds a new render pass.
-    #[inline]
-    pub fn add_render_pass(&mut self, pass: RenderPass) -> GenIndexRc {
-        self.render_passes.insert(pass)
-    }
-
-    /// Gets the render pass.
-    #[inline]
-    pub fn get_render_pass(&self, index: GenIndex) -> Option<&RenderPass> {
-        self.render_passes.get(index)
-    }
-
-    /// Updates the render pass.
-    #[inline]
-    pub fn update_render_pass<U>(
-        &mut self,
-        index: GenIndex,
-        f: impl FnOnce(&mut RenderPass) -> U,
-    ) -> Option<(GenIndexRc, U)> {
-        self.render_passes.update(index, f)
-    }
-
-    /// Removes unused render passs and tries to reduce capacity.
-    pub fn clear_render_pass(&mut self) -> usize {
-        self.render_passes.clear_unused(|_| {});
-        let removed = self.render_passes.clear_vacancy();
-        self.render_passes.shrink_to_fit();
-        removed
+            .create_pipeline(index, key.into(), &self.surf_packs, &self.surfaces)
     }
 
     /// Gets any iterator with a bit of inefficiency.
@@ -470,12 +435,6 @@ impl RenderResource {
                     pipeline: value,
                 })
             }))
-        } else if ty!(T) == ty!(IterRenderPass) {
-            Box::new(
-                self.render_passes
-                    .iter_occupied()
-                    .map(|v| unsafe { transmute_copy(&IterRenderPass { pass: v }) }),
-            )
         } else {
             panic!()
         }
@@ -526,7 +485,7 @@ impl RenderResource {
     /// The index becomes forced index, so that no generation check takes place.
     pub(crate) fn add_canvas_to_surface(
         &mut self,
-        selectors: impl Into<Rc<str>>,
+        selectors: impl Into<RcStr>,
         surface_index: GenIndex,
     ) {
         let surface_index = surface_index.into_forced();
@@ -567,7 +526,7 @@ impl<'a> CanvasReturn<'a> {
             let index = render.add_surface(surface);
 
             // Adds a mapping of CSS selectors to surface index.
-            render.add_canvas_to_surface(Rc::clone(canvas.selectors()), index.index);
+            render.add_canvas_to_surface(canvas.selectors(), index.index);
         }
 
         Ok(())
@@ -575,21 +534,21 @@ impl<'a> CanvasReturn<'a> {
 }
 
 #[derive(Debug)]
-pub struct IterBindGroupLayout<'a, K = ResKey> {
-    pub key: &'a K,
+pub struct IterBindGroupLayout<'a> {
+    pub key: &'a ResKey,
     pub layout: &'a Rc<wgpu::BindGroupLayout>,
 }
 
 #[derive(Debug)]
-pub struct IterBindGroup<'a, K = ResKey> {
-    pub key: &'a K,
+pub struct IterBindGroup<'a> {
+    pub key: &'a ResKey,
     pub group: &'a Rc<wgpu::BindGroup>,
     pub bindings: &'a Vec<Binding>,
 }
 
 #[derive(Debug)]
-pub struct IterShader<'a, K = ResKey> {
-    pub key: &'a K,
+pub struct IterShader<'a> {
+    pub key: &'a ResKey,
     pub shader: &'a Rc<Shader>,
 }
 
@@ -614,12 +573,7 @@ pub struct IterStorageBuffer<'a> {
 }
 
 #[derive(Debug)]
-pub struct IterRenderPipeline<'a, K = ResKey> {
-    pub key: &'a K,
+pub struct IterRenderPipeline<'a> {
+    pub key: &'a ResKey,
     pub pipeline: &'a Rc<wgpu::RenderPipeline>,
-}
-
-#[derive(Debug)]
-pub struct IterRenderPass<'a> {
-    pub pass: &'a RenderPass,
 }

@@ -2,10 +2,10 @@ use crate::{
     debug_format, impl_from_for_enum,
     primitive::mesh::InterleavedGeometry,
     render::{Gpu, RenderError},
-    util::{AsBytes, AsMultiBytes},
+    util::{gcd, lcm, AsBytes, AsMultiBytes},
 };
 use smallvec::SmallVec;
-use std::rc::Rc;
+use std::{num::NonZeroU64, rc::Rc};
 use wgpu::util::DeviceExt;
 
 pub struct BufferPool {
@@ -321,7 +321,7 @@ impl BufferGroup {
         let need_size = match size_or_data {
             SizeOrData::Size(size) => {
                 // If size was given, make it to be multiple of `wgpu::COPY_BUFFER_ALIGNMENT`.
-                to_aligned_size(size)
+                to_aligned_addr(size)
             }
             SizeOrData::Data(data) => data.len() as u64,
         };
@@ -458,11 +458,52 @@ pub struct UniformBufferMeta {
     pub vis: wgpu::ShaderStages,
 }
 
+/// Another type of [`wgpu::BufferSlice`].
+#[derive(Debug, Clone)]
+pub struct BufferSlice {
+    /// Buffer.
+    pub buf: Rc<wgpu::Buffer>,
+
+    /// Offset in bytes.
+    pub offset: u64,
+
+    /// Size from the offset in bytes, 0 for entire range.
+    pub size: u64,
+}
+
+impl BufferSlice {
+    pub fn as_slice(&self) -> wgpu::BufferSlice {
+        if self.size != 0 {
+            self.buf.slice(self.offset..self.offset + self.size)
+        } else {
+            self.buf.slice(self.offset..)
+        }
+    }
+}
+
+impl BufferSlice {
+    #[inline(always)]
+    pub fn size(&self) -> Option<NonZeroU64> {
+        NonZeroU64::new(self.size)
+    }
+}
+
+/// Makes GPU buffer offset or size multiple of 4.
+/// WebGPU requires buffer offset and size must be a multple of 4.  
+/// See https://developer.mozilla.org/en-US/docs/Web/API/GPUQueue/writeBuffer
 #[inline]
-pub const fn to_aligned_size(size: u64) -> u64 {
-    debug_assert!(size > 0);
+pub const fn to_aligned_addr(addr: u64) -> u64 {
     const MASK: wgpu::BufferAddress = wgpu::COPY_BUFFER_ALIGNMENT - 1;
-    (size + MASK) & (!MASK)
+    (addr + MASK) & (!MASK)
+}
+
+/// Calculates padded number of items to be aligned in GPU memory.
+pub fn to_padded_num(unit_size: usize, unit_num: usize) -> usize {
+    const ALIGN: usize = wgpu::COPY_BUFFER_ALIGNMENT as usize;
+    // `lc_num` is also a power of 2.
+    let lc_num = ALIGN / gcd(unit_size, ALIGN);
+    let mask = lc_num - 1;
+    (unit_num + mask) & (!mask)
 }
 
 /// Writes `bytes` to the mapped buffer.
