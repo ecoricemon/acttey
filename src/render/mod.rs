@@ -3,8 +3,8 @@ pub mod buffer;
 pub mod canvas;
 pub mod context;
 pub mod descs;
-pub mod pipeline;
 pub mod pass;
+pub mod pipeline;
 pub mod resource;
 pub mod shaders;
 
@@ -37,4 +37,6 @@ pub enum RenderError {
     BufferError(String),
     #[error("failed to get canvas using query selector: {0}")]
     CanvasQueryError(String),
+    #[error("{0}")]
+    CycleInPassGraph(String),
 }

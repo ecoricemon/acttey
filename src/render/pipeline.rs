@@ -4,7 +4,7 @@ use crate::{
         sparse_set::MonoSparseSet,
     },
     render::{
-        buffer::VertexBufferMeta,
+        buffer::BufferView,
         canvas::{Surface, SurfacePack},
         shaders::Shader,
         Gpu,
@@ -71,7 +71,7 @@ impl PipelinePack {
 pub struct PipelineBuilder {
     pub layout: Option<Rc<wgpu::PipelineLayout>>,
     pub vert_shader: Option<Rc<Shader>>,
-    pub vert_meta: Vec<VertexBufferMeta>,
+    pub vert_buf_view: Vec<BufferView>,
     pub frag_shader: Option<Rc<Shader>>,
     pub surf_pack_index: Option<GenIndexRc>,
     pub primitive: wgpu::PrimitiveState,
@@ -126,7 +126,7 @@ impl PipelineBuilder {
     ) -> wgpu::RenderPipeline {
         // Creates vertex state.
         let buffer_layouts = self
-            .vert_meta
+            .vert_buf_view
             .iter()
             .map(|v| v.create_buffer_layout())
             .collect::<Vec<_>>();
@@ -196,7 +196,7 @@ impl Default for PipelineBuilder {
         Self {
             layout: None,
             vert_shader: None,
-            vert_meta: Vec::new(),
+            vert_buf_view: Vec::new(),
             frag_shader: None,
             surf_pack_index: None,
             primitive,

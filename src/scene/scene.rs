@@ -1,16 +1,26 @@
 use crate::{
     decl_return_wrap,
-    ds::generational::{GenIndexRc, GenVecRc},
+    ds::{
+        generational::{GenIndexRc, GenVecRc},
+        graph::DirectedGraph,
+    },
     primitive::{
         camera::Camera,
         matrix::Matrix4f,
         mesh::{Geometry, MeshResource},
     },
     render::{
-        buffer::{to_aligned_addr, to_padded_num, write_to_mapped_buffer}, canvas::{Surface, SurfacePack, SurfacePackBuffer}, context::Gpu, pass::{self, DrawIndexedCmd, PassDesc, PassGraph, RenderPassDesc, SetBindGroupCmd, SetIndexBufferCmd, SetPipelineCmd, SetVertexBufferCmd}, shaders::{
+        buffer::{to_padded_num, write_to_mapped_buffer, BufferView, GeometryBufferView},
+        canvas::{Surface, SurfacePack, SurfacePackBuffer},
+        context::Gpu,
+        pass::{
+            DrawIndexedCmd, PassDesc, PassGraph, RenderPassDesc, SetBindGroupCmd,
+            SetIndexBufferCmd, SetPipelineCmd, SetVertexBufferCmd,
+        },
+        shaders::{
             helper::{BindableResource, ShaderHelper},
             Shader,
-        }
+        },
     },
     scene::SceneError,
     util::{key::ResKey, AsMultiBytes, RcStr},
@@ -43,21 +53,20 @@ impl SceneManager {
     }
 }
 
-/// Scene graph.  
-/// Scene graph describes all render relative information on CPU side, but it doesn't own real resources.
+/// Scene.  
 /// It's roles are,  
 /// - Generating render resources such as buffer, shader and pipeline.
 /// - Synchronize with the render resources, means users modify scene nodes, that reflects on the GPU data.
 ///
-/// The scene graph also corresponds to glTF scene.  
+/// Scene also corresponds to glTF scene.  
 /// See https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#concepts
 #[derive(Debug, Clone)]
 pub struct Scene {
     /// Canvas selectors.
     pub(crate) canvases: Vec<RcStr>,
 
-    /// All nodes in the scene.
-    pub(crate) nodes: Vec<Node>,
+    /// Explains node relationships.
+    pub(crate) graph: DirectedGraph<NodeValue>,
 
     /// Cameras in the scene.
     pub(crate) cameras: AHashMap<ResKey, Camera>,
@@ -75,7 +84,7 @@ pub struct Scene {
     pub(crate) mesh_map: AHashMap<ResKey, (ResKey, ResKey)>,
 
     /// Owned geometries in the scene.
-    pub(crate) geos: AHashMap<ResKey, GeometryView>,
+    pub(crate) geos: AHashMap<ResKey, GeometryBufferView>,
 
     /// Owned materials in the scene.
     pub(crate) mats: AHashMap<ResKey, Rc<()>>,
@@ -95,14 +104,6 @@ pub struct Scene {
     /// Unified vertex and index buffer size.
     pub(crate) geo_buf_size: Option<(u64, u64)>,
 
-    /// Unified vertex buffer for now, currently it's limited to have various geometry layouts.
-    /// It can be changed to have multi-buffers in the future.
-    pub(crate) vert_buf: Option<Rc<wgpu::Buffer>>,
-
-    /// Unified index buffer for now, currently it's limited to have various geometry layouts.
-    /// It can be changed to have multi-buffers in the future.
-    pub(crate) index_buf: Option<Rc<wgpu::Buffer>>,
-
     /// Pipelines. One pipeline for now.
     pub(crate) pipelines: AHashMap<ResKey, Rc<wgpu::RenderPipeline>>,
 
@@ -112,13 +113,13 @@ pub struct Scene {
 impl Scene {
     pub fn new() -> Self {
         Self {
-            nodes: Vec::new(),
+            graph: DirectedGraph::new(),
+            canvases: Vec::new(),
             cameras: AHashMap::new(),
             camera_bufs: AHashMap::new(),
             camera_binds: AHashMap::new(),
             meshes: AHashSet::new(),
             mesh_map: AHashMap::new(),
-            canvases: Vec::new(),
             geos: AHashMap::new(),
             mats: AHashMap::new(),
             mat_bufs: AHashMap::new(),
@@ -126,8 +127,6 @@ impl Scene {
             surf_pack_index: GenIndexRc::dummy(),
             shader: None,
             geo_buf_size: None,
-            vert_buf: None,
-            index_buf: None,
             pipelines: AHashMap::new(),
             pass_graph: None,
         }
@@ -139,12 +138,14 @@ impl Scene {
     }
 
     pub fn add_node(&mut self, parent: Option<usize>) -> NodeReturn {
-        self.nodes.push(Node::new());
-        let ret = self.nodes.len() - 1;
+        let index = self.graph.add_node(NodeValue::default());
         if let Some(parent) = parent {
-            self.nodes[parent].children.insert(ret);
+            self.graph.add_edge(parent, index);
         }
-        NodeReturn { recv: self, ret }
+        NodeReturn {
+            recv: self,
+            ret: index,
+        }
     }
 
     // TODO: Allow multiple material and geometry layout?
@@ -209,8 +210,10 @@ impl Scene {
             let (mat_key, mat_ref) = mesh_res
                 .get_mesh_material_meta(mesh_key)
                 .ok_or(SceneError::NotFoundResource)?;
-            self.mesh_map.insert(mesh_key.clone(), (geo_key.clone(), mat_key.clone()));
-            self.geos.insert(geo_key, GeometryView::new(geo_ref));
+            self.mesh_map
+                .insert(mesh_key.clone(), (geo_key.clone(), mat_key.clone()));
+            self.geos
+                .insert(geo_key, GeometryBufferView::dummy(geo_ref));
             self.mats.insert(mat_key, mat_ref);
         }
 
@@ -342,16 +345,12 @@ impl Scene {
             .iter_geometry(mesh_res)
             .map(|geo| {
                 let int_geo = geo.as_interleaved().unwrap();
-                let vert_padded_num = to_padded_num(
-                    int_geo.vertex_size, int_geo.vertex_num
-                ) as u64;
+                let vert_padded_num = to_padded_num(int_geo.vertex_size, int_geo.vertex_num) as u64;
                 let index_size = match int_geo.index_format {
                     wgpu::IndexFormat::Uint16 => 2,
                     wgpu::IndexFormat::Uint32 => 4,
                 };
-                let index_padded_num = to_padded_num(
-                    index_size, int_geo.index_num
-                ) as u64;
+                let index_padded_num = to_padded_num(index_size, int_geo.index_num) as u64;
                 (
                     int_geo.vertex_size as u64 * vert_padded_num,
                     index_size as u64 * index_padded_num,
@@ -377,7 +376,12 @@ impl Scene {
     /// # Panics
     ///
     /// Panics if `buf`'s size is less than calculated size by [`Self::calc_geometry_buffer_size`].
-    pub fn set_geometry_buffer(&mut self, mesh_res: &MeshResource, vert_buf: Rc<wgpu::Buffer>, index_buf: Rc<wgpu::Buffer>) {
+    pub fn set_geometry_buffer(
+        &mut self,
+        mesh_res: &MeshResource,
+        vert_buf: Rc<wgpu::Buffer>,
+        index_buf: Rc<wgpu::Buffer>,
+    ) {
         // Validates the buffer size.
         let (need_vert_size, need_index_size) = self
             .geo_buf_size
@@ -386,7 +390,8 @@ impl Scene {
         assert!(need_index_size <= index_buf.size());
 
         // Writes each geometry.
-        let (mut vert_buf_offset, mut index_buf_offset) = (0_usize, 0_usize);
+        let mut vert_offset: usize = 0; // Offest in indices.
+        let mut index_offset: usize = 0; // Offset in indices.
         for (geo, view) in self
             .geos
             .iter_mut()
@@ -397,72 +402,88 @@ impl Scene {
             let index_bytes = int_geo.as_bytes(1);
 
             // Writes to the buffer.
-            write_to_mapped_buffer(&vert_buf, vert_bytes, vert_buf_offset as usize);
-            write_to_mapped_buffer(&index_buf, index_bytes, index_buf_offset as usize);
+            let vert_offset_bytes = vert_offset * int_geo.vertex_size;
+            let index_offset_bytes = vert_offset * int_geo.vertex_size;
+            write_to_mapped_buffer(&vert_buf, vert_bytes, vert_offset_bytes);
+            write_to_mapped_buffer(&index_buf, index_bytes, index_offset_bytes);
 
-            // Updates geometry view of the buffer.
-            view.vert_size = int_geo.vertex_size;
-            view.vert_num = int_geo.vertex_num;
-            view.vert_buf_offset = vert_buf_offset;
-            view.vert_buf_size = int_geo.vertex_size as u64 * to_padded_num(int_geo.vertex_size, int_geo.vertex_num) as u64;
-            view.index_format = int_geo.index_format;
-            view.index_num = int_geo.index_num;
-            view.index_buf_offset = index_buf_offset;
-            let index_size = match int_geo.index_format {
+            // Updates vertex buffer view for this geometry.
+            let mut vert_buf_view = BufferView::new(
+                int_geo.vertex_size as u64,
+                int_geo.vertex_num as u64,
+                vert_offset as u64,
+            );
+            vert_buf_view.set_buffer(Rc::clone(&vert_buf));
+            vert_buf_view.set_vertex_attributes(&int_geo.attrs);
+            view.set_vertex_buffer_view(vert_buf_view);
+
+            // Updates index buffer view for this geometry.
+            let index_size: usize = match int_geo.index_format {
                 wgpu::IndexFormat::Uint16 => 2,
                 wgpu::IndexFormat::Uint32 => 4,
             };
-            view.index_buf_size = index_size as u64 * to_padded_num(index_size, int_geo.index_num) as u64;
+            let mut index_buf_view = BufferView::new(
+                index_size as u64,
+                int_geo.index_num as u64,
+                index_offset as u64,
+            );
+            index_buf_view.set_buffer(Rc::clone(&index_buf));
+            view.set_index_buffer_view(index_buf_view);
 
-            // Prepares for the next.
-            vert_buf_offset += view.vert_buf_size as usize;
-            index_buf_offset += view.index_buf_size as usize;
+            // Increases offsets by padded numbers.
+            // Because we can access to only the aligned address to the buffer.
+            vert_offset += to_padded_num(int_geo.vertex_size, int_geo.vertex_num);
+            index_offset += to_padded_num(index_size, int_geo.index_num);
         }
 
         // Unmaps the buffer.
         vert_buf.unmap();
         index_buf.unmap();
-
-        // Sets buffers.
-        self.vert_buf = Some(vert_buf);
-        self.index_buf = Some(index_buf);
     }
 
     // TODO: Improve me and sync with shader.
     /// Builds pass graph and returns old value.
-    pub fn build_pass_graph(&mut self, gpu: &Rc<Gpu>, label: impl Into<RcStr>) -> Option<PassGraph> {
+    pub fn build_pass_graph(
+        &mut self,
+        gpu: &Rc<Gpu>,
+        label: impl Into<RcStr>,
+    ) -> Option<PassGraph> {
         const INVALID: usize = usize::MAX;
         let label = label.into();
         let mut pass_graph = PassGraph::new(&label, gpu);
 
         // Uses only one camera for now.
         let cam_cmd = if let Some(cam) = self.camera_binds.values().next() {
+            // TODO: Something like group index can be shared across resources.
             let cmd = SetBindGroupCmd::new(0, Rc::clone(cam));
-            pass_graph.add_node(cmd)
+            pass_graph.add_command(cmd)
         } else {
             INVALID
         };
 
-        let vert_cmd = if let Some(buf) = &self.vert_buf {
-            let cmd = SetVertexBufferCmd::new(Rc::clone(buf), 0, 0, 0);
-            pass_graph.add_node(cmd)
+        let (vert_cmd, index_cmd) = if let Some(geo_buf_view) = self.geos.values().next() {
+            // Vertex
+            let vert_buf = geo_buf_view.get_vertex_buffer();
+            let vert_cmd = SetVertexBufferCmd::new(Rc::clone(vert_buf), 0, 0, 0);
+            let vert_cmd = pass_graph.add_command(vert_cmd);
+            // Index
+            let index_buf_view = geo_buf_view.get_index_buffer_view();
+            let index_cmd = SetIndexBufferCmd::new(
+                Rc::clone(index_buf_view.get_buffer()),
+                0,
+                0,
+                index_buf_view.as_index_format(),
+            );
+            let index_cmd = pass_graph.add_command(index_cmd);
+            (vert_cmd, index_cmd)
         } else {
-            INVALID
-        };
-
-        let index_cmd = if let Some(buf) = &self.index_buf {
-            let geo_view = self.geos.values().next().unwrap();
-            let format = geo_view.index_format;
-            let cmd = SetIndexBufferCmd::new(Rc::clone(buf), 0, 0, format);
-            pass_graph.add_node(cmd)
-        } else {
-            INVALID
+            (INVALID, INVALID)
         };
 
         // Uses only one pipeline for now.
         let pipe_cmd = if let Some(pipe) = self.pipelines.values().next() {
             let cmd = SetPipelineCmd::new(Rc::clone(pipe));
-            pass_graph.add_node(cmd)
+            pass_graph.add_command(cmd)
         } else {
             INVALID
         };
@@ -472,38 +493,42 @@ impl Scene {
         for (geo_key, mat_key) in self.mesh_map.values() {
             let mat_bind = self.mat_binds.get(mat_key).unwrap();
             let cmd = SetBindGroupCmd::new(1, Rc::clone(mat_bind));
-            let mat_cmd = pass_graph.add_node(cmd);
+            let mat_cmd = pass_graph.add_command(cmd);
+
             let geo_view = self.geos.get(geo_key).unwrap();
-            // TODO
-            let base_vertex = 0;
-            // TODO
-            let indices = 0..36;
-            let cmd = DrawIndexedCmd::new(indices, base_vertex, 0..1);
-            let draw_cmd = pass_graph.add_node(cmd);
+            let vert_view = geo_view.get_vertex_buffer_view();
+            let index_view = geo_view.get_index_buffer_view();
+
+            let base_vertex = vert_view.get_index_offset() as i32;
+            let start_index = index_view.get_index_offset() as u32;
+            let end_index = start_index + index_view.get_item_num() as u32;
+            let cmd = DrawIndexedCmd::new(start_index..end_index, base_vertex, 0..1);
+            let draw_cmd = pass_graph.add_command(cmd);
             if cam_cmd != INVALID {
-                pass_graph.add_edge(draw_cmd, cam_cmd);
+                pass_graph.add_dependency(draw_cmd, cam_cmd);
             }
             if vert_cmd != INVALID {
-                pass_graph.add_edge(draw_cmd, vert_cmd);
+                pass_graph.add_dependency(draw_cmd, vert_cmd);
             }
             if index_cmd != INVALID {
-                pass_graph.add_edge(draw_cmd, index_cmd); 
+                pass_graph.add_dependency(draw_cmd, index_cmd);
             }
             if pipe_cmd != INVALID {
-                pass_graph.add_edge(draw_cmd, pipe_cmd);
+                pass_graph.add_dependency(draw_cmd, pipe_cmd);
             }
-            pass_graph.add_edge(draw_cmd, mat_cmd);
+            pass_graph.add_dependency(draw_cmd, mat_cmd);
 
             pass.add_draw_command(draw_cmd);
         }
 
         pass_graph.add_pass(PassDesc::from(pass));
+        pass_graph.validate().unwrap();
 
-        self.insert_pass_graph(pass_graph)
+        self.set_pass_graph(pass_graph)
     }
 
     #[inline]
-    pub fn insert_pass_graph(&mut self, pass_graph: PassGraph) -> Option<PassGraph> {
+    pub fn set_pass_graph(&mut self, pass_graph: PassGraph) -> Option<PassGraph> {
         self.pass_graph.replace(pass_graph)
     }
 
@@ -511,12 +536,12 @@ impl Scene {
     pub fn run(
         &self,
         surf_packs: &GenVecRc<SurfacePack>,
-        surf_pack_buf: &mut SurfacePackBuffer,
+        surf_pack_bufs: &mut Vec<SurfacePackBuffer>,
         surfaces: &GenVecRc<Surface>,
         visit_buf: &mut Vec<bool>,
     ) {
         if let Some(pass_graph) = &self.pass_graph {
-            pass_graph.run(surf_packs, surf_pack_buf, surfaces, visit_buf);
+            pass_graph.run(surf_packs, surf_pack_bufs, surfaces, visit_buf);
         }
     }
 }
@@ -532,7 +557,8 @@ impl<'a> NodeReturn<'a> {
         } = self;
 
         // Sets the transform matrix at the node.
-        scene.nodes[node_index].transform = transform;
+        let node = scene.graph.get_node_mut(node_index).unwrap();
+        node.transform = transform;
 
         Self {
             recv: scene,
@@ -551,7 +577,8 @@ impl<'a> NodeReturn<'a> {
         scene.cameras.insert(key.clone(), camera.into());
 
         // Sets the camera at the node.
-        scene.nodes[node_index].camera = Some(key);
+        let node = scene.graph.get_node_mut(node_index).unwrap();
+        node.camera = Some(key);
 
         Self {
             recv: scene,
@@ -571,7 +598,8 @@ impl<'a> NodeReturn<'a> {
         scene.meshes.insert(key.clone());
 
         // Sets mesh at the node.
-        scene.nodes[node_index].mesh = Some(key);
+        let node = scene.graph.get_node_mut(node_index).unwrap();
+        node.mesh = Some(key);
 
         Self {
             recv: scene,
@@ -581,77 +609,18 @@ impl<'a> NodeReturn<'a> {
 }
 
 #[derive(Debug, Clone)]
-pub struct Node {
-    children: AHashSet<usize>,
-
-    // TODO: transform should be in components array.
-    // Scene doesn't have actual resource or component except camera.
+pub struct NodeValue {
     transform: Matrix4f,
     camera: Option<ResKey>,
     mesh: Option<ResKey>,
 }
 
-impl Node {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl Default for Node {
+impl Default for NodeValue {
     fn default() -> Self {
         Self {
-            children: AHashSet::new(),
             transform: Matrix4f::identity(),
             camera: None,
             mesh: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct GeometryView {
-    /// Single vertex size in bytes.
-    pub vert_size: usize,
-
-    /// Number of vertices.
-    pub vert_num: usize,
-
-    /// Offset in bytes to the unified vertex buffer.
-    pub vert_buf_offset: usize,
-
-    /// Size in bytes from the offset. 
-    /// It may differ from `vert_size` x `vert_num` because of alignment.
-    pub vert_buf_size: u64,
-
-    /// Index format.
-    pub index_format: wgpu::IndexFormat,
-
-    /// Number of indices.
-    pub index_num: usize,
-
-    /// Offset in bytes to the unified index buffer.
-    pub index_buf_offset: usize,
-
-    /// Size in bytes from the offset.
-    /// It may differ from index size(2 or 4) x `index_num` because of alignment.
-    pub index_buf_size: u64,
-
-    /// Geometry resource reference to own it.
-    pub geo_ref: Rc<()>,
-}
-
-impl GeometryView {
-    pub fn new(geo_ref: Rc<()>) -> Self {
-        Self {
-            vert_size: 0,
-            vert_num: 0,
-            vert_buf_offset: 0,
-            vert_buf_size: 0,
-            index_format: wgpu::IndexFormat::Uint16,
-            index_num: 0,
-            index_buf_offset: 0,
-            index_buf_size: 0,
-            geo_ref,
         }
     }
 }

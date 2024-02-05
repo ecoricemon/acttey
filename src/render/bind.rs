@@ -2,8 +2,10 @@ use crate::{
     ds::{
         generational::{GenIndex, GenIndexRc, GenVec},
         sparse_set::MonoSparseSet,
-    }, 
-    render::{context::Gpu, descs, buffer::BufferSlice}, util::{ToStr, key::ResKey},
+    },
+    impl_from_for_enum,
+    render::{buffer::BufferView, context::Gpu, descs},
+    util::{key::ResKey, ToStr},
 };
 use std::{num::NonZeroU64, rc::Rc};
 
@@ -40,7 +42,6 @@ impl BindPack {
             assert_eq!(1, Rc::strong_count(&old));
         }
         if let Some(old) = self.groups.insert(group_key, (Rc::new(group), bindings)) {
-            crate::log!("ref: {}", Rc::strong_count(&old.0));
             assert_eq!(1, Rc::strong_count(&old.0));
         }
     }
@@ -61,11 +62,9 @@ impl BindPack {
                 },
                 count: None,
             });
-            builder.bindings.push(Binding::Buffer(BufferSlice {
-                buf: Rc::clone(desc.bufs[i]),
-                offset: 0,
-                size: 0, // Entire range
-            }));
+            let mut buf_view = BufferView::new(desc.item_sizes[i], 1, 0);
+            buf_view.set_buffer(Rc::clone(desc.bufs[i]));
+            builder.bindings.push(Binding::from(buf_view));
         }
 
         // Builds and removes the temporary builder.
@@ -130,22 +129,23 @@ impl BindBuilder {
     }
 }
 
-/// Corresponds to [wgpu::BindingResource](https://wgpu.rs/doc/wgpu/enum.BindingResource.html).
-/// This uses index instead of reference, so that you can keep this without borrowing.
-/// When it comes to Array variants,
-/// in WebGPU spec, it seems there's only one handle for a single binding.
-/// [WebGPU spec](https://www.w3.org/TR/webgpu/#typedefdef-gpubindingresource)
+/// Corresponds to [`wgpu::BindingResource`].
+/// In WebGPU spec, it seems there's only one handle for a single binding
+/// [WebGPU spec](https://www.w3.org/TR/webgpu/#typedefdef-gpubindingresource).
 /// But, wgpu has features to have multiple handles for a single binding.
 /// Array variants exist just for that, it may be implemented for the future.
 #[derive(Debug, Clone)]
 pub enum Binding {
-    Buffer(BufferSlice),
-    BufferArray(Vec<BufferSlice>),
+    Buffer(BufferView),
+    BufferArray(Vec<BufferView>),
     Sampler(GenIndexRc),
     SamplerArray(Vec<GenIndexRc>),
     TextureView(GenIndexRc),
     TextureViewArray(Vec<GenIndexRc>),
 }
+
+impl_from_for_enum!(Binding, Buffer, BufferView);
+impl_from_for_enum!(Binding, BufferArray, Vec<BufferView>);
 
 impl Binding {
     pub fn as_entry(&self, layout_entry: &wgpu::BindGroupLayoutEntry) -> wgpu::BindGroupEntry {
@@ -155,16 +155,16 @@ impl Binding {
         }
     }
 
-    pub fn as_resource(&self, layout_entry: &wgpu::BindGroupLayoutEntry) -> wgpu::BindingResource {
+    fn as_resource(&self, layout_entry: &wgpu::BindGroupLayoutEntry) -> wgpu::BindingResource {
         match (self, layout_entry.ty) {
-            (Self::Buffer(bb), wgpu::BindingType::Buffer { .. }) => {
+            (Self::Buffer(buf_view), wgpu::BindingType::Buffer { .. }) => {
                 wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &bb.buf,
-                    offset: bb.offset,
-                    size: bb.size(),
+                    buffer: buf_view.get_buffer(),
+                    offset: buf_view.get_offset(),
+                    size: NonZeroU64::new(buf_view.get_size()),
                 })
             }
-            _ => panic!(),
+            _ => unimplemented!(),
         }
     }
 }

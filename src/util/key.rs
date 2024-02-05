@@ -1,7 +1,6 @@
 use crate::util::{RcStr, ToStr};
 use std::{
     borrow::Cow,
-    rc::Rc,
     hash::{Hash, Hasher},
     thread_local,
 };
@@ -10,7 +9,8 @@ use std::{
 #[derive(Debug, Eq, Clone)]
 pub struct ResKey {
     /// Unique ID.
-    /// TODO: upper bits will be used for sub-keys such as scene's pipelines.
+    /// TODO: upper bits will be used for automatically generated sub-keys
+    /// such as scene's pipelines.
     pub(crate) id: u64,
 
     /// Optional label. Use default() if you don't want label.

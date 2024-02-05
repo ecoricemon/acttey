@@ -1,4 +1,4 @@
-use crate::{ds::generational::GenIndexRc, util::key::ResKey};
+use crate::util::key::ResKey;
 use std::rc::Rc;
 
 /// A descriptor for binding buffers to a bind group.
@@ -7,20 +7,32 @@ use std::rc::Rc;
 /// `layout_label`, `group_label`, and `bufs` are mandatory.
 pub struct BufferBindDesc<'a> {
     // Label will be inserted into a map as a key.
-    /// Required
+    /// *Required field*  
     pub layout_key: ResKey,
+
     // Label will be inserted into a map as a key.
-    /// Required
+    /// *Required field*  
     pub group_key: ResKey,
-    /// Required
+
+    /// *Required field*  
     pub bufs: &'a [&'a Rc<wgpu::Buffer>],
+
+    /// *Required field*  
+    /// Single item size in bytes.
+    pub item_sizes: &'a [u64],
+
+    /// *Optional field*  
     /// Default is Uniform.
     pub bind_type: wgpu::BufferBindingType,
-    /// Default is empty, but if it's left as empty,
-    /// automatically evaluated something like 0, 1, 2, ...
+
+    /// *Optional field*  
+    /// Default is empty.
+    /// But if it's left as empty, it's automatically evaluated something like 0, 1, 2, ...
     pub bindings: &'a [u32],
-    /// Default is empty, but if it's left as empty,
-    /// automatically evaluated as VERTEX_FRAGMENT.
+
+    /// *Optional field*  
+    /// Default is empty.
+    /// But if it's left as empty, it's automatically evaluated as VERTEX_FRAGMENT.
     pub viss: &'a [wgpu::ShaderStages],
 }
 
@@ -71,6 +83,7 @@ impl<'a> Default for BufferBindDesc<'a> {
             layout_key: ResKey::default(),
             group_key: ResKey::default(),
             bufs: &[],
+            item_sizes: &[],
             bind_type: wgpu::BufferBindingType::Uniform,
             bindings: &[],
             viss: &[],

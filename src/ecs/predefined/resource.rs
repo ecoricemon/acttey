@@ -1,7 +1,5 @@
+use crate::ecs::traits::Resource;
 use crate::scene::scene::SceneManager;
-use crate::{
-    ecs::traits::Resource,
-};
 use std::{any::TypeId, mem::transmute_copy};
 
 // Exposes `EventManager` resource.

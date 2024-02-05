@@ -89,10 +89,11 @@ pub fn create_box_geometry(box_: Box, center: Vector<f32, 3>) -> SeparateGeometr
         .flat_map(|i| [i, i + 1, i + 2, i + 2, i + 1, i + 3])
         .collect();
 
-    SeparateGeometry::new()
-        .with_position(positions.into())
+    let mut geo = SeparateGeometry::new();
+    geo.with_position(positions.into())
         .with_normal(normals.into())
-        .with_indices(indices.into())
+        .with_indices(indices.into());
+    geo
 }
 
 #[derive(Debug, Default)]
@@ -101,16 +102,19 @@ pub struct Cube {
 }
 
 impl Cube {
+    #[inline]
     pub fn new(length: f32) -> Self {
         Self {
             b: Box::new(length, length, length),
         }
     }
 
+    #[inline]
     pub fn get_length(&self) -> f32 {
         self.b.width
     }
 
+    #[inline]
     pub fn set_length(&mut self, length: f32) {
         self.b.width = length;
         self.b.height = length;
@@ -121,6 +125,7 @@ impl Cube {
 impl Deref for Cube {
     type Target = Box;
 
+    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.b
     }

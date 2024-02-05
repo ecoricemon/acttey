@@ -4,8 +4,8 @@ pub mod prelude {
     pub use super::{scene::Scene, SceneError};
 }
 
-use thiserror::Error;
 use crate::prelude::RenderError;
+use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum SceneError {
@@ -14,5 +14,5 @@ pub enum SceneError {
     #[error("invalid scene: {0}")]
     InvalidScene(String),
     #[error("")]
-    ErrorFromRender(#[from] RenderError)
+    ErrorFromRender(#[from] RenderError),
 }

@@ -1,14 +1,17 @@
-use ahash::{AHashMap, AHashSet};
-use bytemuck::CheckedBitPattern;
-
 use crate::{
-    ds::generational::{GenIndex, GenIndexRc, GenVec, GenVecRc}, impl_from_for_enum, render::{
+    debug_format,
+    ds::{
+        generational::{GenIndexRc, GenVecRc},
+        graph::DirectedGraph,
+    },
+    impl_from_for_enum,
+    render::{
         canvas::{Surface, SurfacePack, SurfacePackBuffer},
-        Gpu,
-        buffer::BufferSlice,
-    }, util::RcStr
+        Gpu, RenderError,
+    },
+    util::RcStr,
 };
-use std::{rc::Rc, ops::Range};
+use std::{num::NonZeroU64, ops::Range, rc::Rc};
 
 /// Directed acyclic graph representing pass command dependency.
 /// Direction here means `From` command *requires* `To` command to be executed beforehand.
@@ -24,19 +27,7 @@ pub struct PassGraph {
     /// Passes are executed in this order.
     descs: Vec<PassDesc>,
 
-    /// Nodes containing pass commands.
-    /// Length of this is always same with the things of `outbounds` and `inbounds`.
-    nodes: Vec<PassCmd>,
-
-    /// Outgoing edges of each node that explain execution order.
-    /// A -> B means A depends on B, so that B must be executed first.
-    /// A is index and B is value in here.
-    outbounds: Vec<AHashSet<usize>>,
-
-    /// Incoming edges of each node that explain execution order.
-    /// B <- A means B must be executed before running A.
-    /// A is index and B is value in here.
-    inbounds: Vec<AHashSet<usize>>,
+    graph: DirectedGraph<PassCmd>,
 
     /// Dirty flag.
     /// If this is true, next Self::run() will try to detect any cycles in this.
@@ -49,67 +40,68 @@ impl PassGraph {
             gpu: Rc::clone(gpu),
             label: label.into(),
             descs: Vec::new(),
-            nodes: Vec::new(),
-            outbounds: Vec::new(),
-            inbounds: Vec::new(),
+            graph: DirectedGraph::new(),
             dirty: false,
         }
     }
 
     /// Adds a command node.
-    pub fn add_node(&mut self, cmd: impl Into<PassCmd>) -> usize {
+    pub fn add_command(&mut self, cmd: impl Into<PassCmd>) -> usize {
         self.dirty = true;
-
-        let cmd = cmd.into();
-        self.nodes.push(cmd);
-        self.outbounds.push(AHashSet::new());
-        self.inbounds.push(AHashSet::new());
-        self.nodes.len() - 1
+        self.graph.add_node(cmd.into())
     }
 
     /// Adds an edge between nodes.
     /// `from` node depends on `to` node, so that `to` node is executed first.
-    pub fn add_edge(&mut self, from: usize, to: usize) {
+    pub fn add_dependency(&mut self, from: usize, to: usize) {
         self.dirty = true;
-
-        self.outbounds[from].insert(to);
-        self.inbounds[to].insert(from);
+        self.graph.add_edge(from, to);
     }
 
     pub fn add_pass(&mut self, desc: PassDesc) {
         self.descs.push(desc);
     }
 
+    pub fn validate(&mut self) -> Result<(), RenderError> {
+        if self.dirty {
+            self.dirty = false;
+            if self.graph.has_cycle() {
+                let errmsg = debug_format!("detected cycle in PassGraph({})", &*self.label);
+                return Err(RenderError::CycleInPassGraph(errmsg));
+            }
+        }
+        Ok(())
+    }
+
+    /// Runs the graph.
+    /// It executes all render passes and compute passes in order they are added.
     pub fn run(
-        &self, 
+        &self,
         surf_packs: &GenVecRc<SurfacePack>,
-        surf_pack_buf: &mut SurfacePackBuffer,
+        surf_pack_bufs: &mut Vec<SurfacePackBuffer>,
         surfaces: &GenVecRc<Surface>,
         visit_buf: &mut Vec<bool>,
     ) {
-        // It's possible to run graph without cycle.
-        #[cfg(debug_assertions)]
-        {
-            if self.has_cycle() {
-                panic!()
-            }
-        }
+        assert!(!self.dirty, "call PassGraph::validate()");
 
         // Clears `visit_buf`, but we can reuse its capacity.
         visit_buf.clear();
-        visit_buf.resize(self.nodes.len(), false);
+        visit_buf.resize(self.graph.len(), false);
+
+        // Makes sure `surf_pack_bufs` is as long as passes. Each pass uses its own buffer.
+        surf_pack_bufs.resize_with(self.descs.len(), || SurfacePackBuffer::default());
 
         // Creates command encoder.
         let mut encoder = self.create_command_encoder();
 
-        for desc in self.descs.iter() {
+        for (desc, sp_buf) in self.descs.iter().zip(surf_pack_bufs.iter_mut()) {
             match desc {
                 PassDesc::Render(render_desc) => {
                     // Creates color attachments.
                     let colors;
                     let color_attachments = if let Some(sp_index) = &render_desc.sp_index {
                         let surf_pack = surf_packs.get(sp_index.index).unwrap();
-                        colors = surf_pack.create_color_attachments(surfaces, surf_pack_buf);
+                        colors = surf_pack.create_color_attachments(surfaces, sp_buf);
                         colors.as_slice()
                     } else {
                         &[]
@@ -129,70 +121,37 @@ impl PassGraph {
                         self.execute_node(&mut render_pass, *node_index, visit_buf);
                     }
                 }
-                PassDesc::Compute(compute_desc) => {
+                PassDesc::Compute(_compute_desc) => {
                     unimplemented!()
                 }
             }
         }
 
+        // Submits command buffer.
         self.gpu.queue.submit(std::iter::once(encoder.finish()));
-    }
-
-    // TODO: test
-    /// Determines whether this graph has cycle in it.
-    pub fn has_cycle(&self) -> bool {
-        if self.dirty {
-            let mut visit = vec![false; self.nodes.len()];
-            let mut path_visit = vec![false; self.nodes.len()];
-
-            // Returns true if it's detected a cycle.
-            fn find(
-                v: usize, 
-                visit: &mut [bool], 
-                path_visit: &mut [bool],
-                edges: &[AHashSet<usize>],
-            ) -> bool {
-                if !visit[v] {
-                    visit[v] = true;
-                    path_visit[v] = true;
-                    let res = edges[v].iter().any(|&w| {
-                        find(w, visit, path_visit, edges) || path_visit[w]
-                    });
-                    path_visit[v] = false;
-                    res
-                } else {
-                    false
-                }
-            }
-
-            (0..self.nodes.len())
-                .any(|v| {
-                    find(v, &mut visit, &mut path_visit, &self.outbounds)
-                })
-        } else {
-            false
+        for sp_buf in surf_pack_bufs.iter_mut() {
+            SurfacePack::present(sp_buf);
         }
     }
 
     /// Executes nodes in depth first fashion.
     fn execute_node<'a: 'b, 'b>(
-        &'a self, 
-        render_pass: &mut wgpu::RenderPass<'b>, 
+        &'a self,
+        render_pass: &mut wgpu::RenderPass<'b>,
         index: usize,
         visit: &mut Vec<bool>,
     ) {
         if !visit[index] {
             visit[index] = true;
-            for dep_index in self.outbounds[index].iter() {
+            for dep_index in self.graph.get_outbounds(index).iter_occupied() {
                 self.execute_node(render_pass, *dep_index, visit);
             }
-            self.nodes[index].execute(render_pass);
+            self.graph[index].execute(render_pass);
         }
     }
 
     fn create_command_encoder(&self) -> wgpu::CommandEncoder {
-        self
-            .gpu
+        self.gpu
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some(&self.label),
@@ -223,7 +182,6 @@ pub struct RenderPassDesc {
 
     // TODO: depth stencils
     // something
-
     /// Draw command nodes.
     nodes: Vec<usize>,
 }
@@ -233,7 +191,7 @@ impl RenderPassDesc {
         Self {
             label: label.into(),
             sp_index: surface_pack_index,
-            nodes: Vec::new()
+            nodes: Vec::new(),
         }
     }
 
@@ -243,17 +201,15 @@ impl RenderPassDesc {
 }
 
 #[derive(Debug, Clone)]
-pub struct ComputePassDesc {
-    label: RcStr,
-}
+pub struct ComputePassDesc {}
 
 #[derive(Debug, Clone)]
 pub enum PassCmd {
-	SetBindGroup(SetBindGroupCmd),
-	SetVertexBuffer(SetVertexBufferCmd),
-	SetIndexBuffer(SetIndexBufferCmd),
-	SetPipeline(SetPipelineCmd),
-	DrawIndexed(DrawIndexedCmd),
+    SetBindGroup(SetBindGroupCmd),
+    SetVertexBuffer(SetVertexBufferCmd),
+    SetIndexBuffer(SetIndexBufferCmd),
+    SetPipeline(SetPipelineCmd),
+    DrawIndexed(DrawIndexedCmd),
 }
 
 impl_from_for_enum!(PassCmd, SetBindGroup, SetBindGroupCmd);
@@ -267,27 +223,32 @@ impl PassCmd {
         match self {
             Self::SetBindGroup(cmd) => {
                 render_pass.set_bind_group(cmd.index, &cmd.bind_group, &[]);
-            },
+            }
             Self::SetVertexBuffer(cmd) => {
-                render_pass.set_vertex_buffer(cmd.slot, cmd.buf_slice.as_slice());
-            },
+                render_pass.set_vertex_buffer(cmd.slot, cmd.get_buffer_slice());
+            }
             Self::SetIndexBuffer(cmd) => {
-                render_pass.set_index_buffer(cmd.buf_slice.as_slice(), cmd.format);
-            },
+                render_pass.set_index_buffer(cmd.get_buffer_slice(), cmd.format);
+            }
             Self::SetPipeline(cmd) => {
                 render_pass.set_pipeline(&cmd.pipeline);
-            },
+            }
             Self::DrawIndexed(cmd) => {
-                render_pass.draw_indexed(cmd.indices.clone(), cmd.base_vertex, cmd.instances.clone());
+                render_pass.draw_indexed(
+                    cmd.indices.clone(),
+                    cmd.base_vertex,
+                    cmd.instances.clone(),
+                );
             }
         }
     }
 }
 
+/// Corresponding to [`wgpu::RenderPass::set_bind_group`].
 #[derive(Debug, Clone)]
 pub struct SetBindGroupCmd {
-	index: u32,
-	bind_group: Rc<wgpu::BindGroup>,
+    index: u32,
+    bind_group: Rc<wgpu::BindGroup>,
 }
 
 impl SetBindGroupCmd {
@@ -296,47 +257,67 @@ impl SetBindGroupCmd {
     }
 }
 
+/// Corresponding to [`wgpu::RenderPass::set_vertex_buffer`].
 #[derive(Debug, Clone)]
 pub struct SetVertexBufferCmd {
-	buf_slice: BufferSlice,
-	slot: u32,
+    buf: Rc<wgpu::Buffer>,
+    offset: u64,
+    size: Option<NonZeroU64>,
+    slot: u32,
 }
 
 impl SetVertexBufferCmd {
+    /// If you set `size` to zero, then total range of the buffer is used.
     pub fn new(buf: Rc<wgpu::Buffer>, offset: u64, size: u64, slot: u32) -> Self {
         Self {
-            buf_slice: BufferSlice {
-                buf,
-                offset,
-                size,
-            },
+            buf,
+            offset,
+            size: NonZeroU64::new(size),
             slot,
+        }
+    }
+
+    pub fn get_buffer_slice(&self) -> wgpu::BufferSlice {
+        if let Some(size) = self.size {
+            self.buf.slice(self.offset..self.offset + size.get())
+        } else {
+            self.buf.slice(self.offset..)
         }
     }
 }
 
+/// Corresponding to [`wgpu::RenderPass::set_index_buffer`].
 #[derive(Debug, Clone)]
 pub struct SetIndexBufferCmd {
-	buf_slice: BufferSlice,
-	format: wgpu::IndexFormat,
+    buf: Rc<wgpu::Buffer>,
+    offset: u64,
+    size: Option<NonZeroU64>,
+    format: wgpu::IndexFormat,
 }
 
 impl SetIndexBufferCmd {
     pub fn new(buf: Rc<wgpu::Buffer>, offset: u64, size: u64, format: wgpu::IndexFormat) -> Self {
         Self {
-            buf_slice: BufferSlice {
-                buf,
-                offset,
-                size,
-            },
+            buf,
+            offset,
+            size: NonZeroU64::new(size),
             format,
+        }
+    }
+
+    pub fn get_buffer_slice(&self) -> wgpu::BufferSlice {
+        if let Some(size) = self.size {
+            self.buf.slice(self.offset..self.offset + size.get())
+        } else {
+            self.buf.slice(self.offset..)
         }
     }
 }
 
+/// Corresponding to [`wgpu::RenderPass::set_pipeline`].
 #[derive(Debug, Clone)]
 pub struct SetPipelineCmd {
-	pipeline: Rc<wgpu::RenderPipeline>,
+    pipeline: Rc<wgpu::RenderPipeline>,
 }
 
 impl SetPipelineCmd {
@@ -345,15 +326,20 @@ impl SetPipelineCmd {
     }
 }
 
+/// Corresponding to [`wgpu::RenderPass::draw_indexed`].
 #[derive(Debug, Clone)]
 pub struct DrawIndexedCmd {
-	indices: Range<u32>,
-	base_vertex: i32,
-	instances: Range<u32>,
+    indices: Range<u32>,
+    base_vertex: i32,
+    instances: Range<u32>,
 }
 
 impl DrawIndexedCmd {
     pub fn new(indices: Range<u32>, base_vertex: i32, instances: Range<u32>) -> Self {
-        Self { indices, base_vertex, instances }
+        Self {
+            indices,
+            base_vertex,
+            instances,
+        }
     }
 }

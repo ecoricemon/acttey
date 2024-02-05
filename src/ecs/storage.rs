@@ -96,7 +96,6 @@ impl Storage {
     }
 
     // Destructured parameters in order to call this function while borrowing self.
-    #[inline]
     pub(crate) fn borrow_slice<'a, C: Component>(
         collectors: &'a mut AHashMap<EntityKey, Box<dyn Collect>>,
         borrow_states: &mut AHashMap<ComponentKey, BorrowState>,
@@ -140,7 +139,6 @@ impl Storage {
         }
     }
 
-    #[inline]
     pub fn returns(&mut self, skey: &SystemKey) {
         let free = |bs: &mut BorrowState| match bs {
             BorrowState::Borrowed(cnt) if *cnt != 1 => *cnt -= 1,

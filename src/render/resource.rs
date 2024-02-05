@@ -144,6 +144,16 @@ impl RenderResource {
         self.surfaces.update(index, f)
     }
 
+    /// Updates the surface without increasing generation.
+    #[inline]
+    pub fn sneak_update_surface<U>(
+        &mut self,
+        index: GenIndex,
+        f: impl FnOnce(&mut Surface) -> U,
+    ) -> Option<U> {
+        self.surfaces.sneak_update(index, f)
+    }
+
     /// Removes unused surfaces and tries to reduce capacity.
     pub fn clear_surface(&mut self) -> usize {
         self.surfaces.clear_unused(|_| {});
@@ -263,7 +273,7 @@ impl RenderResource {
     }
 
     #[inline]
-    pub fn get_bind_group_layout<Q>(&self, key: &Q) -> Option<&Rc<wgpu::BindGroupLayout>> 
+    pub fn get_bind_group_layout<Q>(&self, key: &Q) -> Option<&Rc<wgpu::BindGroupLayout>>
     where
         ResKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
@@ -272,7 +282,7 @@ impl RenderResource {
     }
 
     #[inline]
-    pub fn get_bind_group<Q>(&self, key: &Q) -> Option<&Rc<wgpu::BindGroup>> 
+    pub fn get_bind_group<Q>(&self, key: &Q) -> Option<&Rc<wgpu::BindGroup>>
     where
         ResKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
@@ -370,7 +380,11 @@ impl RenderResource {
     }
 
     #[inline]
-    pub fn build_pipeline(&mut self, index: GenIndex, key: impl Into<ResKey>) -> &Rc<wgpu::RenderPipeline> {
+    pub fn build_pipeline(
+        &mut self,
+        index: GenIndex,
+        key: impl Into<ResKey>,
+    ) -> &Rc<wgpu::RenderPipeline> {
         self.pipelines
             .create_pipeline(index, key.into(), &self.surf_packs, &self.surfaces)
     }
@@ -440,9 +454,11 @@ impl RenderResource {
         }
     }
 
-    pub fn resize_surfaces(&self) {
-        // TODO
-        // dummy for now
+    pub fn resize_surface(&mut self, index: GenIndex) {
+        if let Some(surf) = self.surfaces.sneak_get_mut(index) {
+            let scale_factor = self.context.window.device_pixel_ratio();
+            surf.resize(scale_factor, &self.gpu.device);
+        }
     }
 
     /// [`Self::canvas_to_surf`] is like weak references, its indices can be broken.
@@ -493,6 +509,10 @@ impl RenderResource {
             .entry(selectors.into())
             .and_modify(|indices| indices.push(surface_index))
             .or_insert(smallvec![surface_index]);
+    }
+
+    pub fn device_pixel_ratio(&self) -> f64 {
+        self.context.window.device_pixel_ratio()
     }
 
     /// Changes all sub-references to the current one.

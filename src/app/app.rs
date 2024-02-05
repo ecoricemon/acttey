@@ -13,10 +13,15 @@ use crate::{
     },
     primitive::mesh::{Geometry, Material, MeshResource, SeparateGeometry},
     render::{
-        buffer::{SizeOrData, VertexBufferMeta}, descs, pass::PassGraph, pipeline::{PipelineBuilder, PipelineLayoutBuilder}, resource::RenderResource,
-        pass::{SetBindGroupCmd, SetVertexBufferCmd, SetIndexBufferCmd, SetPipelineCmd, DrawIndexedCmd}
+        buffer::{BufferView, SizeOrData},
+        descs,
+        pipeline::{PipelineBuilder, PipelineLayoutBuilder},
+        resource::RenderResource,
     },
-    scene::{scene::{Scene, SceneManager}, SceneError},
+    scene::{
+        scene::{Scene, SceneManager},
+        SceneError,
+    },
     util::{key::ResKey, web, AsBytes, RcStr},
 };
 use std::rc::Rc;
@@ -255,14 +260,21 @@ impl App {
         scene.set_geometry_buffer(meshes, vert_buf, index_buf);
 
         // Requests camera buffers and sets them to the scene.
-        let Scene { cameras, camera_bufs, camera_binds, .. } = &mut scene;
+        let Scene {
+            cameras,
+            camera_bufs,
+            camera_binds,
+            ..
+        } = &mut scene;
         for (camera_key, camera) in cameras.iter() {
-            let uni_buf = render.add_uniform_buffer(SizeOrData::Data(camera.as_bytes()))?;
-            let desc = descs::BufferBindDesc { 
-                layout_key: camera_key.clone(), 
-                group_key: camera_key.clone(), 
+            let cam_bytes = camera.as_bytes();
+            let uni_buf = render.add_uniform_buffer(SizeOrData::Data(cam_bytes))?;
+            let desc = descs::BufferBindDesc {
+                layout_key: camera_key.clone(),
+                group_key: camera_key.clone(),
                 bufs: &[&uni_buf],
-                ..Default::default() 
+                item_sizes: &[cam_bytes.len() as u64],
+                ..Default::default()
             };
             render.add_default_buffer_bind(desc);
             let bind_group = render.get_bind_group(camera_key).unwrap();
@@ -271,14 +283,21 @@ impl App {
         }
 
         // Requests material buffers and sets them to the scene.
-        let Scene { mats, mat_bufs, mat_binds, .. } = &mut scene;
+        let Scene {
+            mats,
+            mat_bufs,
+            mat_binds,
+            ..
+        } = &mut scene;
         for (mat_key, _) in mats.iter() {
             let mat = meshes.get_material(mat_key).unwrap();
-            let uni_buf = render.add_ro_uniform_buffer(SizeOrData::Data(mat.as_bytes()))?;
+            let mat_bytes = mat.as_bytes();
+            let uni_buf = render.add_ro_uniform_buffer(SizeOrData::Data(mat_bytes))?;
             let desc = descs::BufferBindDesc {
                 layout_key: mat_key.clone(),
                 group_key: mat_key.clone(),
                 bufs: &[&uni_buf],
+                item_sizes: &[mat_bytes.len() as u64],
                 ..Default::default()
             };
             render.add_default_buffer_bind(desc);
@@ -313,8 +332,8 @@ impl App {
         }
         if let Some(geo_key) = scene.geos.keys().next() {
             let geo = meshes.get_geometry(geo_key).unwrap();
-            let meta = VertexBufferMeta::from(geo.as_interleaved().unwrap());
-            builder.vert_meta.push(meta);
+            let buf_view = BufferView::new_from_geometry(geo.as_interleaved().unwrap());
+            builder.vert_buf_view.push(buf_view);
         }
         builder.set_surface_pack_index(scene.surf_pack_index.clone());
         let pb_index = render.add_pipeline_builder(builder);

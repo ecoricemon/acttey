@@ -8,20 +8,24 @@ use std::{collections::BTreeMap, mem::ManuallyDrop, rc::Rc};
 use wasm_bindgen::prelude::*;
 
 /// A set of textures and views from the surfaces used in a single render pass.
-/// In a render pass, call `create_color_attachments()` and `present()`.
+/// In a render pass, call [`SurfacePack::create_color_attachments`] and [`SurfacePack::present`].
 pub struct SurfacePack {
-    surface_indices: Vec<Option<GenIndexRc>>,
+    pub(crate) surf_indices: Vec<Option<GenIndexRc>>,
 }
 
 impl SurfacePack {
     pub fn new() -> Self {
         Self {
-            surface_indices: Vec::new(),
+            surf_indices: Vec::new(),
         }
     }
 
     pub fn add_surface_index(&mut self, index: Option<GenIndexRc>) {
-        self.surface_indices.push(index);
+        self.surf_indices.push(index);
+    }
+
+    pub fn iter_surf_indices(&self) -> impl Iterator<Item = &GenIndexRc> {
+        self.surf_indices.iter().filter_map(|index| index.as_ref())
     }
 
     /// Creates a vector of `Option<wgpu::ColorTargetState>`.
@@ -33,7 +37,7 @@ impl SurfacePack {
         &self,
         surfaces: &GenVecRc<Surface>,
     ) -> Vec<Option<wgpu::ColorTargetState>> {
-        self.surface_indices
+        self.surf_indices
             .iter()
             .map(|opt_index| {
                 opt_index
@@ -62,7 +66,7 @@ impl SurfacePack {
 
         // Clears textures, views, and color attachments if some left.
         // But, we reuse the capacities.
-        let len = self.surface_indices.len();
+        let len = self.surf_indices.len();
         textures.clear();
         textures.reserve_exact(len);
         views.clear();
@@ -71,7 +75,7 @@ impl SurfacePack {
         attachments.reserve_exact(len);
 
         // Fills with the new items.
-        for index in self.surface_indices.iter().flatten().cloned() {
+        for index in self.surf_indices.iter().flatten().cloned() {
             let surface = surfaces.get(index.index).unwrap();
             let (texture, view) = surface.create_texture_and_view();
             textures.push(texture);
@@ -79,7 +83,7 @@ impl SurfacePack {
         }
         // We can't borrow `self.texture_views` during writing.
         // That's why we splited the loop.
-        for (vi, index) in self.surface_indices.iter().flatten().cloned().enumerate() {
+        for (vi, index) in self.surf_indices.iter().flatten().cloned().enumerate() {
             let surface = surfaces.get(index.index).unwrap();
             attachments.push(Some(wgpu::RenderPassColorAttachment {
                 view: &views[vi],
@@ -93,11 +97,12 @@ impl SurfacePack {
         buf.get_color_attachments()
     }
 
-    pub fn present(&self, buf: &mut SurfacePackBuffer) {
+    // Question: Why do we do this?
+    // What WebGPU API is corresponding to this?
+    pub fn present(buf: &mut SurfacePackBuffer) {
         while let Some(texture) = buf.surface_textures.pop() {
             texture.present();
         }
-        buf.texture_views.clear();
     }
 }
 

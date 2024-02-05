@@ -1,3 +1,4 @@
+use crate::ds::vec::OptVec;
 use ahash::AHashMap;
 use std::{borrow::Borrow, hash::Hash, rc::Rc};
 
@@ -159,14 +160,14 @@ impl<K, V> Default for GenMap<K, V> {
 pub struct GenVecRc<T> {
     values: GenVec<T>,
     /// `refs` has always the same length as `values`.
-    refs: Vec<Option<Rc<()>>>,
+    refs: OptVec<Rc<()>>,
 }
 
 impl<T> GenVecRc<T> {
     pub fn new() -> Self {
         Self {
             values: GenVec::new(),
-            refs: Vec::new(),
+            refs: OptVec::new(),
         }
     }
 
@@ -202,7 +203,7 @@ impl<T> GenVecRc<T> {
     /// Panics if `index` is out of bound.
     #[inline]
     pub fn is_vacant(&self, index: usize) -> bool {
-        self.refs[index].is_none()
+        self.refs.is_vacant(index)
     }
 
     /// # Panics
@@ -210,7 +211,7 @@ impl<T> GenVecRc<T> {
     /// Panics if `index` is out of bound.
     #[inline]
     pub fn is_occupied(&self, index: usize) -> bool {
-        self.refs[index].is_some()
+        self.refs.is_occupied(index)
     }
 
     /// Determines the slot is Some and its reference count is 1.
@@ -307,7 +308,7 @@ impl<T> GenVecRc<T> {
         if index.index == self.refs.len() {
             self.refs.push(None);
         }
-        self.refs[index.index] = Some(Rc::new(()));
+        self.refs.set(index.index, Rc::new(()));
         // Safety: Infallible.
         GenIndexRc::new(index, unsafe {
             self.refs[index.index].as_ref().unwrap_unchecked()
@@ -329,7 +330,7 @@ impl<T> GenVecRc<T> {
     /// Panics if `index` is out of bound.
     pub fn change(&mut self, index: GenIndex, value: T) -> Option<GenIndexRc> {
         if let Some(new_index) = self.values.change(index, value) {
-            self.refs[new_index.index] = Some(Rc::new(()));
+            self.refs.set(new_index.index, Rc::new(()));
             // Safety: Infallible.
             Some(GenIndexRc::new(new_index, unsafe {
                 self.refs[new_index.index].as_ref().unwrap_unchecked()
@@ -348,7 +349,7 @@ impl<T> GenVecRc<T> {
         f: impl FnOnce(&mut T) -> U,
     ) -> Option<(GenIndexRc, U)> {
         if let Some((new_index, u)) = self.values.update(index, f) {
-            self.refs[new_index.index] = Some(Rc::new(()));
+            self.refs.set(new_index.index, Rc::new(()));
             // Safety: Infallible.
             Some((
                 GenIndexRc::new(new_index, unsafe {
@@ -364,7 +365,7 @@ impl<T> GenVecRc<T> {
     /// # Panics
     ///
     /// Panics if `index` is out of bound.
-    pub fn sneak_update(&mut self, index: GenIndex, f: impl FnOnce(&mut T)) -> bool {
+    pub fn sneak_update<U>(&mut self, index: GenIndex, f: impl FnOnce(&mut T) -> U) -> Option<U> {
         self.values.sneak_update(index, f)
     }
 
@@ -379,7 +380,7 @@ impl<T> GenVecRc<T> {
         if self.is_unused(index.index) {
             let old = self.values.take(index);
             if old.is_some() {
-                self.refs[index.index] = None;
+                self.refs.take(index.index);
             }
             old
         } else {
@@ -401,7 +402,7 @@ impl<T> GenVecRc<T> {
                         .unwrap_unchecked()
                 };
                 f(old);
-                self.refs[index] = None;
+                self.refs.take(index);
             }
         }
     }
@@ -689,7 +690,7 @@ impl<T> GenVec<T> {
     ///
     /// Panics if `index` is out of bound.
     #[inline]
-    pub fn sneak_update(&mut self, index: GenIndex, f: impl FnOnce(&mut T)) -> bool {
+    pub fn sneak_update<U>(&mut self, index: GenIndex, f: impl FnOnce(&mut T) -> U) -> Option<U> {
         assert!(index.index < self.entries.len());
         // Safety: Checked.
         unsafe { self.sneak_update_unchecked(index, f) }
@@ -698,16 +699,16 @@ impl<T> GenVec<T> {
     /// # Safety
     ///
     /// Undefined behavior if `index` is out of bound.
-    pub unsafe fn sneak_update_unchecked(
+    pub unsafe fn sneak_update_unchecked<U>(
         &mut self,
         index: GenIndex,
-        f: impl FnOnce(&mut T),
-    ) -> bool {
+        f: impl FnOnce(&mut T) -> U,
+    ) -> Option<U> {
         let entry = unsafe { self.entries.get_unchecked_mut(index.index) };
         if entry.gen == GEN_IGNORE || entry.gen == index.gen {
             entry.sneak_update(f)
         } else {
-            false
+            None
         }
     }
 
@@ -820,13 +821,12 @@ impl<T> GenEntry<T> {
     }
 
     /// Updates without going to next generation.
-    pub fn sneak_update(&mut self, f: impl FnOnce(&mut T)) -> bool {
+    pub fn sneak_update<U>(&mut self, f: impl FnOnce(&mut T) -> U) -> Option<U> {
         if self.value.is_some() {
             // Safety: Infallible.
-            unsafe { f(self.value.as_mut().unwrap_unchecked()) };
-            true
+            Some(unsafe { f(self.value.as_mut().unwrap_unchecked()) })
         } else {
-            false
+            None
         }
     }
 

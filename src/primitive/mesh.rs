@@ -1,12 +1,10 @@
 //! Based on glTF 2.0
 
-use my_wgsl::*;
-
 use crate::{
     ds::{refs::RcValue, sparse_set::MonoSparseSet},
     impl_from_for_enum,
     primitive::{constant::colors, vector::Vector, Color},
-    util::{AsMultiBytes, key::ResKey},
+    util::{key::ResKey, AsMultiBytes},
 };
 use ahash::AHashMap;
 use std::{
@@ -346,31 +344,27 @@ impl SeparateGeometry {
     }
 
     #[inline]
-    #[must_use]
-    pub fn with_position(mut self, values: GeometryAttributeValues) -> Self {
+    pub fn with_position(&mut self, values: GeometryAttributeValues) -> &mut Self {
         self.position_index =
             self.put_attribute(self.position_index, GeometryAttribute::Position(values));
         self
     }
 
     #[inline]
-    #[must_use]
-    pub fn with_normal(mut self, values: GeometryAttributeValues) -> Self {
+    pub fn with_normal(&mut self, values: GeometryAttributeValues) -> &mut Self {
         self.normal_index =
             self.put_attribute(self.normal_index, GeometryAttribute::Normal(values));
         self
     }
 
     #[inline]
-    #[must_use]
-    pub fn with_tangent(mut self, values: GeometryAttributeValues) -> Self {
+    pub fn with_tangent(&mut self, values: GeometryAttributeValues) -> &mut Self {
         self.tangent_index =
             self.put_attribute(self.tangent_index, GeometryAttribute::Tangent(values));
         self
     }
 
-    #[must_use]
-    pub fn with_uv(mut self, values: GeometryAttributeValues) -> Self {
+    pub fn with_uv(&mut self, values: GeometryAttributeValues) -> &mut Self {
         if self.uv_index == Self::INVALID_INDEX {
             self.uv_index =
                 self.put_attribute(self.uv_index, GeometryAttribute::TexCoord(vec![values]));
@@ -381,8 +375,7 @@ impl SeparateGeometry {
         self
     }
 
-    #[must_use]
-    pub fn with_color(mut self, values: GeometryAttributeValues) -> Self {
+    pub fn with_color(&mut self, values: GeometryAttributeValues) -> &mut Self {
         if self.color_index == Self::INVALID_INDEX {
             self.color_index =
                 self.put_attribute(self.color_index, GeometryAttribute::Color(vec![values]));
@@ -393,8 +386,7 @@ impl SeparateGeometry {
         self
     }
 
-    #[must_use]
-    pub fn with_user(mut self, user: char, values: GeometryAttributeValues) -> Self {
+    pub fn with_user(&mut self, user: char, values: GeometryAttributeValues) -> &mut Self {
         assert!(matches!(user, 'A'..='D' | 'a'..='d'));
         let ui = user.to_ascii_uppercase() as usize - 'A' as usize;
         if self.user_indices[ui] == Self::INVALID_INDEX {
@@ -414,8 +406,7 @@ impl SeparateGeometry {
     }
 
     #[inline]
-    #[must_use]
-    pub fn with_indices(mut self, indices: GeometryIndices) -> Self {
+    pub fn with_indices(&mut self, indices: GeometryIndices) -> &mut Self {
         self.indices = indices;
         self
     }
@@ -1102,7 +1093,7 @@ pub enum Material {
     Simple(SimpleMaterial),
 }
 
-impl_from_for_enum!(Material, Simple, SimpleMaterial);
+// impl_from_for_enum!(Material, Simple, SimpleMaterial);
 
 impl Material {
     #[inline]
@@ -1148,12 +1139,14 @@ impl Default for SimpleMaterial {
 
 impl From<Color> for SimpleMaterial {
     fn from(value: Color) -> Self {
-        Self { color: value.into() }
+        Self {
+            color: value.into(),
+        }
     }
 }
 
 impl From<Color> for Material {
     fn from(value: Color) -> Self {
-        Material::from(SimpleMaterial::from(value))
+        Material::Simple(SimpleMaterial::from(value))
     }
 }

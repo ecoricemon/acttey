@@ -39,8 +39,9 @@ pub fn create_plane_geometry(plane: Plane) -> SeparateGeometry {
         Vector::<f32, 3>::new(hw, -hh, 0.0),  // br
     ];
     let normal = Vector::<f32, 3>::new(0.0, 0.0, 1.0);
-    SeparateGeometry::new()
-        .with_position(positions.into())
+    let mut geo = SeparateGeometry::new();
+    geo.with_position(positions.into())
         .with_normal(vec![normal; 4].into())
-        .with_indices(vec![0_u16, 1, 2, 2, 1, 3].into())
+        .with_indices(vec![0_u16, 1, 2, 2, 1, 3].into());
+    geo
 }

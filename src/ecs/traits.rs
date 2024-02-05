@@ -34,7 +34,6 @@ pub trait Entity: 'static {
 // that means users can define their own collector.
 // But downside of `erased-generic-trait` is performance penalty by a number of indirection.
 // Please see `erased-generic-trait` documentation for more details.
-
 #[erase_generic(CollectErased)]
 pub trait CollectGeneric {
     /// Collects a single type.

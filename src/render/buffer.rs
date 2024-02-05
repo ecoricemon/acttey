@@ -1,8 +1,8 @@
 use crate::{
-    debug_format, impl_from_for_enum,
+    debug_format,
     primitive::mesh::InterleavedGeometry,
     render::{Gpu, RenderError},
-    util::{gcd, lcm, AsBytes, AsMultiBytes},
+    util::gcd,
 };
 use smallvec::SmallVec;
 use std::{num::NonZeroU64, rc::Rc};
@@ -423,68 +423,208 @@ impl<'a> From<&'a [u8]> for SizeOrData<'a> {
     }
 }
 
-#[derive(Debug)]
-pub struct VertexBufferMeta {
-    pub attrs: SmallVec<[wgpu::VertexAttribute; 4]>,
-    pub vert_size: u64,
-}
-
-impl VertexBufferMeta {
-    pub fn create_buffer_layout(&self) -> wgpu::VertexBufferLayout {
-        wgpu::VertexBufferLayout {
-            array_stride: self.vert_size,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &self.attrs,
-        }
-    }
-}
-
-impl From<&InterleavedGeometry> for VertexBufferMeta {
-    fn from(value: &InterleavedGeometry) -> Self {
-        Self {
-            attrs: value.attrs.iter().cloned().collect(),
-            vert_size: value.vertex_size as u64,
-        }
-    }
-}
-
-#[derive(Debug)]
-pub struct IndexBufferMeta {
-    pub format: wgpu::IndexFormat,
-}
-
-#[derive(Debug)]
-pub struct UniformBufferMeta {
-    pub vis: wgpu::ShaderStages,
-}
-
-/// Another type of [`wgpu::BufferSlice`].
+/// Two [`BufferView`] for vertex and index buffers.
 #[derive(Debug, Clone)]
-pub struct BufferSlice {
-    /// Buffer.
-    pub buf: Rc<wgpu::Buffer>,
+pub struct GeometryBufferView {
+    /// A [`BufferView`] for the vertex buffer.
+    vert_buf_view: BufferView,
 
-    /// Offset in bytes.
-    pub offset: u64,
+    /// A [`BufferView`] for the index buffer.
+    index_buf_view: BufferView,
 
-    /// Size from the offset in bytes, 0 for entire range.
-    pub size: u64,
+    /// Geometry resource reference to own it.
+    _geo_ref: Rc<()>,
 }
 
-impl BufferSlice {
-    pub fn as_slice(&self) -> wgpu::BufferSlice {
-        if self.size != 0 {
-            self.buf.slice(self.offset..self.offset + self.size)
-        } else {
-            self.buf.slice(self.offset..)
+impl GeometryBufferView {
+    pub fn dummy(geo_ref: Rc<()>) -> Self {
+        Self {
+            vert_buf_view: BufferView::new(u64::MAX, u64::MAX, u64::MAX),
+            index_buf_view: BufferView::new(u64::MAX, u64::MAX, u64::MAX),
+            _geo_ref: geo_ref,
         }
+    }
+
+    #[inline]
+    pub fn set_vertex_buffer_view(&mut self, buf_view: BufferView) {
+        self.vert_buf_view = buf_view;
+    }
+
+    #[inline]
+    pub fn get_vertex_buffer_view(&self) -> &BufferView {
+        &self.vert_buf_view
+    }
+
+    #[inline]
+    pub fn set_index_buffer_view(&mut self, buf_view: BufferView) {
+        self.index_buf_view = buf_view;
+    }
+
+    #[inline]
+    pub fn get_index_buffer_view(&self) -> &BufferView {
+        &self.index_buf_view
+    }
+
+    /// # Panics
+    ///
+    /// Panics if buffer is not set.
+    /// Call [`BufferView::set_buffer`] to do it.
+    #[inline]
+    pub fn get_vertex_buffer(&self) -> &Rc<wgpu::Buffer> {
+        self.get_vertex_buffer_view().get_buffer()
+    }
+
+    /// # Panics
+    ///
+    /// Panics if buffer is not set.
+    /// Call [`BufferView::set_buffer`] to do it.
+    #[inline]
+    pub fn get_index_buffer(&self) -> &Rc<wgpu::Buffer> {
+        self.get_index_buffer_view().get_buffer()
     }
 }
 
-impl BufferSlice {
-    #[inline(always)]
-    pub fn size(&self) -> Option<NonZeroU64> {
-        NonZeroU64::new(self.size)
+/// Integrated buffer meta.
+/// [`wgpu::Buffer`] is a neutral stroge, and [`BufferView`] is meta of it.
+/// This includes way to see the buffer such as offset and size.
+/// You can create [`wgpu::BufferSlice`] from this because this includes all information for it.
+#[derive(Debug, Clone)]
+pub struct BufferView {
+    /// *Required field*  
+    /// Single item size in bytes.
+    item_size: NonZeroU64,
+
+    /// *Required field*  
+    /// Number of items.
+    /// None means all items from the `start_index`.
+    item_num: Option<NonZeroU64>,
+
+    /// *Required field*  
+    /// Start index of this view in the buffer.
+    /// Use [`Self::get_offset()`] if you want offset in bytes.
+    index_offset: u64,
+
+    /// *Optional field*  
+    /// Buffer itself.
+    buf: Option<Rc<wgpu::Buffer>>,
+
+    /// *Optional field*  
+    /// Vertex attributes.
+    vert_attrs: Vec<wgpu::VertexAttribute>,
+}
+
+impl BufferView {
+    /// Creates a view describing how to access the buffer.
+    /// You can set `item_num` to zero to express all remaing items from the `index_offset`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `item_size` is zero.
+    pub fn new(item_size: u64, item_num: u64, index_offset: u64) -> Self {
+        Self {
+            item_size: NonZeroU64::new(item_size).unwrap(),
+            item_num: NonZeroU64::new(item_num),
+            index_offset,
+            buf: None,
+            vert_attrs: Vec::new(),
+        }
+    }
+
+    /// Creates a view from [`InterleavedGeometry`].
+    pub fn new_from_geometry(int_geo: &InterleavedGeometry) -> Self {
+        let mut inst = Self::new(int_geo.vertex_size as u64, int_geo.vertex_num as u64, 0);
+        inst.set_vertex_attributes(&int_geo.attrs);
+        inst
+    }
+
+    /// Sets **optional** buffer.
+    #[inline]
+    pub fn set_buffer(&mut self, buf: Rc<wgpu::Buffer>) {
+        self.buf = Some(buf);
+    }
+
+    /// # Panics
+    ///
+    /// Panics if buffer is not set.
+    /// Call [`Self::set_buffer`] to do it.
+    #[inline]
+    pub fn get_buffer(&self) -> &Rc<wgpu::Buffer> {
+        self.buf.as_ref().unwrap()
+    }
+
+    /// Sets **optional** vertex attributes.
+    #[inline]
+    pub fn set_vertex_attributes(&mut self, attrs: &[wgpu::VertexAttribute]) {
+        self.vert_attrs = Vec::from(attrs);
+    }
+
+    #[inline]
+    pub fn get_vertex_attributes(&self) -> &Vec<wgpu::VertexAttribute> {
+        &self.vert_attrs
+    }
+
+    #[inline]
+    pub fn get_item_size(&self) -> u64 {
+        self.item_size.get()
+    }
+
+    #[inline]
+    pub fn get_item_num(&self) -> u64 {
+        self.item_num.map(|num| num.get()).unwrap_or_default()
+    }
+
+    #[inline]
+    pub fn get_index_offset(&self) -> u64 {
+        self.index_offset
+    }
+
+    /// Returns offset in bytes in the buffer.
+    #[inline]
+    pub fn get_offset(&self) -> u64 {
+        self.get_item_size() * self.get_index_offset()
+    }
+
+    /// Returns total size in bytes of this view.
+    /// It can be zero that means that the total range from the offset.
+    #[inline]
+    pub fn get_size(&self) -> u64 {
+        self.get_item_size() * self.get_item_num()
+    }
+
+    /// # Panics
+    ///
+    /// Panics if buffer is not set.
+    /// Call [`Self::set_buffer`] to do it.
+    pub fn as_slice(&self) -> wgpu::BufferSlice {
+        let buf = self.get_buffer();
+        let offset = self.get_offset();
+        let size = self.get_size();
+        if size != 0 {
+            buf.slice(offset..offset + size)
+        } else {
+            buf.slice(offset..)
+        }
+    }
+
+    pub fn as_index_format(&self) -> wgpu::IndexFormat {
+        match self.get_item_size() {
+            2 => wgpu::IndexFormat::Uint16,
+            4 => wgpu::IndexFormat::Uint32,
+            _ => panic!(),
+        }
+    }
+
+    /// # Panics
+    ///
+    /// Panics if vertex attributes is not set.
+    /// Call [`Self::set_buffer`] to do it.
+    pub fn create_buffer_layout(&self) -> wgpu::VertexBufferLayout {
+        assert!(!self.get_vertex_attributes().is_empty());
+        wgpu::VertexBufferLayout {
+            array_stride: self.get_item_size(),
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &self.get_vertex_attributes(),
+        }
     }
 }
 

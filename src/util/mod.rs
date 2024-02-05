@@ -1,16 +1,21 @@
 #![allow(dead_code)]
 
 use std::{
-    borrow::{Borrow, Cow}, hash::Hash, mem::{size_of, transmute}, ops::{Deref, Mul, Rem, Div}, rc::Rc, thread
+    borrow::{Borrow, Cow},
+    hash::Hash,
+    mem::{size_of, transmute},
+    ops::{Deref, Div, Mul, Rem},
+    rc::Rc,
+    thread,
 };
 
+pub mod key;
 pub mod macros;
 pub mod web;
-pub mod key;
 
 pub mod prelude {
-    pub use crate::{log, ty};
     pub use super::key::ResKey;
+    pub use crate::{log, ty};
 }
 
 use std::mem::{transmute_copy, MaybeUninit};
@@ -46,6 +51,7 @@ pub(crate) fn current_thread_id() -> u64 {
     unsafe { transmute(id) }
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct PowerOfTwo {
     pub(crate) value: usize,
     pub(crate) power: usize,
@@ -346,9 +352,9 @@ impl AsRef<str> for RcStr {
     }
 }
 
-pub fn gcd<T>(a: T, b: T) -> T 
+pub fn gcd<T>(a: T, b: T) -> T
 where
-    T: Default + PartialEq + PartialOrd + Rem<Output = T> + Copy
+    T: Default + PartialEq + PartialOrd + Rem<Output = T> + Copy,
 {
     let _gcd = |mut a: T, mut b: T| {
         let zero = T::default();
@@ -367,9 +373,15 @@ where
     }
 }
 
-pub fn lcm<T>(a: T, b: T) -> T 
+pub fn lcm<T>(a: T, b: T) -> T
 where
-    T: Default + PartialEq + PartialOrd + Rem<Output = T> + Copy + Mul<Output = T> + Div<Output = T>,
+    T: Default
+        + PartialEq
+        + PartialOrd
+        + Rem<Output = T>
+        + Copy
+        + Mul<Output = T>
+        + Div<Output = T>,
 {
     a * b / gcd(a, b)
 }
