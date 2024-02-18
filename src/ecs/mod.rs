@@ -56,13 +56,13 @@ impl QueryKey {
 
 #[allow(unused_macros)]
 macro_rules! qkey {
-    (&$t:ident, $skey:ident) => {
+    (&$t:ident, $skey:expr) => {
         $crate::ecs::QueryKey::new($crate::ty!(&$t), $skey)
     };
-    (&&$t:ident, $skey:ident) => {
+    (&&$t:ident, $skey:expr) => {
         $crate::ecs::QueryKey::new($crate::ty!(&&$t), $skey)
     };
-    ($t:ty, $skey:ident) => {
+    ($t:ty, $skey:expr) => {
         $crate::ecs::QueryKey::new($crate::ty!($t), $skey)
     };
 }
@@ -85,13 +85,13 @@ impl FilteResKey {
 
 #[allow(unused_macros)]
 macro_rules! fkey {
-    (&$t:ident, $qkey:ident) => {
+    (&$t:ident, $qkey:expr) => {
         $crate::ecs::FilteResKey::new($crate::ty!(&$t), $qkey)
     };
-    (&&$t:ident, $qkey:ident) => {
+    (&&$t:ident, $qkey:expr) => {
         $crate::ecs::FilteResKey::new($crate::ty!(&&$t), $qkey)
     };
-    ($t:ty, $qkey:ident) => {
+    ($t:ty, $qkey:expr) => {
         $crate::ecs::FilteResKey::new($crate::ty!($t), $qkey)
     };
 }
@@ -140,13 +140,13 @@ impl ComponentKey {
 
 #[allow(unused_macros)]
 macro_rules! ckey {
-    (&$t:ident, $ekey:ident) => {
+    (&$t:ident, $ekey:expr) => {
         $crate::ecs::ComponentKey::new($crate::ty!(&$t), $ekey)
     };
-    (&&$t:ident, $ekey:ident) => {
+    (&&$t:ident, $ekey:expr) => {
         $crate::ecs::ComponentKey::new($crate::ty!(&&$t), $ekey)
     };
-    ($t:ty, $ekey:ident) => {
+    ($t:ty, $ekey:expr) => {
         $crate::ecs::ComponentKey::new($crate::ty!($t), $ekey)
     };
 }

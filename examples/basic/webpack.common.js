@@ -20,5 +20,8 @@ module.exports = {
   ],
   experiments: {
     asyncWebAssembly: true,
-  }
+  },
+  // devServer: {
+  //   https: true,
+  // },
 };

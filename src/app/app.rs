@@ -2,29 +2,27 @@ use crate::{
     app::{
         event::{Event, EventListener, EventManager},
         r#loop::Loop,
-    },
-    decl_return_wrap,
-    ds::refs::RCell,
-    ecs::{
-        predefined::resource::{ResourcePack, TimeStamp},
+    }, decl_return_wrap, ds::refs::RCell, ecs::{
+        ckey,
+        predefined::{
+            components,
+            resource::{ResourcePack, TimeStamp},
+        },
         storage::Storage,
-        system::{Invokable, System, Systems},
+        system::{Invokable, System, SystemInfo, Systems},
         traits::Entity,
-    },
-    primitive::mesh::{Geometry, Material, MeshResource, SeparateGeometry},
-    render::{
+        SystemKey,
+    }, prelude::Matrix4f, primitive::mesh::{Geometry, Material, MeshResource, SeparateGeometry}, render::{
         buffer::{BufferView, SizeOrData},
         descs,
         pipeline::{PipelineBuilder, PipelineLayoutBuilder},
         resource::RenderResource,
-    },
-    scene::{
+    }, scene::{
         scene::{Scene, SceneManager},
         SceneError,
-    },
-    util::{key::ResKey, web, AsBytes, RcStr},
+    }, ty, util::{key::ResKey, web, AsBytes, RcStr}
 };
-use std::rc::Rc;
+use std::{mem::size_of, rc::Rc};
 use wasm_bindgen::prelude::*;
 use web_sys::Performance;
 
@@ -79,23 +77,47 @@ impl App {
     }
 
     /// Adds a system.
+    #[inline]
     pub fn add_system<S: System>(&mut self, system: S) -> &mut Self {
-        let skey = S::key();
-        let sinfo = S::info();
-        self.state
-            .borrow_mut()
-            .systems
-            .insert(skey, Box::new(system));
-        self.state.borrow_mut().storage.insert_sinfo(skey, sinfo);
+        self._add_system(S::key(), S::info(), Box::new(system))
+    }
+
+    /// A function with concrete types, not generic, for [`Self::add_system`].
+    /// It can help us to ruduce binary size caused by generic bloating.
+    fn _add_system(
+        &mut self,
+        skey: SystemKey,
+        sinfo: SystemInfo,
+        system: Box<dyn Invokable>,
+    ) -> &mut Self {
+        {
+            let mut state = self.state.borrow_mut();
+            state.systems.insert(skey, system);
+            state.storage.insert_sinfo(skey, sinfo);
+        }
         self
     }
 
     /// Adds a super system.
-    pub fn add_super_system<S: System>(&mut self, sys: S) -> &mut Self {
-        let skey = S::key();
-        let sinfo = S::info();
-        self.state.borrow_mut().super_systems.push(Box::new(sys));
-        self.state.borrow_mut().storage.insert_sinfo(skey, sinfo);
+    /// Super systems can add or remove normal systems.
+    #[inline]
+    pub fn add_super_system<S: System>(&mut self, system: S) -> &mut Self {
+        self._add_super_system(S::key(), S::info(), Box::new(system))
+    }
+
+    /// A function with concrete types, not generic, for [`Self::add_super_system`].
+    /// It can help us to ruduce binary size caused by generic bloating.
+    fn _add_super_system(
+        &mut self,
+        skey: SystemKey,
+        sinfo: SystemInfo,
+        system: Box<dyn Invokable>,
+    ) -> &mut Self {
+        {
+            let mut state = self.state.borrow_mut();
+            state.super_systems.push(system);
+            state.storage.insert_sinfo(skey, sinfo);
+        }
         self
     }
 
@@ -171,28 +193,40 @@ impl App {
         self
     }
 
+    #[inline]
     pub fn add_geometry(
         &mut self,
         key: impl Into<ResKey>,
         geo: impl Into<SeparateGeometry>,
     ) -> GeometryReturn {
-        let key: ResKey = key.into();
+        self._add_geometry(key.into(), geo.into())
+    }
+
+    /// A function with concrete types, not generic, for [`Self::add_geometry`].
+    /// It can help us to ruduce binary size caused by generic bloating.
+    fn _add_geometry(&mut self, key: ResKey, geo: SeparateGeometry) -> GeometryReturn {
         self.state
             .borrow_mut()
             .meshes
-            .add_geometry(key.clone(), Geometry::from(geo.into()));
+            .add_geometry(key.clone(), Geometry::from(geo));
         GeometryReturn {
             recv: self,
             ret: key,
         }
     }
 
+    #[inline]
     pub fn add_material(
         &mut self,
         key: impl Into<ResKey>,
         mat: impl Into<Material>,
     ) -> MaterialReturn {
-        let key: ResKey = key.into();
+        self._add_material(key.into(), mat.into())
+    }
+
+    /// A function with concrete types, not generic, for [`Self::add_material`].
+    /// It can help us to ruduce binary size caused by generic bloating.
+    fn _add_material(&mut self, key: ResKey, mat: Material) -> MaterialReturn {
         self.state
             .borrow_mut()
             .meshes
@@ -203,39 +237,66 @@ impl App {
         }
     }
 
+    #[inline]
     pub fn add_mesh(
         &mut self,
-        mesh_key: impl Into<ResKey>,
-        geo_key: impl Into<ResKey>,
-        mat_key: impl Into<ResKey>,
+        mesh: impl Into<ResKey>,
+        geo: impl Into<ResKey>,
+        mat: impl Into<ResKey>,
     ) -> MeshReturn {
-        let mesh_key: ResKey = mesh_key.into();
-        let geo_key: ResKey = geo_key.into();
-        let mat_key: ResKey = mat_key.into();
+        self._add_mesh(mesh.into(), geo.into(), mat.into())
+    }
+
+    fn _add_mesh(&mut self, mesh: ResKey, geo: ResKey, mat: ResKey) -> MeshReturn {
         self.state
             .borrow_mut()
             .meshes
-            .add_mesh(mesh_key.clone(), geo_key, mat_key);
+            .add_mesh(mesh.clone(), geo, mat);
         MeshReturn {
             recv: self,
-            ret: mesh_key,
+            ret: mesh,
         }
     }
 
     // TODO: AppError
-    pub fn add_scene(
-        &mut self,
-        key: impl Into<ResKey>,
-        mut scene: Scene,
-    ) -> Result<(), SceneError> {
-        let key: ResKey = key.into();
+    #[inline]
+    pub fn add_scene(&mut self, key: impl Into<ResKey>, scene: Scene) -> Result<(), SceneError> {
+        self._add_scene(key.into(), scene)
+    }
+
+    fn _add_scene(&mut self, key: ResKey, mut scene: Scene) -> Result<(), SceneError> {
         let mut state = self.state.borrow_mut();
         let AppState {
             render,
             meshes,
             scene_mgr,
+            storage,
             ..
         } = &mut *state;
+
+        scene.set_gpu(Rc::clone(&render.gpu));
+
+        // Makes mapping between scene's nodes and ECS's entities.
+        for (i, node) in scene.hierarchy.iter_nodes() {
+            if let Some((ekey, index)) = node.get_mapped_entity() {
+                // TODO: Use filter, This is duplicate implementation.
+                let ckey = ckey!(components::Drawable, ekey);
+                let values = storage
+                    .collectors
+                    .get_mut(&ekey)
+                    .unwrap()
+                    .values_as_any(&ty!(components::Drawable));
+                let downcaster = storage.downcasters.get(&ckey).unwrap();
+                let values = unsafe {
+                    std::mem::transmute::<
+                        _,
+                        fn(&mut dyn std::any::Any) -> &mut [components::Drawable],
+                    >(downcaster.as_ptr())(values)
+                };
+                values[index].node.scene_key = key.id;
+                values[index].node.node_index = i;
+            }
+        }
 
         // Makes geometry to be interleaved and sets it to the scene.
         meshes.make_mesh_geometry_interleaved(scene.meshes.iter());
@@ -255,9 +316,15 @@ impl App {
         let (vert_size, index_size) = scene.calc_geometry_buffer_size(meshes);
 
         // Requests geometry buffers and sets them to the scene.
-        let vert_buf = render.add_vertex_buffer(SizeOrData::Size(vert_size))?;
-        let index_buf = render.add_ro_index_buffer(SizeOrData::Size(index_size))?;
+        let vert_buf = render.add_vertex_buffer(SizeOrData::Size(vert_size, true))?;
+        let index_buf = render.add_ro_index_buffer(SizeOrData::Size(index_size, true))?;
         scene.set_geometry_buffer(meshes, vert_buf, index_buf);
+
+        // Instance buffer.
+        let inst_buf_view = scene.get_transform_buffer_view();
+        let inst_buf_size = inst_buf_view.size() as u64;
+        let inst_buf = render.add_vertex_buffer(SizeOrData::Size(inst_buf_size, false))?;
+        scene.set_instance_buffer(Rc::clone(&inst_buf));
 
         // Requests camera buffers and sets them to the scene.
         let Scene {
@@ -332,8 +399,41 @@ impl App {
         }
         if let Some(geo_key) = scene.geos.keys().next() {
             let geo = meshes.get_geometry(geo_key).unwrap();
-            let buf_view = BufferView::new_from_geometry(geo.as_interleaved().unwrap());
-            builder.vert_buf_view.push(buf_view);
+            // vertex buffer
+            let view = BufferView::new_from_geometry(geo.as_interleaved().unwrap());
+            builder.vert_buf_view.push(view);
+            // instance buffer
+            let mut view = BufferView::new(
+                inst_buf_view.get_item_size(), 
+                inst_buf_view.len, 
+                inst_buf_view.offset
+            );
+            view.set_buffer(inst_buf);
+            view.set_vertex_step_mode(wgpu::VertexStepMode::Instance);
+            // TODO: Hard coded
+            view.set_vertex_attributes(&[
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 0,
+                    shader_location: 2,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 16,
+                    shader_location: 3,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 32,
+                    shader_location: 4,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 48,
+                    shader_location: 5,
+                },
+            ]);
+            builder.vert_buf_view.push(view);
         }
         builder.set_surface_pack_index(scene.surf_pack_index.clone());
         let pb_index = render.add_pipeline_builder(builder);
@@ -345,21 +445,20 @@ impl App {
         render.remove_pipeline_builder(pb_index);
 
         // PassGraph.
-        scene.build_pass_graph(&render.gpu, &key.label);
+        scene.build_pass_graph(&key.label);
 
         // Adds the scene.
-        scene_mgr.insert_active_scene(key, scene);
+        scene_mgr.insert_scene(key.clone(), scene);
+        scene_mgr.activate_scene(key);
         Ok(())
     }
 
-    // TODO: Update
     pub fn register_entity<E: Entity>(&mut self) -> &mut Self {
         self.state.borrow_mut().storage.insert_default::<E>();
         self
     }
 
-    // TODO: Update
-    pub fn insert_entity(&mut self, key: usize, ent: impl Entity) -> &mut Self {
+    pub fn add_entity(&mut self, key: usize, ent: impl Entity) -> &mut Self {
         self.state.borrow_mut().storage.insert_entity(key, ent);
         self
     }

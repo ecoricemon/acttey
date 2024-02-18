@@ -1,11 +1,8 @@
-use std::str::FromStr;
-
 use crate::{
     primitive::{
         camera::Camera,
-        mesh::{Geometry, GeometryAttributeVariant, InterleavedGeometry, Material},
+        mesh::{InterleavedGeometry, Material, VertexAttributeVariant},
     },
-    render::canvas::SurfacePack,
     util::trim_end_digits,
 };
 use my_wgsl::*;
@@ -103,7 +100,6 @@ impl ShaderHelper {
     }
 
     /// Adds `VertexInput` struct to the `builder`.  
-    /// For the `geo`, only [`InterleavedGeometry`] is allowed.
     ///
     /// if `vert_index` is true, `@builtin(vertex_index) vertexIndex` is appended.  
     /// if `inst_index` is true, `@builtin(instance_index) instanceIndex` is appended.  
@@ -134,6 +130,26 @@ impl ShaderHelper {
         wgsl_structs!(builder, VertexOutput);
     }
 
+    /// Adds `InstanceInput` struct to the `builder`.
+    pub fn add_instance_input_struct(builder: &mut Builder, start_loc: u32) {
+        #[wgsl_decl_struct]
+        struct InstanceInput {}
+        let mut st = <InstanceInput as AsStructure>::as_structure();
+
+        // Inserts model matrix members into the structure.
+        for loc in start_loc..start_loc + 4 {
+            // Creates structure member looks like `@location(x) model0: vec4<f32>`
+            let ident = format!("model{}", loc - start_loc);
+            let ty = "vec4f".to_string();
+            let loc = loc.to_string();
+            let mut member = StructureMember::new(ident, ty);
+            member.insert_attribute("location", Some(loc.as_str()));
+            st.members.push(member);
+        }
+
+        builder.push_structure(st);
+    }
+
     /// Adds `FragmentOutput` struct to the `builder`.
     /// You can get `colors` from [`SurfacePack::create_color_targets()`].
     pub fn add_fragment_output_struct(
@@ -142,7 +158,7 @@ impl ShaderHelper {
     ) {
         #[wgsl_decl_struct]
         struct FragmentOutput {}
-        let mut structure = <FragmentOutput as AsStructure>::as_structure();
+        let mut st = <FragmentOutput as AsStructure>::as_structure();
 
         // Inserts color members into the structure.
         for (i, color) in color_targets.iter().enumerate() {
@@ -154,16 +170,16 @@ impl ShaderHelper {
                 let ty = Self::texture_format_to_shader_str(color.format).to_owned();
                 let mut member = StructureMember::new(ident, ty);
                 member.insert_attribute("location", Some(i.as_str()));
-                structure.members.push(member);
+                st.members.push(member);
             }
         }
 
         // If there's only one member, trims number from the member ident.
-        if structure.members.len() == 1 {
-            trim_end_digits(&mut structure.members[0].ident);
+        if st.members.len() == 1 {
+            trim_end_digits(&mut st.members[0].ident);
         }
 
-        builder.push_structure(structure);
+        builder.push_structure(st);
     }
 
     /// Converts [`wgpu::VertexFormat`] to type string used in shader.
@@ -173,65 +189,65 @@ impl ShaderHelper {
         // All comments are copied from wgpu.
         match format {
             // Two unsigned bytes (u8). `vec2<u32>` in shaders.
-            VertexFormat::Uint8x2 => "vec2<u32>",
+            VertexFormat::Uint8x2 => "vec2u",
             // Four unsigned bytes (u8). `vec4<u32>` in shaders.
-            VertexFormat::Uint8x4 => "vec4<u32>",
+            VertexFormat::Uint8x4 => "vec4u",
             // Two signed bytes (i8). `vec2<i32>` in shaders.
-            VertexFormat::Sint8x2 => "vec2<i32>",
+            VertexFormat::Sint8x2 => "vec2i",
             // Four signed bytes (i8). `vec4<i32>` in shaders.
-            VertexFormat::Sint8x4 => "vec4<i32>",
+            VertexFormat::Sint8x4 => "vec4i",
             // Two unsigned bytes (u8). [0, 255] converted to float [0, 1] `vec2<f32>` in shaders.
-            VertexFormat::Unorm8x2 => "vec2<f32>",
+            VertexFormat::Unorm8x2 => "vec2f",
             // Four unsigned bytes (u8). [0, 255] converted to float [0, 1] `vec4<f32>` in shaders.
-            VertexFormat::Unorm8x4 => "vec4<f32>",
+            VertexFormat::Unorm8x4 => "vec4f",
             // Two signed bytes (i8). [-127, 127] converted to float [-1, 1] `vec2<f32>` in shaders.
-            VertexFormat::Snorm8x2 => "vec2<f32>",
+            VertexFormat::Snorm8x2 => "vec2f",
             // Four signed bytes (i8). [-127, 127] converted to float [-1, 1] `vec4<f32>` in shaders.
-            VertexFormat::Snorm8x4 => "vec4<f32>",
+            VertexFormat::Snorm8x4 => "vec4f",
             // Two unsigned shorts (u16). `vec2<u32>` in shaders.
-            VertexFormat::Uint16x2 => "vec2<u32>",
+            VertexFormat::Uint16x2 => "vec2u",
             // Four unsigned shorts (u16). `vec4<u32>` in shaders.
-            VertexFormat::Uint16x4 => "vec4<u32>",
+            VertexFormat::Uint16x4 => "vec4u",
             // Two signed shorts (i16). `vec2<i32>` in shaders.
-            VertexFormat::Sint16x2 => "vec2<i32>",
+            VertexFormat::Sint16x2 => "vec2i",
             // Four signed shorts (i16). `vec4<i32>` in shaders.
-            VertexFormat::Sint16x4 => "vec4<i32>",
+            VertexFormat::Sint16x4 => "vec4i",
             // Two unsigned shorts (u16). [0, 65535] converted to float [0, 1] `vec2<f32>` in shaders.
-            VertexFormat::Unorm16x2 => "vec2<f32>",
+            VertexFormat::Unorm16x2 => "vec2f",
             // Four unsigned shorts (u16). [0, 65535] converted to float [0, 1] `vec4<f32>` in shaders.
-            VertexFormat::Unorm16x4 => "vec4<f32>",
+            VertexFormat::Unorm16x4 => "vec4f",
             // Two signed shorts (i16). [-32767, 32767] converted to float [-1, 1] `vec2<f32>` in shaders.
-            VertexFormat::Snorm16x2 => "vec2<f32>",
+            VertexFormat::Snorm16x2 => "vec2f",
             // Four signed shorts (i16). [-32767, 32767] converted to float [-1, 1] `vec4<f32>` in shaders.
-            VertexFormat::Snorm16x4 => "vec4<f32>",
+            VertexFormat::Snorm16x4 => "vec4f",
             // Two half-precision floats (no Rust equiv). `vec2<f32>` in shaders.
-            VertexFormat::Float16x2 => "vec2<f32>",
+            VertexFormat::Float16x2 => "vec2f",
             // Four half-precision floats (no Rust equiv). `vec4<f32>` in shaders.
-            VertexFormat::Float16x4 => "vec4<f32>",
+            VertexFormat::Float16x4 => "vec4f",
             // One single-precision float (f32). `f32` in shaders.
             VertexFormat::Float32 => "f32",
             // Two single-precision floats (f32). `vec2<f32>` in shaders.
-            VertexFormat::Float32x2 => "vec2<f32>",
+            VertexFormat::Float32x2 => "vec2f",
             // Three single-precision floats (f32). `vec3<f32>` in shaders.
-            VertexFormat::Float32x3 => "vec3<f32>",
+            VertexFormat::Float32x3 => "vec3f",
             // Four single-precision floats (f32). `vec4<f32>` in shaders.
-            VertexFormat::Float32x4 => "vec4<f32>",
+            VertexFormat::Float32x4 => "vec4f",
             // One unsigned int (u32). `u32` in shaders.
             VertexFormat::Uint32 => "u32",
             // Two unsigned ints (u32). `vec2<u32>` in shaders.
-            VertexFormat::Uint32x2 => "vec2<u32>",
+            VertexFormat::Uint32x2 => "vec2u",
             // Three unsigned ints (u32). `vec3<u32>` in shaders.
-            VertexFormat::Uint32x3 => "vec3<u32>",
+            VertexFormat::Uint32x3 => "vec3u",
             // Four unsigned ints (u32). `vec4<u32>` in shaders.
-            VertexFormat::Uint32x4 => "vec4<u32>",
+            VertexFormat::Uint32x4 => "vec4u",
             // One signed int (i32). `i32` in shaders.
             VertexFormat::Sint32 => "i32",
             // Two signed ints (i32). `vec2<i32>` in shaders.
-            VertexFormat::Sint32x2 => "vec2<i32>",
+            VertexFormat::Sint32x2 => "vec2i",
             // Three signed ints (i32). `vec3<i32>` in shaders.
-            VertexFormat::Sint32x3 => "vec3<i32>",
+            VertexFormat::Sint32x3 => "vec3i",
             // Four signed ints (i32). `vec4<i32>` in shaders.
-            VertexFormat::Sint32x4 => "vec4<i32>",
+            VertexFormat::Sint32x4 => "vec4i",
             VertexFormat::Float64
             | VertexFormat::Float64x2
             | VertexFormat::Float64x3
@@ -243,14 +259,13 @@ impl ShaderHelper {
     /// 6.5.1. Texel Formats
     /// See https://www.w3.org/TR/WGSL/#texel-formats
     fn texture_format_to_shader_str(format: wgpu::TextureFormat) -> &'static str {
-        use my_wgsl::*;
         use wgpu::TextureSampleType;
 
         if let Some(_type) = format.sample_type(None) {
             match _type {
-                TextureSampleType::Float { .. } => return "vec4<f32>",
-                TextureSampleType::Uint => return "vec4<u32>",
-                TextureSampleType::Sint => return "vec4<i32>",
+                TextureSampleType::Float { .. } => return "vec4f",
+                TextureSampleType::Uint => return "vec4u",
+                TextureSampleType::Sint => return "vec4i",
                 TextureSampleType::Depth => (),
             }
         }
@@ -262,7 +277,7 @@ impl ShaderHelper {
     /// `attrs` and `attr_kinds` should have the exactly same length.j
     fn create_vertex_input_struct<'a>(
         mut attrs: impl Iterator<Item = &'a wgpu::VertexAttribute>,
-        mut attr_kinds: impl Iterator<Item = &'a GeometryAttributeVariant>,
+        mut attr_kinds: impl Iterator<Item = &'a VertexAttributeVariant>,
         builtin_vert_index: bool,
         builtin_inst_index: bool,
     ) -> my_wgsl::Structure {
@@ -318,42 +333,40 @@ impl ShaderHelper {
         for (loc, (attr, kind)) in (&mut attrs).zip(&mut attr_kinds).enumerate() {
             let loc = loc as u32;
             match kind {
-                GeometryAttributeVariant::Position => {
+                VertexAttributeVariant::Position => {
                     add_slot("position".to_owned(), loc, attr.format)
                 }
-                GeometryAttributeVariant::Normal => add_slot("normal".to_owned(), loc, attr.format),
-                GeometryAttributeVariant::Tangent => {
-                    add_slot("tangent".to_owned(), loc, attr.format)
-                }
-                GeometryAttributeVariant::TexCoord => {
+                VertexAttributeVariant::Normal => add_slot("normal".to_owned(), loc, attr.format),
+                VertexAttributeVariant::Tangent => add_slot("tangent".to_owned(), loc, attr.format),
+                VertexAttributeVariant::TexCoord => {
                     add_slot(UV_IDENTS[uv_index].to_owned(), loc, attr.format);
                     uv_index += 1;
                 }
-                GeometryAttributeVariant::Color => {
+                VertexAttributeVariant::Color => {
                     add_slot(COLOR_IDENTS[color_index].to_owned(), loc, attr.format);
                     color_index += 1;
                 }
-                GeometryAttributeVariant::Joint => {
+                VertexAttributeVariant::Joint => {
                     add_slot(JOINT_IDENTS[joint_index].to_owned(), loc, attr.format);
                     joint_index += 1;
                 }
-                GeometryAttributeVariant::Weight => {
+                VertexAttributeVariant::Weight => {
                     add_slot(WEIGHT_IDENTS[weight_index].to_owned(), loc, attr.format);
                     weight_index += 1;
                 }
-                GeometryAttributeVariant::UserA => {
+                VertexAttributeVariant::UserA => {
                     add_slot(USER_A_IDENTS[user_a_index].to_owned(), loc, attr.format);
                     user_a_index += 1;
                 }
-                GeometryAttributeVariant::UserB => {
+                VertexAttributeVariant::UserB => {
                     add_slot(USER_B_IDENTS[user_b_index].to_owned(), loc, attr.format);
                     user_b_index += 1;
                 }
-                GeometryAttributeVariant::UserC => {
+                VertexAttributeVariant::UserC => {
                     add_slot(USER_C_IDENTS[user_c_index].to_owned(), loc, attr.format);
                     user_c_index += 1;
                 }
-                GeometryAttributeVariant::UserD => {
+                VertexAttributeVariant::UserD => {
                     add_slot(USER_D_IDENTS[user_d_index].to_owned(), loc, attr.format);
                     user_d_index += 1;
                 }

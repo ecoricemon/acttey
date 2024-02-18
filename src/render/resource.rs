@@ -315,8 +315,8 @@ impl RenderResource {
     }
 
     #[inline]
-    pub fn build_shader(&mut self, index: GenIndex, key: impl Into<ResKey>) -> &Rc<Shader> {
-        self.shaders.create_shader(index, key.into())
+    pub fn build_shader(&mut self, index: GenIndex, key: &ResKey) -> &Rc<Shader> {
+        self.shaders.create_shader(index, key)
     }
 
     #[inline]
@@ -350,9 +350,9 @@ impl RenderResource {
     pub fn build_pipeline_layout(
         &mut self,
         index: GenIndex,
-        key: impl Into<ResKey>,
+        key: ResKey,
     ) -> &Rc<wgpu::PipelineLayout> {
-        self.pipelines.create_layout(index, key.into())
+        self.pipelines.create_layout(index, key)
     }
 
     #[inline]
@@ -380,13 +380,9 @@ impl RenderResource {
     }
 
     #[inline]
-    pub fn build_pipeline(
-        &mut self,
-        index: GenIndex,
-        key: impl Into<ResKey>,
-    ) -> &Rc<wgpu::RenderPipeline> {
+    pub fn build_pipeline(&mut self, index: GenIndex, key: ResKey) -> &Rc<wgpu::RenderPipeline> {
         self.pipelines
-            .create_pipeline(index, key.into(), &self.surf_packs, &self.surfaces)
+            .create_pipeline(index, key, &self.surf_packs, &self.surfaces)
     }
 
     /// Gets any iterator with a bit of inefficiency.

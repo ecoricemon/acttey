@@ -33,7 +33,7 @@ impl ShaderPack {
     /// # Panics
     ///
     /// Panics if `builder_index` is invalid or overwrting fails.
-    pub fn create_shader(&mut self, builder_index: GenIndex, key: ResKey) -> &Rc<Shader> {
+    pub fn create_shader(&mut self, builder_index: GenIndex, key: &ResKey) -> &Rc<Shader> {
         let builder = self.builders.get(builder_index).unwrap();
         let entry_point = match (
             builder.get_vertex_stage_ident(),
@@ -50,7 +50,7 @@ impl ShaderPack {
         }
 
         // Safety: Infallible.
-        unsafe { self.shaders.get(&key).unwrap_unchecked() }
+        unsafe { self.shaders.get(key).unwrap_unchecked() }
     }
 
     /// Clears unused shaders and returns the number of removed shaders.

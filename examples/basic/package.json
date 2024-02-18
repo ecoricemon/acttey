@@ -19,7 +19,9 @@
     "build": "run-s clean wasm-dev-gpu bundle-dev",
     "build-gl": "run-s clean wasm-dev-gl bundle-dev",
     "build-all": "run-s clean wasm-dev-gpu wasm-dev-gl bundle-dev",
-    "build-release": "run-s clean wasm-release-gpu wasm-release-gl bundle-prod",
+    "build-release": "run-s clean wasm-release-gpu bundle-prod",
+    "build-release-gl": "run-s clean wasm-release-gl bundle-prod",
+    "build-release-all": "run-s clean wasm-release-gpu wasm-release-gl bundle-prod",
 
     "start": "webpack serve --config webpack.dev.js",
     "test": "wasm-pack test --chrome --headless --workspace"

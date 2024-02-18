@@ -46,9 +46,9 @@ impl PassGraph {
     }
 
     /// Adds a command node.
-    pub fn add_command(&mut self, cmd: impl Into<PassCmd>) -> usize {
+    pub fn insert_command(&mut self, cmd: impl Into<PassCmd>) -> usize {
         self.dirty = true;
-        self.graph.add_node(cmd.into())
+        self.graph.insert_node(cmd.into())
     }
 
     /// Adds an edge between nodes.
@@ -143,8 +143,8 @@ impl PassGraph {
     ) {
         if !visit[index] {
             visit[index] = true;
-            for dep_index in self.graph.get_outbounds(index).iter_occupied() {
-                self.execute_node(render_pass, *dep_index, visit);
+            for dep_index in self.graph.iter_outbounds(index) {
+                self.execute_node(render_pass, dep_index, visit);
             }
             self.graph[index].execute(render_pass);
         }

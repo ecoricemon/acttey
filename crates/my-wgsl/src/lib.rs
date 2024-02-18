@@ -568,7 +568,7 @@ impl Builder {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ShaderEntry {
     Structure(Structure),
     GlobalVariable(GlobalVariable),
@@ -633,7 +633,7 @@ impl PutStrPretty for ShaderEntry {
 
 // 6.2.10. Structure Types
 // https://www.w3.org/TR/WGSL/#struct-types
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Structure {
     /// Name of the struct.
     ///
@@ -813,10 +813,9 @@ impl StructureMember {
     /// Its inner value is changed with the given `inner`.
     pub fn insert_attribute(&mut self, outer: &str, inner: Option<&str>) {
         if let Some(i) = self.attrs.find_attribute_partial(outer, inner) {
-            self.attrs.0[i].set_inner(inner.unwrap_or_default());
+            self.attrs[i].set_inner(inner.unwrap_or_default());
         } else {
             self.attrs
-                .0
                 .push(Attribute::from((outer, inner.unwrap_or_default())));
         }
     }
@@ -828,14 +827,14 @@ impl PutStr for StructureMember {
     }
 
     fn put_str(&self, buf: &mut String) {
-        put_attrs(self.attrs.0.iter(), buf);
+        put_attrs(self.attrs.iter(), buf);
         self.put_ident(buf);
         buf.push(':');
         buf.push_str(&self.ty);
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GlobalVariable {
     /// Attributes of the global variable.
     ///
@@ -921,7 +920,7 @@ impl PutStr for GlobalVariable {
     }
 
     fn put_str(&self, buf: &mut String) {
-        put_attrs(self.attrs.0.iter(), buf);
+        put_attrs(self.attrs.iter(), buf);
         buf.push_str("var");
         if !self.templates.is_empty() {
             buf.push('<');
@@ -945,7 +944,7 @@ impl PutStr for GlobalVariable {
 
 impl PutStrPretty for GlobalVariable {
     fn put_str_pretty(&self, buf: &mut String) {
-        put_attrs_pretty(self.attrs.0.iter(), buf);
+        put_attrs_pretty(self.attrs.iter(), buf);
         buf.push_str("var");
         if !self.templates.is_empty() {
             buf.push('<');
@@ -966,7 +965,7 @@ impl PutStrPretty for GlobalVariable {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Function {
     /// Attributes of the function.
     ///
@@ -1023,7 +1022,7 @@ impl PutStr for Function {
     }
 
     fn put_str(&self, buf: &mut String) {
-        put_attrs(self.attrs.0.iter(), buf);
+        put_attrs(self.attrs.iter(), buf);
         buf.push_str("fn ");
         self.put_ident(buf);
         buf.push('(');
@@ -1040,7 +1039,7 @@ impl PutStr for Function {
 impl PutStrPretty for Function {
     fn put_str_pretty(&self, buf: &mut String) {
         // Writes attributes.
-        put_attrs_pretty(self.attrs.0.iter(), buf);
+        put_attrs_pretty(self.attrs.iter(), buf);
         buf.push('\n');
 
         // Writes from `fn` to the first input.
@@ -1073,7 +1072,7 @@ impl PutStrPretty for Function {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FunctionParameter {
     /// Attributes of the function parameter.
     ///
@@ -1099,7 +1098,7 @@ impl PutStr for FunctionParameter {
     }
 
     fn put_str(&self, buf: &mut String) {
-        put_attrs(self.attrs.0.iter(), buf);
+        put_attrs(self.attrs.iter(), buf);
         if let Some(ident) = &self.ident {
             buf.push_str(ident);
             buf.push(':');
@@ -1110,7 +1109,7 @@ impl PutStr for FunctionParameter {
 
 impl PutStrPretty for FunctionParameter {
     fn put_str_pretty(&self, buf: &mut String) {
-        put_attrs_pretty(self.attrs.0.iter(), buf);
+        put_attrs_pretty(self.attrs.iter(), buf);
         if let Some(ident) = &self.ident {
             buf.push_str(ident);
             buf.push_str(" : ");
@@ -1122,7 +1121,7 @@ impl PutStrPretty for FunctionParameter {
 // 9.1. Compound Statement
 // https://www.w3.org/TR/WGSL/#compound-statement-section
 /// Compound statement is a set of statement wrapped with braces, {...}.
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct CompoundStatement {
     /// Attributes of the statement.
     pub attrs: Attributes,
@@ -1267,7 +1266,7 @@ impl PutStr for CompoundStatement {
     fn put_ident(&self, _buf: &mut String) {}
 
     fn put_str(&self, buf: &mut String) {
-        put_str_join(self.attrs.0.iter(), buf, "", "", "");
+        put_str_join(self.attrs.iter(), buf, "", "", "");
         buf.push('{');
         put_str_join(self.stmts.iter(), buf, "", "", "");
         buf.push('}');
@@ -1280,7 +1279,7 @@ impl PutStrPretty for CompoundStatement {
         let tab = get_last_spaces(buf);
         popn(buf, tab.min(TAB_SIZE));
 
-        put_attrs_pretty(self.attrs.0.iter().filter(|attr| !attr.is_my_attr()), buf);
+        put_attrs_pretty(self.attrs.iter().filter(|attr| !attr.is_my_attr()), buf);
         buf.push_str("{\n");
         let tab_str = " ".repeat(tab);
         put_str_pretty_join(self.stmts.iter(), buf, &tab_str, "\n", "\n");
@@ -1409,7 +1408,7 @@ impl Attributes {
         find_index(self.0.iter(), attr, Some)
     }
 
-    /// Searches partially matched attribute.
+    /// Searches partially matched attribute and returns its index.
     /// If `inner` is Some, it tries to find exactly matched one.
     /// Otherwise, it compares outer only.
     pub fn find_attribute_partial(&self, outer: &str, inner: Option<&str>) -> Option<usize> {
@@ -1438,6 +1437,22 @@ impl Attributes {
     /// Tries to remove the attribute that matches with the given attribute.
     pub fn remove_attribute(&mut self, attr: &Attribute) -> Option<Attribute> {
         self.find_attribute(attr).map(|i| self.0.remove(i))
+    }
+}
+
+impl std::ops::Deref for Attributes {
+    type Target = SmallVec<[Attribute; 2]>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Attributes {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
     }
 }
 
@@ -1524,6 +1539,30 @@ impl Attribute {
             Self::Fragment => None,
             Self::Compute => None,
             Self::MyId(v) => Some(v.clone()),
+        }
+    }
+
+    /// Returns u32 inner value only, otherwise, returns None.
+    /// Use [`Self::inner`] if you want string type.
+    pub fn inner_u32(&self) -> Option<u32> {
+        match self {
+            Self::Align(v) => Some(*v),
+            Self::Binding(v) => Some(*v),
+            Self::Builtin(_v) => None,
+            Self::Const => None,
+            // Self::Diagnostic => unimplemented!()
+            Self::Group(v) => Some(*v),
+            Self::Id(v) => Some(*v),
+            // Self::Interpolate => unimplemented!()
+            Self::Invariant => None,
+            Self::Location(v) => Some(*v),
+            Self::MustUse => None,
+            Self::Size(v) => Some(*v),
+            // Self::WorkgroupSize => unimplemented!()
+            Self::Vertex => None,
+            Self::Fragment => None,
+            Self::Compute => None,
+            Self::MyId(_v) => None,
         }
     }
 

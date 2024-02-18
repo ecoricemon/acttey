@@ -4,7 +4,7 @@ use std::{
     borrow::{Borrow, Cow},
     hash::Hash,
     mem::{size_of, transmute},
-    ops::{Deref, Div, Mul, Rem},
+    ops::{Deref, DerefMut, Div, Mul, Rem},
     rc::Rc,
     thread,
 };
@@ -99,10 +99,9 @@ pub(crate) fn split<T, const N: usize>(mut v: &[T], mut indices: [usize; N]) -> 
     let mut arr: [MaybeUninit<&T>; N] = unsafe { MaybeUninit::uninit().assume_init() };
 
     for (i, mid) in indices.into_iter().enumerate() {
-        let right = v.split_at(mid).1;
-        let (x, right) = right.split_first().unwrap();
+        let (x, tail) = v.split_at(mid).1.split_first().unwrap();
         arr[i].write(x);
-        v = right;
+        v = tail;
     }
 
     // Safety: Everything is initialized and type is correct.
@@ -131,15 +130,35 @@ pub(crate) fn split_mut<T, const N: usize>(
     let mut arr: [MaybeUninit<&mut T>; N] = unsafe { MaybeUninit::uninit().assume_init() };
 
     for (i, mid) in indices.into_iter().enumerate() {
-        let right = v.split_at_mut(mid).1;
-        let (x, right) = right.split_first_mut().unwrap();
+        let (x, tail) = v.split_at_mut(mid).1.split_first_mut().unwrap();
         arr[i].write(x);
-        v = right;
+        v = tail;
     }
 
     // Safety: Everything is initialized and type is correct.
     // I don't know why we can't use transmute here?
     unsafe { transmute_copy::<_, _>(&arr) }
+}
+
+/// Updates value located at `target` using value at `by`.
+/// If you need more values, consider using [`split_mut`], which is more powerful but more complex.
+///
+/// # Panics
+///
+/// Panics if `target` or `by` is out of index, or `target` is equal to `by`.
+pub(crate) fn update_slice_by<T>(
+    values: &mut [T],
+    target: usize,
+    by: usize,
+    f: impl FnOnce(&mut T, &T),
+) {
+    if target < by {
+        let (tvalue, tail) = values.split_at_mut(target).1.split_first_mut().unwrap();
+        f(tvalue, &tail[by - target - 1]);
+    } else {
+        let (bvalue, tail) = values.split_at_mut(by).1.split_first_mut().unwrap();
+        f(&mut tail[target - by - 1], bvalue);
+    }
 }
 
 pub(crate) fn concat_string(l: &str, r: &str) -> String {
@@ -384,4 +403,180 @@ where
         + Div<Output = T>,
 {
     a * b / gcd(a, b)
+}
+
+/// A window in an array.
+/// It's represented by *offset* and *length*.
+#[derive(Debug, Clone, Copy)]
+pub struct Window {
+    pub offset: usize,
+    pub len: usize,
+}
+
+impl Window {
+    #[inline]
+    pub const fn new(offset: usize, len: usize) -> Self {
+        Self { offset, len }
+    }
+
+    /// Determines whether window's length is zero or not.
+    #[inline]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[inline]
+    pub fn reset(&mut self, offset: usize, len: usize) {
+        self.offset = offset;
+        self.len = len;
+    }
+
+    #[inline]
+    pub const fn range(&self) -> std::ops::Range<usize> {
+        self.offset..self.end()
+    }
+
+    #[inline]
+    pub const fn end(&self) -> usize {
+        self.offset + self.len
+    }
+
+    /// Shrinks window from left side by `amount`.
+    ///
+    /// # Panic
+    ///
+    /// Panics if `amount` is greater than `len`.
+    #[inline]
+    pub fn shrink_rev(&mut self, amount: usize) {
+        self.offset += amount;
+        self.len -= amount;
+    }
+}
+
+/// A view is a descriptor to see a part of a buffer.
+/// This is composed of [`Window`] and *unit item size* in byte.
+#[derive(Debug, Clone, Copy)]
+pub struct View<T = usize> {
+    win: Window,
+    item_size: T,
+}
+
+impl<T> View<T> 
+where
+    T: Copy + From<usize> + Mul<T, Output = T> 
+{
+    #[inline]
+    pub const fn new(offset: usize, len: usize, item_size: T) -> Self {
+        Self { win: Window::new(offset, len), item_size }
+    }
+
+    /// Sets unit item size in bytes.
+    #[inline]
+    pub fn set_item_size(&mut self, item_size: T) {
+        self.item_size = item_size;
+    }
+
+    /// Retrieves unit item size in bytes.
+    #[inline]
+    pub const fn get_item_size(&self) -> T {
+        self.item_size
+    }
+
+    /// Retrieves offset in bytes.
+    #[inline]
+    pub fn byte_offset(&self) -> T {
+        T::from(self.win.offset) * self.item_size
+    }
+
+    /// Retrieves end position in bytes. End here means the next byte of the view.
+    #[inline]
+    pub fn byte_end(&self) -> T {
+        T::from(self.win.end()) * self.item_size
+    }
+
+    /// Retrieves buffer window size in bytes.
+    #[inline]
+    pub fn size(&self) -> T {
+        T::from(self.win.len) * self.item_size
+    }
+
+    #[inline]
+    pub fn byte_range(&self) -> std::ops::Range<T> {
+        self.byte_offset()..self.byte_end()
+    }
+}
+
+impl Deref for View {
+    type Target = Window;
+
+    fn deref(&self) -> &Self::Target {
+        &self.win
+    }
+}
+
+impl DerefMut for View {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.win
+    }
+}
+
+/// 2D or 1D index.
+/// Two indices used together to point a specific item in nested array.
+/// Or you can use one index only.
+#[derive(Debug, Clone, Copy)]
+pub struct Index2 {
+    /// Primary index.
+    pub first: usize,
+
+    /// Secondary index, which can be unused.
+    pub second: usize,
+}
+
+impl Index2 {
+    const INVALID: usize = usize::MAX;
+
+    /// Creates with uninitialized state.
+    #[inline]
+    pub fn uninit() -> Self {
+        Self {
+            first: Self::INVALID,
+            second: Self::INVALID,
+        }
+    }
+
+    #[inline]
+    pub fn into_single(&mut self, first: usize) {
+        self.first = first;
+        self.second = Self::INVALID;
+    }
+
+    #[inline]
+    pub fn into_pair(&mut self, first: usize, second: usize) {
+        self.first = first;
+        self.second = second;
+    }
+
+    #[inline]
+    pub fn is_single(&self) -> bool {
+        self.first != Self::INVALID && self.second == Self::INVALID
+    }
+
+    #[inline]
+    pub fn is_pair(&self) -> bool {
+        self.first != Self::INVALID && self.second != Self::INVALID
+    }
+
+    #[inline]
+    pub fn is_valid(&self) -> bool {
+        self.is_single() || self.is_pair()
+    }
+
+    /// For convenience.
+    #[inline]
+    pub fn get(&self) -> (Option<usize>, Option<usize>) {
+        (
+            (self.first != Self::INVALID).then_some(self.first),
+            (self.second != Self::INVALID).then_some(self.second),
+        )
+    }
 }

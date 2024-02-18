@@ -127,8 +127,12 @@ macro_rules! impl_from_for_enum {
     };
 }
 
-/// Declares and implements a struct to make a call chain.
-/// This macro implements [`std::ops::DerefMut`] for the struct,
+/// Declares and implements a return struct to make call chain.
+/// The return struct has `recv` and `ret` fields.
+/// `recv` field is mutable receiver such as `&mut self`.
+/// `ret` field is function's own return.
+/// Also, this implements [`Deref`](std::ops::Deref) and [`DerefMut`](std::ops::DerefMut)
+/// for the `recv` field, so that you can get the receiver by dereferencing this struct.
 #[macro_export]
 macro_rules! decl_return_wrap {
     ($struct_id:ident, $recv_type:ty, $ret_type:ty $(,$life:lifetime)?) => {

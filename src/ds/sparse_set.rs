@@ -380,7 +380,7 @@ pub struct MonoSparseSet<K, V> {
     dense: Vec<(K, V)>,
 }
 
-impl<K: Eq + Hash + Clone, V> MonoSparseSet<K, V> {
+impl<K: Hash + Eq + Clone, V> MonoSparseSet<K, V> {
     pub fn new() -> Self {
         Self {
             sparse: AHashMap::new(),

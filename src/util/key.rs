@@ -19,11 +19,8 @@ pub struct ResKey {
 
 impl ResKey {
     #[inline]
-    pub fn new(id: impl Into<u64>, label: impl Into<RcStr>) -> Self {
-        Self {
-            id: id.into(),
-            label: label.into(),
-        }
+    pub const fn new(id: u64, label: RcStr) -> Self {
+        Self { id, label }
     }
 
     #[inline]
@@ -40,6 +37,7 @@ impl ResKey {
 }
 
 impl From<&ResKey> for ResKey {
+    #[inline]
     fn from(value: &ResKey) -> Self {
         value.clone()
     }
@@ -52,18 +50,21 @@ impl ToStr for ResKey {
 }
 
 impl Hash for ResKey {
+    #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.id.hash(state);
     }
 }
 
 impl PartialEq for ResKey {
+    #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
     }
 }
 
 impl<T: Into<u64>> From<T> for ResKey {
+    #[inline]
     fn from(value: T) -> Self {
         Self {
             id: value.into(),
@@ -73,11 +74,12 @@ impl<T: Into<u64>> From<T> for ResKey {
 }
 
 impl Default for ResKey {
+    #[inline]
     fn default() -> Self {
-        DUMMY_RC_STR.with(|label| Self::new(0_u64, label))
+        DUMMY_RC_STR.with(|label| Self::new(0_u64, label.clone()))
     }
 }
 
 thread_local! {
-    static DUMMY_RC_STR: RcStr = "".into();
+    pub(crate) static DUMMY_RC_STR: RcStr = "".into();
 }

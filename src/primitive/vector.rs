@@ -170,6 +170,7 @@ macro_rules! impl_vector {
                 + std::ops::Mul<Output = T>
                 + std::ops::Div<Output = T>
                 + std::ops::DivAssign
+                + std::ops::AddAssign
                 + Number<Output = T>
                 + PartialEq
                 + 'static
@@ -243,6 +244,11 @@ macro_rules! impl_vector {
                     #[inline]
                     pub fn [<set_ $field>](&mut self, v: T) {
                         self.0[$index] = v;
+                    }
+
+                    #[inline]
+                    pub fn [<add_ $field>](&mut self, v: T) {
+                        self.0[$index] += v;
                     }
                 }
             )+

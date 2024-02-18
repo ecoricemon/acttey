@@ -1,20 +1,37 @@
 use crate::{
     app::event::EventManager,
     ecs::{
-        predefined::resource::TimeStamp,
-        query::{Query, QueryMut, ResQuery, ResQueryMut},
+        predefined::{components, resource::TimeStamp},
+        query::{Filter, Query, QueryMut, ResQuery, ResQueryMut},
         system::System,
     },
     render::{canvas::SurfacePackBuffer, resource::RenderResource},
     scene::scene::SceneManager,
+    util::key::ResKey,
 };
+use ahash::AHashMap;
 
-/// A system to resize all surfaces contained active scenes.
+/// Implement dummy constructor for consistency with other predefined systems.
+macro_rules! impl_dummy_new {
+    ($id:ident) => {
+        impl $id {
+            pub fn new() -> Self {
+                Self
+            }
+        }
+    };
+}
+
+/// A system to resize all surfaces contained in active scenes.
 /// This system works only if `resize` event is added,
 /// but this system doesn't consume the event.
 ///
 /// Please note that `resize` event should be added into window itself.
+#[derive(Debug)]
 pub struct Resized;
+
+impl_dummy_new!(Resized);
+
 impl System for Resized {
     type Ref = ();
     type Mut = ();
@@ -31,7 +48,7 @@ impl System for Resized {
         let (ev_mgr, scene_mgr) = rr;
         let render = rm;
         if ev_mgr.iter_resized().next().is_some() {
-            for scene in scene_mgr.iter_active_scene() {
+            for (_key, scene) in scene_mgr.iter_active_scenes() {
                 let scale_factor = render.device_pixel_ratio();
                 let RenderResource {
                     gpu,
@@ -51,7 +68,11 @@ impl System for Resized {
 
 /// A system to drop all stacked input events.  
 /// It's recommended to add this system on a frame basis.
+#[derive(Debug)]
 pub struct ClearInput;
+
+impl_dummy_new!(ClearInput);
+
 impl System for ClearInput {
     type Ref = ();
     type Mut = ();
@@ -78,6 +99,14 @@ pub struct Render {
     visit_buf: Vec<bool>,
 }
 
+pub struct DrawableFilter;
+impl Filter for DrawableFilter {
+    type Target = components::Drawable;
+    type All = ();
+    type Any = ();
+    type None = ();
+}
+
 impl Render {
     pub fn new() -> Self {
         Self::default()
@@ -86,20 +115,40 @@ impl Render {
 
 impl System for Render {
     type Ref = ();
-    type Mut = ();
-    type ResRef = (SceneManager, RenderResource, TimeStamp);
-    type ResMut = ();
+    type Mut = DrawableFilter;
+    type ResRef = (RenderResource, TimeStamp);
+    type ResMut = SceneManager;
 
     fn run(
         &mut self,
         _r: <Self::Ref as Query>::Output,
-        _m: <Self::Mut as QueryMut>::Output,
+        m: <Self::Mut as QueryMut>::Output,
         rr: <Self::ResRef as ResQuery>::Output,
-        _rm: <Self::ResMut as ResQueryMut>::Output,
+        rm: <Self::ResMut as ResQueryMut>::Output,
     ) {
-        let (scene_mgr, render, _time) = rr;
+        let (render, _time) = rr;
+        let scene_mgr = rm;
 
-        for scene in scene_mgr.iter_active_scene() {
+        // TODO: Improve me.
+        for renderables in m {
+            for renderable in renderables {
+                if renderable.dirty {
+                    let key = renderable.get_scene_key();
+                    let index = renderable.get_scene_node_index();
+
+                    let scene = scene_mgr.get_scene_mut(&key.into()).unwrap();
+                    scene
+                        .get_node_mut(index)
+                        .unwrap()
+                        .update_ltf(renderable.local_transform());
+
+                    renderable.dirty = false;
+                }
+            }
+        }
+
+        for (_key, scene) in scene_mgr.iter_active_scenes_mut() {
+            scene.update_transform();
             scene.run(
                 &render.surf_packs,
                 &mut self.surf_pack_bufs,

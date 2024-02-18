@@ -62,7 +62,7 @@ impl BindPack {
                 },
                 count: None,
             });
-            let mut buf_view = BufferView::new(desc.item_sizes[i], 1, 0);
+            let mut buf_view = BufferView::new(desc.item_sizes[i] as usize, 1, 0);
             buf_view.set_buffer(Rc::clone(desc.bufs[i]));
             builder.bindings.push(Binding::from(buf_view));
         }
@@ -160,8 +160,8 @@ impl Binding {
             (Self::Buffer(buf_view), wgpu::BindingType::Buffer { .. }) => {
                 wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                     buffer: buf_view.get_buffer(),
-                    offset: buf_view.get_offset(),
-                    size: NonZeroU64::new(buf_view.get_size()),
+                    offset: buf_view.offset() as u64,
+                    size: NonZeroU64::new(buf_view.size() as u64),
                 })
             }
             _ => unimplemented!(),

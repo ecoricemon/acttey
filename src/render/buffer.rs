@@ -2,10 +2,13 @@ use crate::{
     debug_format,
     primitive::mesh::InterleavedGeometry,
     render::{Gpu, RenderError},
-    util::gcd,
+    util::{gcd, View, Window},
 };
 use smallvec::SmallVec;
-use std::{num::NonZeroU64, rc::Rc};
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    rc::Rc,
+};
 use wgpu::util::DeviceExt;
 
 pub struct BufferPool {
@@ -319,39 +322,44 @@ impl BufferGroup {
     ) -> Result<Rc<wgpu::Buffer>, RenderError> {
         // Determines required size.
         let need_size = match size_or_data {
-            SizeOrData::Size(size) => {
-                // If size was given, make it to be multiple of `wgpu::COPY_BUFFER_ALIGNMENT`.
-                to_aligned_addr(size)
+            SizeOrData::Size(size, true) => {
+                to_aligned_addr(size) // Must be a multiple of `wgpu::COPY_BUFFER_ALIGNMENT`.
+            },
+            SizeOrData::Size(size, false) => {
+                // If only size is required, we can reuse old buffers.
+                let need_size = to_aligned_addr(size);
+                if let Some(i) = self.find_best_fit_unused(need_size, usage) {
+                    return Ok(Rc::clone(&self.bufs[i]));
+                }
+                need_size
             }
             SizeOrData::Data(data) => data.len() as u64,
         };
-        // If there's allocated and unused buffer.
-        if let Some(i) = self.find_best_fit_unused(need_size, usage) {
-            Ok(Rc::clone(&self.bufs[i]))
-        }
-        // No available buffers, then sees to be able to allocate a new buffer.
-        // Quota is OK?
-        else if need_size < self.max_size && self.alloc_size + need_size <= self.quota {
-            // Can we append?
-            if self.bufs.len() < self.max_num {
-                Ok(Rc::clone(self.alloc(device, usage, size_or_data)))
-            }
-            // We can't append a new buffer.
-            else {
-                let errmsg = debug_format!(
-                    "buffer({}) reached to its maximum number of buffers",
+
+        // We're going to allocate new buffer. 
+        if need_size > self.max_size {
+            Err(RenderError::BufferError(
+                debug_format!(
+                    "buffer({}) reached to its maximum size",
                     self.label.as_deref().unwrap_or_default(),
-                );
-                Err(RenderError::BufferError(errmsg))
-            }
-        }
-        // Impossoble due to the quota.
-        else {
-            let errmsg = debug_format!(
-                "buffer({}) reached to its quota",
-                self.label.as_deref().unwrap_or_default(),
-            );
-            Err(RenderError::BufferError(errmsg))
+                )
+            ))
+        } else if self.alloc_size + need_size > self.quota {
+            Err(RenderError::BufferError(
+                debug_format!(
+                    "buffer({}) reached to its quota",
+                    self.label.as_deref().unwrap_or_default(),
+                )
+            ))
+        } else if self.bufs.len() >= self.max_num {
+            Err(RenderError::BufferError(
+                debug_format!(
+                    "buffer({}) reached to its maximum number",
+                    self.label.as_deref().unwrap_or_default(),
+                )
+            ))
+        } else {
+            Ok(Rc::clone(self.alloc(device, usage, size_or_data)))
         }
     }
 
@@ -379,11 +387,11 @@ impl BufferGroup {
         size_or_data: SizeOrData,
     ) -> &Rc<wgpu::Buffer> {
         let buf = match size_or_data {
-            SizeOrData::Size(size) => device.create_buffer(&wgpu::BufferDescriptor {
+            SizeOrData::Size(size, map) => device.create_buffer(&wgpu::BufferDescriptor {
                 label: self.label.as_deref(),
                 size,
                 usage,
-                mapped_at_creation: true,
+                mapped_at_creation: map,
             }),
             SizeOrData::Data(data) => {
                 device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -407,13 +415,14 @@ impl Default for BufferGroup {
 }
 
 pub enum SizeOrData<'a> {
-    Size(u64),
+    /// Size in bytes, map
+    Size(u64, bool),
     Data(&'a [u8]),
 }
 
 impl<'a> From<u64> for SizeOrData<'a> {
     fn from(value: u64) -> Self {
-        Self::Size(value)
+        Self::Size(value, false)
     }
 }
 
@@ -439,8 +448,8 @@ pub struct GeometryBufferView {
 impl GeometryBufferView {
     pub fn dummy(geo_ref: Rc<()>) -> Self {
         Self {
-            vert_buf_view: BufferView::new(u64::MAX, u64::MAX, u64::MAX),
-            index_buf_view: BufferView::new(u64::MAX, u64::MAX, u64::MAX),
+            vert_buf_view: BufferView::new(usize::MAX, usize::MAX, usize::MAX),
+            index_buf_view: BufferView::new(usize::MAX, usize::MAX, usize::MAX),
             _geo_ref: geo_ref,
         }
     }
@@ -484,55 +493,48 @@ impl GeometryBufferView {
     }
 }
 
-/// Integrated buffer meta.
-/// [`wgpu::Buffer`] is a neutral stroge, and [`BufferView`] is meta of it.
-/// This includes way to see the buffer such as offset and size.
-/// You can create [`wgpu::BufferSlice`] from this because this includes all information for it.
+/// Unified buffer meta-data.
+/// [`wgpu::Buffer`] is neutral stroge, and [`BufferView`] is meta-data of it.
+/// This includes a way to see the buffer.
+/// Also, you can create [`wgpu::BufferSlice`] from this.
 #[derive(Debug, Clone)]
 pub struct BufferView {
-    /// *Required field*  
-    /// Single item size in bytes.
-    item_size: NonZeroU64,
+    view: View<usize>,
 
-    /// *Required field*  
-    /// Number of items.
-    /// None means all items from the `start_index`.
-    item_num: Option<NonZeroU64>,
-
-    /// *Required field*  
-    /// Start index of this view in the buffer.
-    /// Use [`Self::get_offset()`] if you want offset in bytes.
-    index_offset: u64,
-
-    /// *Optional field*  
+    /// *Optional field, default is None*  
     /// Buffer itself.
     buf: Option<Rc<wgpu::Buffer>>,
 
-    /// *Optional field*  
+    /// *Optional field, default is empty vector*  
     /// Vertex attributes.
     vert_attrs: Vec<wgpu::VertexAttribute>,
+
+    /// *Optional field, default is Vertex*  
+    /// Vertex buffer step mode (Vertex or Instance).
+    vert_step_mode: wgpu::VertexStepMode,
 }
 
 impl BufferView {
     /// Creates a view describing how to access the buffer.
-    /// You can set `item_num` to zero to express all remaing items from the `index_offset`.
+    /// See [`BufferView::new`] for more details.
     ///
     /// # Panics
     ///
     /// Panics if `item_size` is zero.
-    pub fn new(item_size: u64, item_num: u64, index_offset: u64) -> Self {
+    pub fn new(item_size: usize, item_num: usize, index_offset: usize) -> Self {
+        assert!(item_size > 0);
+
         Self {
-            item_size: NonZeroU64::new(item_size).unwrap(),
-            item_num: NonZeroU64::new(item_num),
-            index_offset,
+            view: View::new(index_offset, item_num, item_size),
             buf: None,
             vert_attrs: Vec::new(),
+            vert_step_mode: wgpu::VertexStepMode::Vertex,
         }
     }
 
     /// Creates a view from [`InterleavedGeometry`].
     pub fn new_from_geometry(int_geo: &InterleavedGeometry) -> Self {
-        let mut inst = Self::new(int_geo.vertex_size as u64, int_geo.vertex_num as u64, 0);
+        let mut inst = Self::new(int_geo.vertex_size, int_geo.vertex_num, 0);
         inst.set_vertex_attributes(&int_geo.attrs);
         inst
     }
@@ -563,31 +565,42 @@ impl BufferView {
         &self.vert_attrs
     }
 
+    /// Sets **optional** vertex buffer step mode.
     #[inline]
-    pub fn get_item_size(&self) -> u64 {
-        self.item_size.get()
+    pub fn set_vertex_step_mode(&mut self, mode: wgpu::VertexStepMode) {
+        self.vert_step_mode = mode;
     }
 
     #[inline]
-    pub fn get_item_num(&self) -> u64 {
-        self.item_num.map(|num| num.get()).unwrap_or_default()
+    pub fn get_vertex_step_mode(&self) -> wgpu::VertexStepMode {
+        self.vert_step_mode
     }
 
     #[inline]
-    pub fn get_index_offset(&self) -> u64 {
-        self.index_offset
+    pub fn get_item_size(&self) -> usize {
+        self.view.get_item_size()
+    }
+
+    #[inline]
+    pub fn get_item_num(&self) -> usize {
+        self.view.len
+    }
+
+    #[inline]
+    pub fn get_index_offset(&self) -> usize {
+        self.view.offset
     }
 
     /// Returns offset in bytes in the buffer.
     #[inline]
-    pub fn get_offset(&self) -> u64 {
+    pub fn offset(&self) -> usize {
         self.get_item_size() * self.get_index_offset()
     }
 
     /// Returns total size in bytes of this view.
     /// It can be zero that means that the total range from the offset.
     #[inline]
-    pub fn get_size(&self) -> u64 {
+    pub fn size(&self) -> usize {
         self.get_item_size() * self.get_item_num()
     }
 
@@ -597,8 +610,8 @@ impl BufferView {
     /// Call [`Self::set_buffer`] to do it.
     pub fn as_slice(&self) -> wgpu::BufferSlice {
         let buf = self.get_buffer();
-        let offset = self.get_offset();
-        let size = self.get_size();
+        let offset = self.offset() as u64;
+        let size = self.size() as u64;
         if size != 0 {
             buf.slice(offset..offset + size)
         } else {
@@ -616,13 +629,13 @@ impl BufferView {
 
     /// # Panics
     ///
-    /// Panics if vertex attributes is not set.
-    /// Call [`Self::set_buffer`] to do it.
+    /// Panics if vertex attributes are not set. You can set them by calling
+    /// [`Self::set_vertex_attributes`].
     pub fn create_buffer_layout(&self) -> wgpu::VertexBufferLayout {
         assert!(!self.get_vertex_attributes().is_empty());
         wgpu::VertexBufferLayout {
-            array_stride: self.get_item_size(),
-            step_mode: wgpu::VertexStepMode::Vertex,
+            array_stride: self.get_item_size() as u64,
+            step_mode: self.vert_step_mode,
             attributes: &self.get_vertex_attributes(),
         }
     }

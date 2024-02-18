@@ -112,7 +112,13 @@ impl MeshResource {
         key: ResKey,
         geo: impl Into<Geometry>,
     ) -> Option<RcValue<Geometry>> {
-        self.geos.insert(key, RcValue::new(geo.into()))
+        self._add_geometry(key, geo.into())
+    }
+
+    /// A function with concrete types, not generic, for [`Self::add_geometry`].
+    /// It can help us to ruduce binary size caused by generic bloating.
+    fn _add_geometry(&mut self, key: ResKey, geo: Geometry) -> Option<RcValue<Geometry>> {
+        self.geos.insert(key, RcValue::new(geo))
     }
 
     /// Adds a new material and returns optional old material.
@@ -122,7 +128,13 @@ impl MeshResource {
         key: ResKey,
         mat: impl Into<Material>,
     ) -> Option<RcValue<Material>> {
-        self.mats.insert(key, RcValue::new(mat.into()))
+        self._add_material(key, mat.into())
+    }
+
+    /// A function with concrete types, not generic, for [`Self::add_material`].
+    /// It can help us to ruduce binary size caused by generic bloating.
+    fn _add_material(&mut self, key: ResKey, mat: Material) -> Option<RcValue<Material>> {
+        self.mats.insert(key, RcValue::new(mat))
     }
 
     /// Adds a new mesh.
@@ -313,7 +325,7 @@ impl Default for MeshResource {
 #[derive(Debug, Clone, Default)]
 pub struct SeparateGeometry {
     /// Geometry attributes such as position vector and normal vector.
-    attrs: Vec<GeometryAttribute>,
+    attrs: Vec<VertexAttribute>,
     indices: GeometryIndices,
     position_index: usize,
     normal_index: usize,
@@ -344,30 +356,29 @@ impl SeparateGeometry {
     }
 
     #[inline]
-    pub fn with_position(&mut self, values: GeometryAttributeValues) -> &mut Self {
+    pub fn with_position(&mut self, values: VertexAttributeValues) -> &mut Self {
         self.position_index =
-            self.put_attribute(self.position_index, GeometryAttribute::Position(values));
+            self.put_attribute(self.position_index, VertexAttribute::Position(values));
         self
     }
 
     #[inline]
-    pub fn with_normal(&mut self, values: GeometryAttributeValues) -> &mut Self {
-        self.normal_index =
-            self.put_attribute(self.normal_index, GeometryAttribute::Normal(values));
+    pub fn with_normal(&mut self, values: VertexAttributeValues) -> &mut Self {
+        self.normal_index = self.put_attribute(self.normal_index, VertexAttribute::Normal(values));
         self
     }
 
     #[inline]
-    pub fn with_tangent(&mut self, values: GeometryAttributeValues) -> &mut Self {
+    pub fn with_tangent(&mut self, values: VertexAttributeValues) -> &mut Self {
         self.tangent_index =
-            self.put_attribute(self.tangent_index, GeometryAttribute::Tangent(values));
+            self.put_attribute(self.tangent_index, VertexAttribute::Tangent(values));
         self
     }
 
-    pub fn with_uv(&mut self, values: GeometryAttributeValues) -> &mut Self {
+    pub fn with_uv(&mut self, values: VertexAttributeValues) -> &mut Self {
         if self.uv_index == Self::INVALID_INDEX {
             self.uv_index =
-                self.put_attribute(self.uv_index, GeometryAttribute::TexCoord(vec![values]));
+                self.put_attribute(self.uv_index, VertexAttribute::TexCoord(vec![values]));
         } else {
             assert_eq!(self.attrs[0].len(), values.len());
             self.attrs[self.uv_index].insert(values);
@@ -375,10 +386,10 @@ impl SeparateGeometry {
         self
     }
 
-    pub fn with_color(&mut self, values: GeometryAttributeValues) -> &mut Self {
+    pub fn with_color(&mut self, values: VertexAttributeValues) -> &mut Self {
         if self.color_index == Self::INVALID_INDEX {
             self.color_index =
-                self.put_attribute(self.color_index, GeometryAttribute::Color(vec![values]));
+                self.put_attribute(self.color_index, VertexAttribute::Color(vec![values]));
         } else {
             assert_eq!(self.attrs[0].len(), values.len());
             self.attrs[self.color_index].insert(values);
@@ -386,15 +397,15 @@ impl SeparateGeometry {
         self
     }
 
-    pub fn with_user(&mut self, user: char, values: GeometryAttributeValues) -> &mut Self {
+    pub fn with_user(&mut self, user: char, values: VertexAttributeValues) -> &mut Self {
         assert!(matches!(user, 'A'..='D' | 'a'..='d'));
         let ui = user.to_ascii_uppercase() as usize - 'A' as usize;
         if self.user_indices[ui] == Self::INVALID_INDEX {
             let attr = match ui {
-                0 => GeometryAttribute::UserA(vec![values]),
-                1 => GeometryAttribute::UserB(vec![values]),
-                2 => GeometryAttribute::UserC(vec![values]),
-                3 => GeometryAttribute::UserD(vec![values]),
+                0 => VertexAttribute::UserA(vec![values]),
+                1 => VertexAttribute::UserB(vec![values]),
+                2 => VertexAttribute::UserC(vec![values]),
+                3 => VertexAttribute::UserD(vec![values]),
                 _ => unreachable!(),
             };
             self.user_indices[ui] = self.put_attribute(self.user_indices[ui], attr);
@@ -411,77 +422,77 @@ impl SeparateGeometry {
         self
     }
 
-    pub fn get_attribute(&self, i: usize) -> Option<&GeometryAttribute> {
+    pub fn get_attribute(&self, i: usize) -> Option<&VertexAttribute> {
         self.attrs.get(i)
     }
 
-    pub fn get_attribute_mut(&mut self, i: usize) -> Option<&mut GeometryAttribute> {
+    pub fn get_attribute_mut(&mut self, i: usize) -> Option<&mut VertexAttribute> {
         self.attrs.get_mut(i)
     }
 
     #[inline]
-    pub fn get_position(&self) -> Option<&GeometryAttributeValues> {
+    pub fn get_position(&self) -> Option<&VertexAttributeValues> {
         self.attrs
             .get(self.position_index)
             .map(|attr| attr.as_values(0))
     }
 
     #[inline]
-    pub fn get_position_mut(&mut self) -> Option<&mut GeometryAttributeValues> {
+    pub fn get_position_mut(&mut self) -> Option<&mut VertexAttributeValues> {
         self.attrs
             .get_mut(self.position_index)
             .map(|attr| attr.as_values_mut(0))
     }
 
     #[inline]
-    pub fn get_normal(&self) -> Option<&GeometryAttributeValues> {
+    pub fn get_normal(&self) -> Option<&VertexAttributeValues> {
         self.attrs
             .get(self.normal_index)
             .map(|attr| attr.as_values(0))
     }
 
     #[inline]
-    pub fn get_normal_mut(&mut self) -> Option<&mut GeometryAttributeValues> {
+    pub fn get_normal_mut(&mut self) -> Option<&mut VertexAttributeValues> {
         self.attrs
             .get_mut(self.normal_index)
             .map(|attr| attr.as_values_mut(0))
     }
 
     #[inline]
-    pub fn get_tangent(&self) -> Option<&GeometryAttributeValues> {
+    pub fn get_tangent(&self) -> Option<&VertexAttributeValues> {
         self.attrs
             .get(self.tangent_index)
             .map(|attr| attr.as_values(0))
     }
 
     #[inline]
-    pub fn get_tangent_mut(&mut self) -> Option<&mut GeometryAttributeValues> {
+    pub fn get_tangent_mut(&mut self) -> Option<&mut VertexAttributeValues> {
         self.attrs
             .get_mut(self.tangent_index)
             .map(|attr| attr.as_values_mut(0))
     }
 
     #[inline]
-    pub fn get_uv(&self, i: usize) -> Option<&GeometryAttributeValues> {
+    pub fn get_uv(&self, i: usize) -> Option<&VertexAttributeValues> {
         self.attrs.get(self.uv_index).map(|attr| attr.as_values(i))
     }
 
     #[inline]
-    pub fn get_uv_mut(&mut self, i: usize) -> Option<&mut GeometryAttributeValues> {
+    pub fn get_uv_mut(&mut self, i: usize) -> Option<&mut VertexAttributeValues> {
         self.attrs
             .get_mut(self.uv_index)
             .map(|attr| attr.as_values_mut(i))
     }
 
     #[inline]
-    pub fn get_color(&self, i: usize) -> Option<&GeometryAttributeValues> {
+    pub fn get_color(&self, i: usize) -> Option<&VertexAttributeValues> {
         self.attrs
             .get(self.color_index)
             .map(|attr| attr.as_values(i))
     }
 
     #[inline]
-    pub fn get_color_mut(&mut self, i: usize) -> Option<&mut GeometryAttributeValues> {
+    pub fn get_color_mut(&mut self, i: usize) -> Option<&mut VertexAttributeValues> {
         self.attrs
             .get_mut(self.color_index)
             .map(|attr| attr.as_values_mut(i))
@@ -500,7 +511,7 @@ impl SeparateGeometry {
     /// # Panics
     ///
     /// Panics if `attr` has different length.
-    fn put_attribute(&mut self, index: usize, attr: GeometryAttribute) -> usize {
+    fn put_attribute(&mut self, index: usize, attr: VertexAttribute) -> usize {
         // All attributes must have the same length.
         if !self.attrs.is_empty() {
             assert_eq!(self.attrs[0].len(), attr.len());
@@ -523,24 +534,24 @@ impl SeparateGeometry {
         self.attrs.sort_unstable_by_key(|attr| attr.order());
         for (i, attr) in self.attrs.iter().enumerate() {
             match attr {
-                GeometryAttribute::Position(..) => self.position_index = i,
-                GeometryAttribute::Normal(..) => self.normal_index = i,
-                GeometryAttribute::Tangent(..) => self.tangent_index = i,
-                GeometryAttribute::TexCoord(..) => self.uv_index = i,
-                GeometryAttribute::Color(..) => self.color_index = i,
-                GeometryAttribute::Joint(..) => self.joint_index = i,
-                GeometryAttribute::Weight(..) => self.weight_index = i,
-                GeometryAttribute::UserA(..) => self.user_indices[0] = i,
-                GeometryAttribute::UserB(..) => self.user_indices[1] = i,
-                GeometryAttribute::UserC(..) => self.user_indices[2] = i,
-                GeometryAttribute::UserD(..) => self.user_indices[3] = i,
+                VertexAttribute::Position(..) => self.position_index = i,
+                VertexAttribute::Normal(..) => self.normal_index = i,
+                VertexAttribute::Tangent(..) => self.tangent_index = i,
+                VertexAttribute::TexCoord(..) => self.uv_index = i,
+                VertexAttribute::Color(..) => self.color_index = i,
+                VertexAttribute::Joint(..) => self.joint_index = i,
+                VertexAttribute::Weight(..) => self.weight_index = i,
+                VertexAttribute::UserA(..) => self.user_indices[0] = i,
+                VertexAttribute::UserB(..) => self.user_indices[1] = i,
+                VertexAttribute::UserC(..) => self.user_indices[2] = i,
+                VertexAttribute::UserD(..) => self.user_indices[3] = i,
             }
         }
     }
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum GeometryAttributeVariant {
+pub enum VertexAttributeVariant {
     Position,
     Normal,
     Tangent,
@@ -554,40 +565,40 @@ pub enum GeometryAttributeVariant {
     UserD,
 }
 
-impl From<&GeometryAttribute> for GeometryAttributeVariant {
-    fn from(value: &GeometryAttribute) -> Self {
+impl From<&VertexAttribute> for VertexAttributeVariant {
+    fn from(value: &VertexAttribute) -> Self {
         match value {
-            GeometryAttribute::Position(..) => Self::Position,
-            GeometryAttribute::Normal(..) => Self::Normal,
-            GeometryAttribute::Tangent(..) => Self::Tangent,
-            GeometryAttribute::TexCoord(..) => Self::TexCoord,
-            GeometryAttribute::Color(..) => Self::Color,
-            GeometryAttribute::Joint(..) => Self::Joint,
-            GeometryAttribute::Weight(..) => Self::Weight,
-            GeometryAttribute::UserA(..) => Self::UserA,
-            GeometryAttribute::UserB(..) => Self::UserB,
-            GeometryAttribute::UserC(..) => Self::UserC,
-            GeometryAttribute::UserD(..) => Self::UserD,
+            VertexAttribute::Position(..) => Self::Position,
+            VertexAttribute::Normal(..) => Self::Normal,
+            VertexAttribute::Tangent(..) => Self::Tangent,
+            VertexAttribute::TexCoord(..) => Self::TexCoord,
+            VertexAttribute::Color(..) => Self::Color,
+            VertexAttribute::Joint(..) => Self::Joint,
+            VertexAttribute::Weight(..) => Self::Weight,
+            VertexAttribute::UserA(..) => Self::UserA,
+            VertexAttribute::UserB(..) => Self::UserB,
+            VertexAttribute::UserC(..) => Self::UserC,
+            VertexAttribute::UserD(..) => Self::UserD,
         }
     }
 }
 
 #[derive(Debug, Clone)]
-pub enum GeometryAttribute {
-    Position(GeometryAttributeValues),
-    Normal(GeometryAttributeValues),
-    Tangent(GeometryAttributeValues),
-    TexCoord(Vec<GeometryAttributeValues>), // TEXTCOORD_n, They must have the same length.
-    Color(Vec<GeometryAttributeValues>),    // COLOR_n, They must have the same length.
-    Joint(Vec<GeometryAttributeValues>),    // JOINTS_n, They must have the same length.
-    Weight(Vec<GeometryAttributeValues>),   // WEIGHTS_n, They must have the same length.
-    UserA(Vec<GeometryAttributeValues>),
-    UserB(Vec<GeometryAttributeValues>),
-    UserC(Vec<GeometryAttributeValues>),
-    UserD(Vec<GeometryAttributeValues>),
+pub enum VertexAttribute {
+    Position(VertexAttributeValues),
+    Normal(VertexAttributeValues),
+    Tangent(VertexAttributeValues),
+    TexCoord(Vec<VertexAttributeValues>), // TEXTCOORD_n, They must have the same length.
+    Color(Vec<VertexAttributeValues>),    // COLOR_n, They must have the same length.
+    Joint(Vec<VertexAttributeValues>),    // JOINTS_n, They must have the same length.
+    Weight(Vec<VertexAttributeValues>),   // WEIGHTS_n, They must have the same length.
+    UserA(Vec<VertexAttributeValues>),
+    UserB(Vec<VertexAttributeValues>),
+    UserC(Vec<VertexAttributeValues>),
+    UserD(Vec<VertexAttributeValues>),
 }
 
-impl GeometryAttribute {
+impl VertexAttribute {
     #[inline]
     pub fn num(&self) -> usize {
         match self {
@@ -645,7 +656,7 @@ impl GeometryAttribute {
     }
 
     #[inline]
-    pub fn as_values(&self, inner_i: usize) -> &GeometryAttributeValues {
+    pub fn as_values(&self, inner_i: usize) -> &VertexAttributeValues {
         match self {
             Self::Position(v) => v,
             Self::Normal(v) => v,
@@ -662,7 +673,7 @@ impl GeometryAttribute {
     }
 
     #[inline]
-    pub fn as_values_mut(&mut self, inner_i: usize) -> &mut GeometryAttributeValues {
+    pub fn as_values_mut(&mut self, inner_i: usize) -> &mut VertexAttributeValues {
         match self {
             Self::Position(v) => v,
             Self::Normal(v) => v,
@@ -701,7 +712,7 @@ impl GeometryAttribute {
     /// If this is a nested vector of attribute values,
     /// `values` is appended to the end of nested vector.
     #[inline]
-    pub fn insert(&mut self, values: GeometryAttributeValues) {
+    pub fn insert(&mut self, values: VertexAttributeValues) {
         match self {
             Self::Position(v) => *v = values,
             Self::Normal(v) => *v = values,
@@ -736,7 +747,7 @@ impl GeometryAttribute {
 }
 
 #[derive(Debug, Clone)]
-pub enum GeometryAttributeValues {
+pub enum VertexAttributeValues {
     VecUint8x4(Vec<Vector<u8, 4>>),
     VecUnorm8x2(Vec<Vector<u8, 2>>),
     VecUnorm8x4(Vec<Vector<u8, 4>>),
@@ -748,7 +759,7 @@ pub enum GeometryAttributeValues {
     VecFloat32x4(Vec<Vector<f32, 4>>),
 }
 
-impl GeometryAttributeValues {
+impl VertexAttributeValues {
     #[inline]
     pub fn from_vec_uint8x4(v: Vec<Vector<u8, 4>>) -> Self {
         Self::VecUint8x4(v)
@@ -860,25 +871,25 @@ impl GeometryAttributeValues {
 
 macro_rules! impl_from_for_geometry_attribute_values {
     ($x:ty, $y:ident) => {
-        impl From<Vec<$x>> for GeometryAttributeValues {
+        impl From<Vec<$x>> for VertexAttributeValues {
             fn from(value: Vec<$x>) -> Self {
                 Self::$y(value)
             }
         }
 
-        impl<'a> From<&'a GeometryAttributeValues> for &'a Vec<$x> {
-            fn from(value: &'a GeometryAttributeValues) -> Self {
+        impl<'a> From<&'a VertexAttributeValues> for &'a Vec<$x> {
+            fn from(value: &'a VertexAttributeValues) -> Self {
                 match value {
-                    GeometryAttributeValues::$y(v) => v,
+                    VertexAttributeValues::$y(v) => v,
                     _ => panic!(),
                 }
             }
         }
 
-        impl<'a> From<&'a mut GeometryAttributeValues> for &'a mut Vec<$x> {
-            fn from(value: &'a mut GeometryAttributeValues) -> Self {
+        impl<'a> From<&'a mut VertexAttributeValues> for &'a mut Vec<$x> {
+            fn from(value: &'a mut VertexAttributeValues) -> Self {
                 match value {
-                    GeometryAttributeValues::$y(v) => v,
+                    VertexAttributeValues::$y(v) => v,
                     _ => panic!(),
                 }
             }
@@ -887,16 +898,16 @@ macro_rules! impl_from_for_geometry_attribute_values {
 }
 
 // Use these instead of From::from()
-// GeometryAttributeValues::from_vec_uint8x4()
-// GeometryAttributeValues::as_vec_uint8x4()
-// GeometryAttributeValues::as_vec_mut_uint8x4()
+// VertexAttributeValues::from_vec_uint8x4()
+// VertexAttributeValues::as_vec_uint8x4()
+// VertexAttributeValues::as_vec_mut_uint8x4()
 // impl_from_for_geometry_attribute_values!(Vector<u8, 4>, VecUint8x4);
 impl_from_for_geometry_attribute_values!(Vector<u8, 2>, VecUnorm8x2);
 impl_from_for_geometry_attribute_values!(Vector<u8, 4>, VecUnorm8x4);
 // Use these instead of From::from()
-// GeometryAttributeValues::from_vec_uint16x4()
-// GeometryAttributeValues::as_vec_uint16x4()
-// GeometryAttributeValues::as_vec_mut_uint16x4()
+// VertexAttributeValues::from_vec_uint16x4()
+// VertexAttributeValues::as_vec_uint16x4()
+// VertexAttributeValues::as_vec_mut_uint16x4()
 // impl_from_for_geometry_attribute_values!(Vector<u16, 4>, VecUint16x4);
 impl_from_for_geometry_attribute_values!(Vector<u16, 2>, VecUnorm16x2);
 impl_from_for_geometry_attribute_values!(Vector<u16, 4>, VecUnorm16x4);
@@ -914,8 +925,8 @@ pub struct InterleavedGeometry {
     /// You can see what kind of data is stored by referencing same index of `attr_kinds`.
     pub attrs: Vec<wgpu::VertexAttribute>,
 
-    /// [`GeometryAttributeVariant`] array.
-    pub attr_kinds: Vec<GeometryAttributeVariant>,
+    /// [`VertexAttributeVariant`] array.
+    pub attr_kinds: Vec<VertexAttributeVariant>,
 
     /// Vertex size in bytes.
     pub vertex_size: usize,
@@ -970,7 +981,7 @@ impl From<&SeparateGeometry> for InterleavedGeometry {
                     shader_location,
                 });
 
-                attr_kinds.push(GeometryAttributeVariant::from(attr));
+                attr_kinds.push(VertexAttributeVariant::from(attr));
 
                 attr_offset += chunk_size;
                 shader_location += 1;

@@ -71,6 +71,9 @@ version = "1.11.2"
 [dependencies.raw-window-handle]
 version = "0.5.2"
 
+[dependencies.bitflags]
+version = "2.4.2"
+
 [dependencies.erased-generic-trait]
 path = "crates/erased-generic-trait"
 version = "0.0.4"

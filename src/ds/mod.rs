@@ -1,3 +1,4 @@
+pub mod buf;
 pub mod dep_graph;
 pub mod generational;
 pub mod graph;

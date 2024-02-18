@@ -3,7 +3,9 @@ use crate::{
     ds::{
         generational::{GenIndexRc, GenVecRc},
         graph::DirectedGraph,
+        vec::{OptVec, SetVec},
     },
+    ecs::{ekey, traits::Entity, EntityKey},
     primitive::{
         camera::Camera,
         matrix::Matrix4f,
@@ -22,15 +24,21 @@ use crate::{
             Shader,
         },
     },
-    scene::SceneError,
-    util::{key::ResKey, AsMultiBytes, RcStr},
+    scene::{
+        hierarchy::{Node, SceneHierarchy},
+        SceneError,
+    },
+    util::{key::ResKey, update_slice_by, AsMultiBytes, RcStr, View},
 };
 use ahash::{AHashMap, AHashSet};
-use std::rc::Rc;
+use std::{hash::Hash, num::NonZeroUsize, rc::Rc};
 
 pub struct SceneManager {
-    pub(crate) scenes: AHashMap<ResKey, Scene>,
-    pub(crate) active: AHashSet<ResKey>,
+    /// Scenes.
+    scenes: AHashMap<ResKey, Scene>,
+
+    /// Active scenes.
+    active: AHashSet<ResKey>,
 }
 
 impl SceneManager {
@@ -41,15 +49,67 @@ impl SceneManager {
         }
     }
 
-    /// Inserts a new scene as active state.
-    pub fn insert_active_scene(&mut self, key: impl Into<ResKey>, scene: Scene) {
-        let key = key.into();
-        self.scenes.insert(key.clone(), scene);
+    pub fn get_scene<Q>(&self, key: &Q) -> Option<&Scene>
+    where
+        ResKey: std::borrow::Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.scenes.get(key)
+    }
+
+    pub fn get_scene_mut<Q>(&mut self, key: &Q) -> Option<&mut Scene>
+    where
+        ResKey: std::borrow::Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.scenes.get_mut(key)
+    }
+
+    pub fn insert_scene(&mut self, key: ResKey, scene: Scene) -> Option<Scene> {
+        self.scenes.insert(key, scene)
+    }
+
+    /// Tries to remove a scene, but it'll fail if the scene is in active state.
+    pub fn remove_scene<Q>(&mut self, key: &Q) -> Option<Scene>
+    where
+        ResKey: std::borrow::Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        if !self.active.contains(key) {
+            self.scenes.remove(key)
+        } else {
+            None
+        }
+    }
+
+    /// # Panic
+    ///
+    /// Panics if it failed to find scene using the given `key`.
+    pub fn activate_scene(&mut self, key: ResKey) {
+        assert!(self.scenes.contains_key(&key));
         self.active.insert(key);
     }
 
-    pub fn iter_active_scene<'a>(&'a self) -> impl Iterator<Item = &'a Scene> {
-        self.active.iter().map(|key| self.scenes.get(key).unwrap())
+    /// # Panic
+    ///
+    /// Panics if it failed to find scene using the given `key`.
+    pub fn deactivate_scene(&mut self, key: ResKey) {
+        assert!(self.scenes.contains_key(&key));
+        self.active.remove(&key);
+    }
+
+    pub fn iter_active_scenes<'a>(&'a self) -> impl Iterator<Item = (&'a ResKey, &'a Scene)> {
+        self.scenes
+            .iter()
+            .filter(|(key, _)| self.active.contains(key))
+    }
+
+    pub fn iter_active_scenes_mut<'a>(
+        &'a mut self,
+    ) -> impl Iterator<Item = (&'a ResKey, &'a mut Scene)> {
+        self.scenes
+            .iter_mut()
+            .filter(|(key, _)| self.active.contains(key))
     }
 }
 
@@ -66,7 +126,7 @@ pub struct Scene {
     pub(crate) canvases: Vec<RcStr>,
 
     /// Explains node relationships.
-    pub(crate) graph: DirectedGraph<NodeValue>,
+    pub(crate) hierarchy: SceneHierarchy,
 
     /// Cameras in the scene.
     pub(crate) cameras: AHashMap<ResKey, Camera>,
@@ -95,6 +155,9 @@ pub struct Scene {
     /// Material binds. They will be integrated at the end.
     pub(crate) mat_binds: AHashMap<ResKey, Rc<wgpu::BindGroup>>,
 
+    /// Instance buffer.
+    pub(crate) inst_buf: Option<Rc<wgpu::Buffer>>,
+
     /// Surface pack index.
     pub(crate) surf_pack_index: GenIndexRc,
 
@@ -108,12 +171,14 @@ pub struct Scene {
     pub(crate) pipelines: AHashMap<ResKey, Rc<wgpu::RenderPipeline>>,
 
     pub(crate) pass_graph: Option<PassGraph>,
+
+    pub(crate) gpu: Option<Rc<Gpu>>,
 }
 
 impl Scene {
     pub fn new() -> Self {
         Self {
-            graph: DirectedGraph::new(),
+            hierarchy: SceneHierarchy::new(),
             canvases: Vec::new(),
             cameras: AHashMap::new(),
             camera_bufs: AHashMap::new(),
@@ -124,28 +189,53 @@ impl Scene {
             mats: AHashMap::new(),
             mat_bufs: AHashMap::new(),
             mat_binds: AHashMap::new(),
+            inst_buf: None,
             surf_pack_index: GenIndexRc::dummy(),
             shader: None,
             geo_buf_size: None,
             pipelines: AHashMap::new(),
             pass_graph: None,
+            gpu: None,
         }
     }
 
+    #[inline]
+    pub fn set_gpu(&mut self, gpu: Rc<Gpu>) {
+        self.gpu = Some(gpu);
+    }
+
+    #[inline]
     pub fn add_canvas(&mut self, selectors: impl Into<RcStr>) -> &mut Self {
         self.canvases.push(selectors.into());
         self
     }
 
-    pub fn add_node(&mut self, parent: Option<usize>) -> NodeReturn {
-        let index = self.graph.add_node(NodeValue::default());
-        if let Some(parent) = parent {
-            self.graph.add_edge(parent, index);
-        }
+    #[inline]
+    pub fn add_node(&mut self, parent: usize) -> NodeReturn {
+        let index = self.hierarchy.add_node(parent);
         NodeReturn {
             recv: self,
             ret: index,
         }
+    }
+
+    #[inline]
+    pub fn get_node(&self, index: usize) -> Option<&Node> {
+        self.hierarchy.get_node(index)
+    }
+
+    #[inline]
+    pub fn get_node_mut(&mut self, index: usize) -> Option<&mut Node> {
+        self.hierarchy.get_node_mut(index)
+    }
+
+    #[inline]
+    pub fn update_transform(&mut self) {
+        self.hierarchy.update_transform();
+        let buf = self.inst_buf.as_ref().unwrap();
+        let data = self.hierarchy.get_transform_buffer_as_bytes();
+        let gpu = self.gpu.as_ref().unwrap();
+        gpu.queue.write_buffer(buf, 0, data);
     }
 
     // TODO: Allow multiple material and geometry layout?
@@ -261,6 +351,7 @@ impl Scene {
 
         // Adds vertex input and output struct and vertex stage.
         if let Some((geo_key, _)) = self.geos.iter().next() {
+            // Adds vertex input struct to the builder.
             let geo = mesh_res.get_geometry(geo_key).unwrap();
             ShaderHelper::add_vertex_input_struct(
                 &mut builder,
@@ -268,18 +359,42 @@ impl Scene {
                 false,
                 false,
             );
+
+            // Adds vertex output struct to the builder.
             ShaderHelper::add_vertex_output_struct(&mut builder);
+
+            // InstanceInput's locations starts from VertexInput's maximu location + 1.
+            let st = unsafe { // Safety: Infallible.
+                builder.get_structure("VertexInput").unwrap_unchecked()
+            };
+            let start_loc = st.members
+                .iter()
+                .filter_map(|member| {
+                    member.attrs.find_attribute_partial("location", None).map(|i| {
+                        member.attrs[i].inner_u32().unwrap() + 1
+                    })
+                })
+                .max()
+                .unwrap_or_default();
+
+            // Adds instance input struct to the builder.
+            ShaderHelper::add_instance_input_struct(&mut builder, start_loc);
 
             // TODO: Improve me.
             let mut vert_stage = wgsl_decl_fn!(
                 #[vertex]
-                fn vert_stage(input: VertexInput) -> VertexOutput {
+                fn vert_stage(vert: VertexInput, inst: InstanceInput) -> VertexOutput {
+                    // Assembles model matrix.
+                    let model = mat4x4f(
+                        inst.model0, inst.model1, inst.model2, inst.model3
+                    );
+
                     var output: VertexOutput;
                     #[ID(camera)] {
-                        output.position = camera.view_proj * vec4f(input.position, 1.0);
+                        output.position = camera.view_proj * model * vec4f(vert.position, 1.0);
                     }
                     #[ID(no_camera)] {
-                        output.position = vec4f(input.position, 1.0);
+                        output.position = model * vec4f(vert.position, 1.0);
                     }
                     return output;
                 }
@@ -369,6 +484,13 @@ impl Scene {
         geo_buf_size
     }
 
+    /// Validates and determines transforrm matrix buffer view for instancing.
+    #[inline]
+    pub fn get_transform_buffer_view(&mut self) -> View {
+        self.hierarchy.validate();
+        self.hierarchy.get_transform_buffer_view()
+    }
+
     /// Sets vertex and index buffers and writes geometres to the buffers immdiately.
     /// Then, the buffers are unmapped.
     /// Caller should give enough buffers to write geometries.
@@ -408,11 +530,8 @@ impl Scene {
             write_to_mapped_buffer(&index_buf, index_bytes, index_offset_bytes);
 
             // Updates vertex buffer view for this geometry.
-            let mut vert_buf_view = BufferView::new(
-                int_geo.vertex_size as u64,
-                int_geo.vertex_num as u64,
-                vert_offset as u64,
-            );
+            let mut vert_buf_view =
+                BufferView::new(int_geo.vertex_size, int_geo.vertex_num, vert_offset);
             vert_buf_view.set_buffer(Rc::clone(&vert_buf));
             vert_buf_view.set_vertex_attributes(&int_geo.attrs);
             view.set_vertex_buffer_view(vert_buf_view);
@@ -422,11 +541,7 @@ impl Scene {
                 wgpu::IndexFormat::Uint16 => 2,
                 wgpu::IndexFormat::Uint32 => 4,
             };
-            let mut index_buf_view = BufferView::new(
-                index_size as u64,
-                int_geo.index_num as u64,
-                index_offset as u64,
-            );
+            let mut index_buf_view = BufferView::new(index_size, int_geo.index_num, index_offset);
             index_buf_view.set_buffer(Rc::clone(&index_buf));
             view.set_index_buffer_view(index_buf_view);
 
@@ -441,22 +556,25 @@ impl Scene {
         index_buf.unmap();
     }
 
+    pub fn set_instance_buffer(&mut self, buf: Rc<wgpu::Buffer>) {
+        self.inst_buf = Some(buf);
+    }
+
     // TODO: Improve me and sync with shader.
     /// Builds pass graph and returns old value.
     pub fn build_pass_graph(
         &mut self,
-        gpu: &Rc<Gpu>,
         label: impl Into<RcStr>,
     ) -> Option<PassGraph> {
         const INVALID: usize = usize::MAX;
         let label = label.into();
-        let mut pass_graph = PassGraph::new(&label, gpu);
+        let mut pass_graph = PassGraph::new(&label, &self.gpu.as_ref().unwrap());
 
         // Uses only one camera for now.
         let cam_cmd = if let Some(cam) = self.camera_binds.values().next() {
             // TODO: Something like group index can be shared across resources.
             let cmd = SetBindGroupCmd::new(0, Rc::clone(cam));
-            pass_graph.add_command(cmd)
+            pass_graph.insert_command(cmd)
         } else {
             INVALID
         };
@@ -465,7 +583,7 @@ impl Scene {
             // Vertex
             let vert_buf = geo_buf_view.get_vertex_buffer();
             let vert_cmd = SetVertexBufferCmd::new(Rc::clone(vert_buf), 0, 0, 0);
-            let vert_cmd = pass_graph.add_command(vert_cmd);
+            let vert_cmd = pass_graph.insert_command(vert_cmd);
             // Index
             let index_buf_view = geo_buf_view.get_index_buffer_view();
             let index_cmd = SetIndexBufferCmd::new(
@@ -474,16 +592,24 @@ impl Scene {
                 0,
                 index_buf_view.as_index_format(),
             );
-            let index_cmd = pass_graph.add_command(index_cmd);
+            let index_cmd = pass_graph.insert_command(index_cmd);
             (vert_cmd, index_cmd)
         } else {
             (INVALID, INVALID)
         };
 
+        // Instance
+        let inst_cmd = if let Some(inst_buf) = self.inst_buf.as_ref() {
+            let inst_cmd = SetVertexBufferCmd::new(Rc::clone(inst_buf), 0, 0, 1);
+            pass_graph.insert_command(inst_cmd)
+        } else {
+            INVALID
+        };
+
         // Uses only one pipeline for now.
         let pipe_cmd = if let Some(pipe) = self.pipelines.values().next() {
             let cmd = SetPipelineCmd::new(Rc::clone(pipe));
-            pass_graph.add_command(cmd)
+            pass_graph.insert_command(cmd)
         } else {
             INVALID
         };
@@ -493,7 +619,7 @@ impl Scene {
         for (geo_key, mat_key) in self.mesh_map.values() {
             let mat_bind = self.mat_binds.get(mat_key).unwrap();
             let cmd = SetBindGroupCmd::new(1, Rc::clone(mat_bind));
-            let mat_cmd = pass_graph.add_command(cmd);
+            let mat_cmd = pass_graph.insert_command(cmd);
 
             let geo_view = self.geos.get(geo_key).unwrap();
             let vert_view = geo_view.get_vertex_buffer_view();
@@ -503,7 +629,7 @@ impl Scene {
             let start_index = index_view.get_index_offset() as u32;
             let end_index = start_index + index_view.get_item_num() as u32;
             let cmd = DrawIndexedCmd::new(start_index..end_index, base_vertex, 0..1);
-            let draw_cmd = pass_graph.add_command(cmd);
+            let draw_cmd = pass_graph.insert_command(cmd);
             if cam_cmd != INVALID {
                 pass_graph.add_dependency(draw_cmd, cam_cmd);
             }
@@ -512,6 +638,9 @@ impl Scene {
             }
             if index_cmd != INVALID {
                 pass_graph.add_dependency(draw_cmd, index_cmd);
+            }
+            if inst_cmd != INVALID {
+                pass_graph.add_dependency(draw_cmd, inst_cmd);
             }
             if pipe_cmd != INVALID {
                 pass_graph.add_dependency(draw_cmd, pipe_cmd);
@@ -549,36 +678,25 @@ impl Scene {
 decl_return_wrap!(NodeReturn, Scene, usize);
 
 impl<'a> NodeReturn<'a> {
-    /// Sets transform matrix to the current node.
-    pub fn with_transform(self, transform: Matrix4f) -> Self {
-        let Self {
-            recv: scene,
-            ret: node_index,
-        } = self;
-
-        // Sets the transform matrix at the node.
-        let node = scene.graph.get_node_mut(node_index).unwrap();
-        node.transform = transform;
-
-        Self {
-            recv: scene,
-            ret: node_index,
-        }
+    pub fn with_camera(self, key: impl Into<ResKey>, camera: impl Into<Camera>) -> Self {
+        self._with_camera(key.into(), camera.into())
     }
 
-    pub fn with_camera(self, key: impl Into<ResKey>, camera: impl Into<Camera>) -> Self {
+    fn _with_camera(self, key: ResKey, camera: Camera) -> Self {
         let Self {
             recv: scene,
             ret: node_index,
         } = self;
 
         // Adds camera to the scene.
-        let key = key.into();
         scene.cameras.insert(key.clone(), camera.into());
 
         // Sets the camera at the node.
-        let node = scene.graph.get_node_mut(node_index).unwrap();
-        node.camera = Some(key);
+        scene
+            .hierarchy
+            .get_node_mut(node_index)
+            .unwrap()
+            .set_camera(key);
 
         Self {
             recv: scene,
@@ -588,39 +706,52 @@ impl<'a> NodeReturn<'a> {
 
     /// Sets mesh to the current node.
     pub fn with_mesh(self, key: impl Into<ResKey>) -> Self {
+        self._with_mesh(key.into())
+    }
+
+    fn _with_mesh(self, key: ResKey) -> Self {
         let Self {
             recv: scene,
             ret: node_index,
         } = self;
 
         // Adds mesh to the scene.
-        let key = key.into();
         scene.meshes.insert(key.clone());
 
         // Sets mesh at the node.
-        let node = scene.graph.get_node_mut(node_index).unwrap();
-        node.mesh = Some(key);
+        scene
+            .hierarchy
+            .get_node_mut(node_index)
+            .unwrap()
+            .set_mesh(key);
 
         Self {
             recv: scene,
             ret: node_index,
         }
     }
-}
 
-#[derive(Debug, Clone)]
-pub struct NodeValue {
-    transform: Matrix4f,
-    camera: Option<ResKey>,
-    mesh: Option<ResKey>,
-}
+    #[inline]
+    pub fn with_entity<E: Entity>(self, eid: usize) -> Self {
+        self._with_entity(ekey!(E), eid)
+    }
 
-impl Default for NodeValue {
-    fn default() -> Self {
+    fn _with_entity(self, ekey: EntityKey, eid: usize) -> Self {
+        let Self {
+            recv: scene,
+            ret: node_index,
+        } = self;
+
+        // Adds mapping between ECS's entity and scene's node.
+        scene
+            .hierarchy
+            .get_node_mut(node_index)
+            .unwrap()
+            .set_entity(ekey, eid);
+
         Self {
-            transform: Matrix4f::identity(),
-            camera: None,
-            mesh: None,
+            recv: scene,
+            ret: node_index,
         }
     }
 }
