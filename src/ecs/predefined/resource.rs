@@ -1,9 +1,10 @@
 use crate::ecs::traits::Resource;
-use crate::scene::scene::SceneManager;
+use crate::scene::inner::SceneManager;
 use std::{any::TypeId, mem::transmute_copy};
 
+// TODO: Move EventManager from top module.
 // Exposes `EventManager` resource.
-pub use crate::app::event::EventManager;
+pub use crate::top::event::EventManager;
 impl Resource for EventManager {}
 
 // Exposes `Storage` resource.

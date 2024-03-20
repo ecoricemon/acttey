@@ -99,7 +99,7 @@ impl<K: Eq + Hash + Clone, V> GenMap<K, V> {
         K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let (value, gen) = self.items.get_mut(key)?; 
+        let (value, gen) = self.items.get_mut(key)?;
         f(value);
         *gen += 1;
         Some(*gen)
@@ -288,6 +288,10 @@ impl<T> GenVecRc<T> {
                 index,
                 _ref: self.refs[index.index].as_ref().unwrap(),
             })
+    }
+
+    pub fn sneak_iter_occupied_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.values.sneak_iter_occupied_mut()
     }
 
     #[inline]
@@ -565,6 +569,12 @@ impl<T> GenVec<T> {
                     .is_occupied()
                     .then_some(GenIndex::new(entry.gen, index))
             })
+    }
+
+    pub fn sneak_iter_occupied_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.entries
+            .iter_mut()
+            .filter_map(|entry| entry.value.as_mut())
     }
 
     /// Gets the item pointed by `index`.
@@ -919,8 +929,6 @@ impl<'a, S: Borrow<str>> From<&'a GenIndex> for LabelOrGenIndex<'a, S> {
 mod tests {
     use super::*;
     use wasm_bindgen_test::*;
-
-    wasm_bindgen_test_configure!(run_in_browser);
 
     #[wasm_bindgen_test]
     fn test_gen_vec() {

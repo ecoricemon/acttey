@@ -111,10 +111,8 @@ impl<K: DepKey> Default for DepGraph<K> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
     use wasm_bindgen_test::*;
-
-    wasm_bindgen_test_configure!(run_in_browser);
+    use std::collections::HashSet;
 
     struct Storage<K: DepKey> {
         keys: HashSet<K>,

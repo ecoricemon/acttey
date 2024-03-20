@@ -1,17 +1,11 @@
-use ahash::AHashSet;
-
 use crate::{
     ds::{
         buf::VarChunkBuffer,
         graph::DirectedGraph,
         vec::{OptVec, SetVec},
     },
-    ecs::EntityKey,
     primitive::matrix::Matrix4f,
-    util::{
-        key::ResKey,
-        update_slice_by, Index2, View,
-    },
+    util::{key::ResKey, slice::update_slice_by, Index2, View},
 };
 use std::{mem::size_of, num::NonZeroUsize};
 
@@ -75,14 +69,22 @@ impl SceneHierarchy {
     /// Retrieves transforrm matrix buffer view for instancing.
     #[inline]
     pub fn get_transform_buffer_view(&self) -> View {
-        View::new(
-            0, self.mesh_tfs.len(), size_of::<Matrix4f>()
-        )
+        View::new(0, self.mesh_tfs.len(), size_of::<Matrix4f>())
     }
 
     #[inline]
     pub fn get_transform_buffer_as_bytes(&self) -> &[u8] {
         (&self.mesh_tfs).into()
+    }
+
+    /// Retrieves a particular range of buffer corresponding to the `key`.
+    #[inline]
+    pub fn get_transform_buffer_range<Q>(&self, key: &Q) -> Option<std::ops::Range<usize>>
+    where
+        ResKey: std::borrow::Borrow<Q>,
+        Q: std::hash::Hash + Eq + ?Sized,
+    {
+        self.mesh_tfs.get_chunk_window2(key).map(|win| win.range())
     }
 
     /// Validates nodes that may be updated.
@@ -92,16 +94,16 @@ impl SceneHierarchy {
         }
     }
 
-    // TODO: Currently, traverse all nodes to determine they need updating.
-    // Can we remove this unnecessary traverse?
-    /// Updates node's transformation matrix.
-    pub fn update_transform(&mut self) {
+    // TODO: Currently, traverse all nodes to determine what node needs to be updated.
+    // Can we skip unmodified nodes?
+    /// Updates node's transformation matrices.
+    pub fn update_global_transform(&mut self) {
         // Validates nodes first.
         if !self.invalid_nodes.is_empty() {
             self.validate();
         }
 
-        let (nodes, outbounds, _) = self.tree.each();
+        let (nodes, outbounds, _) = self.tree.destruct();
 
         fn update(
             v: usize,
@@ -114,39 +116,53 @@ impl SceneHierarchy {
         ) {
             // Safety: v points to occupied node.
             let node = unsafe { nodes.get_unchecked_mut(v) };
-            need_update |= node.dirty.contains(NodeDirty::LOCAL_TRANSFORM);
+            need_update |= node.dirty.contains(NodeDirty::TRANSFORM);
             if need_update {
                 update_slice_by(nodes.as_slice_mut(), v, p, |node, parent| {
                     // Safety: v points to occupied node, but parent is None if p is zero.
                     let node = unsafe { node.as_mut().unwrap_unchecked() };
 
-                    // Finds the matrix from mesh or non-mesh buffers.
-                    let g_tf = if node.g_tf.is_single() {
-                        // Safety: 
-                        unsafe { non_mesh_tfs.get_unchecked_mut(node.g_tf.first) }
-                    } else {
-                        mesh_tfs.get_item_mut(node.g_tf.second, node.g_tf.first)
-                    };
-
                     // Updates global matrix using local matrices.
                     if let Some(parent) = parent {
-                        *g_tf = &parent.l_tf * &node.l_tf;
-                    } else {
-                        *g_tf = node.l_tf;
+                        node.tf = &parent.tf * &node.tf;
                     }
 
+                    // Writes to the buffer.
+                    let target = if node.gtf_index.is_single() {
+                        unsafe { non_mesh_tfs.get_unchecked_mut(node.gtf_index.first) }
+                    } else {
+                        mesh_tfs.get_item_mut(node.gtf_index.second, node.gtf_index.first)
+                    };
+                    *target = node.tf;
+
                     // Clears dirty flag.
-                    node.dirty.remove(NodeDirty::LOCAL_TRANSFORM);
+                    node.dirty.remove(NodeDirty::TRANSFORM);
                 });
             }
 
             for w in edges[v].values_occupied() {
-                update(w.get(), v, nodes, edges, mesh_tfs, non_mesh_tfs, need_update);
+                update(
+                    w.get(),
+                    v,
+                    nodes,
+                    edges,
+                    mesh_tfs,
+                    non_mesh_tfs,
+                    need_update,
+                );
             }
         }
 
         for v in outbounds[0].values_occupied() {
-            update(v.get(), 0, nodes, outbounds, &mut self.mesh_tfs, &mut self.non_mesh_tfs, false);
+            update(
+                v.get(),
+                0,
+                nodes,
+                outbounds,
+                &mut self.mesh_tfs,
+                &mut self.non_mesh_tfs,
+                false,
+            );
         }
     }
 
@@ -160,22 +176,22 @@ impl SceneHierarchy {
             }
             node.dirty.remove(CHECK);
 
-            match (node.g_tf.get(), node.get_mesh_key()) {
+            match (node.gtf_index.get(), node.get_mesh_key()) {
                 // Case 1. New node w/o mesh.
                 ((None, None), None) => {
-                    let ii = self.non_mesh_tfs.insert(Matrix4f::default());
-                    node.g_tf.into_single(ii);
-                },
+                    let ii = self.non_mesh_tfs.add(Matrix4f::default());
+                    node.gtf_index.into_single(ii);
+                }
                 // Case 2. New node w/ mesh.
                 ((None, None), Some(key)) => {
                     let ci = self.mesh_tfs.insert_new(key.clone(), Matrix4f::default());
                     let ii = self.mesh_tfs.chunk_len(ci) - 1;
-                    node.g_tf.into_pair(ii, ci);
-                },
+                    node.gtf_index.into_pair(ii, ci);
+                }
                 // Case 3. w/o mesh -> w/ mesh. (mesh has attached)
                 ((Some(ii), None), Some(key)) => {
                     todo!()
-                },
+                }
                 // Case 4. w/ mesh -> w/o mesh. (mesh has detached)
                 ((Some(ii), Some(ci)), None) => {
                     todo!()
@@ -190,36 +206,60 @@ impl SceneHierarchy {
     }
 }
 
+impl Default for SceneHierarchy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Node {
-    /// Local transformation matrix.
-    l_tf: Matrix4f,
+    // Dev note.
+    // `tf` is a copy of components::Drawable::transform::tf.
+    // The reasons why I've decieded to allow duplication are
+    // - ECS system should be able to access local transformation because users may manipulate it directly.
+    //   -> Accessing scene mutably is not good because it prevents running systems simultaneously.
+    //   -> So that local transfromation belongs to ECS components, not to scene.
+    // - Acquisition of individual local transformation from ECS storage is not cheap for now.
+    //   -> The process requires a couple of indirect access for finding the item.
+    //   -> It's intended to accesss whole items at once.
+    // - We should update global transformations at once according to hierarchy.
+    //   -> Because node's global transformation depends on either its local transformation and ancestor's global transformations.
+    // - As a result, I think duplication is the most cheap way.
+    /// Local transformation first, but during updating, becomes global transformation.
+    tf: Matrix4f,
 
     /// Index to Global transformation matrix.
     /// First one is index in matrix array.
     /// Second one is index of the matrix array for mesh when it's used.
-    g_tf: Index2,
+    gtf_index: Index2,
 
-    /// Optionable camera key.
+    /// Optional camera key.
     camera: Option<ResKey>,
 
-    /// Optionable mesh key and its corresponding chunk index.
+    /// Optional mesh key and its corresponding chunk index.
     mesh: Option<ResKey>,
 
-    /// Optionable mapping with ECS's entity.
-    entity: Option<(EntityKey, usize)>,
+    /// Optional mapping with ECS's entity.
+    entity: Option<(usize, usize)>,
 
     /// Dirty flag.
     dirty: NodeDirty,
 }
 
 impl Node {
-    // TODO: Use position, rotation, and scale vector (and quaternion) as parameters.
-    /// Updates local transformation matrix, and then marks dirty on it.
+    /// Updates transformation matrix, and then marks dirty on it.
     #[inline]
-    pub fn update_ltf(&mut self, tf: Matrix4f) {
-        self.l_tf = tf;
-        self.dirty |= NodeDirty::LOCAL_TRANSFORM;
+    pub fn set_transform(&mut self, tf: Matrix4f) {
+        self.tf = tf;
+        self.dirty |= NodeDirty::TRANSFORM;
+    }
+
+    /// Returns mutable reference of transformation matrix and marks dirty on it.
+    #[inline]
+    pub fn get_transform_mut(&mut self) -> &mut Matrix4f {
+        self.dirty |= NodeDirty::TRANSFORM;
+        &mut self.tf
     }
 
     /// Sets camera key.
@@ -250,14 +290,14 @@ impl Node {
 
     /// Sets mapping with ECS's entity.
     #[inline]
-    pub fn set_entity(&mut self, ekey: EntityKey, eid: usize) {
-        self.entity = Some((ekey, eid));
+    pub fn set_entity(&mut self, enti: usize, eid: usize) {
+        self.entity = Some((enti, eid));
         self.dirty |= NodeDirty::ENTITY;
     }
 
     /// Gets mapped ECS's entity key and its id.
     #[inline]
-    pub fn get_mapped_entity(&self) -> Option<(EntityKey, usize)> {
+    pub fn get_mapped_entity(&self) -> Option<(usize, usize)> {
         self.entity
     }
 }
@@ -265,8 +305,8 @@ impl Node {
 impl Default for Node {
     fn default() -> Self {
         Self {
-            l_tf: Matrix4f::default(),
-            g_tf: Index2::uninit(),
+            tf: Matrix4f::default(),
+            gtf_index: Index2::uninit(),
             camera: None,
             mesh: None,
             entity: None,
@@ -282,8 +322,8 @@ bitflags::bitflags! {
         /// Just created.
         const CREATED = 1 << 0;
 
-        /// Local transformation matrix has changed.
-        const LOCAL_TRANSFORM = 1 << 1;
+        /// Transformation matrix has changed.
+        const TRANSFORM = 1 << 1;
 
         /// Camera has changed.
         const CAMERA = 1 << 2;

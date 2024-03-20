@@ -1,14 +1,8 @@
 use crate::{
     decl_return_wrap,
-    ds::{
-        generational::{GenIndexRc, GenVecRc},
-        graph::DirectedGraph,
-        vec::{OptVec, SetVec},
-    },
-    ecs::{ekey, traits::Entity, EntityKey},
+    ds::generational::{GenIndexRc, GenVecRc},
     primitive::{
         camera::Camera,
-        matrix::Matrix4f,
         mesh::{Geometry, MeshResource},
     },
     render::{
@@ -28,10 +22,10 @@ use crate::{
         hierarchy::{Node, SceneHierarchy},
         SceneError,
     },
-    util::{key::ResKey, update_slice_by, AsMultiBytes, RcStr, View},
+    util::{key::ResKey, string::RcStr, AsMultiBytes, View},
 };
 use ahash::{AHashMap, AHashSet};
-use std::{hash::Hash, num::NonZeroUsize, rc::Rc};
+use std::{hash::Hash, rc::Rc};
 
 pub struct SceneManager {
     /// Scenes.
@@ -98,18 +92,24 @@ impl SceneManager {
         self.active.remove(&key);
     }
 
-    pub fn iter_active_scenes<'a>(&'a self) -> impl Iterator<Item = (&'a ResKey, &'a Scene)> {
+    pub fn iter_active_scenes(&self) -> impl Iterator<Item = (&ResKey, &Scene)> {
         self.scenes
             .iter()
             .filter(|(key, _)| self.active.contains(key))
     }
 
-    pub fn iter_active_scenes_mut<'a>(
-        &'a mut self,
-    ) -> impl Iterator<Item = (&'a ResKey, &'a mut Scene)> {
+    pub fn iter_active_scenes_mut(
+        &mut self,
+    ) -> impl Iterator<Item = (&ResKey, &mut Scene)> {
         self.scenes
             .iter_mut()
             .filter(|(key, _)| self.active.contains(key))
+    }
+}
+
+impl Default for SceneManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -123,7 +123,7 @@ impl SceneManager {
 #[derive(Debug, Clone)]
 pub struct Scene {
     /// Canvas selectors.
-    pub(crate) canvases: Vec<RcStr>,
+    pub(crate) canvases: Vec<u32>,
 
     /// Explains node relationships.
     pub(crate) hierarchy: SceneHierarchy,
@@ -205,8 +205,8 @@ impl Scene {
     }
 
     #[inline]
-    pub fn add_canvas(&mut self, selectors: impl Into<RcStr>) -> &mut Self {
-        self.canvases.push(selectors.into());
+    pub fn add_canvas(&mut self, handle: u32) -> &mut Self {
+        self.canvases.push(handle);
         self
     }
 
@@ -229,9 +229,10 @@ impl Scene {
         self.hierarchy.get_node_mut(index)
     }
 
+    /// Updates global transformations and inserts write command to GPU command queue.
     #[inline]
-    pub fn update_transform(&mut self) {
-        self.hierarchy.update_transform();
+    pub fn update_global_transform(&mut self) {
+        self.hierarchy.update_global_transform();
         let buf = self.inst_buf.as_ref().unwrap();
         let data = self.hierarchy.get_transform_buffer_as_bytes();
         let gpu = self.gpu.as_ref().unwrap();
@@ -248,7 +249,7 @@ impl Scene {
     ///
     /// - There's only one type of material.
     /// - All geometries have the same layout.
-    pub fn fill_geometry_and_material<'a>(
+    pub fn fill_geometry_and_material(
         &mut self,
         mesh_res: &MeshResource,
     ) -> Result<(), SceneError> {
@@ -260,7 +261,7 @@ impl Scene {
                 .variant();
             for mesh_key in self.meshes.iter().skip(1) {
                 let cur_var = mesh_res
-                    .get_material(mesh_key)
+                    .get_mesh_material(mesh_key)
                     .ok_or(SceneError::NotFoundResource)?
                     .variant();
                 if cur_var != first_var {
@@ -279,7 +280,7 @@ impl Scene {
                 .unwrap();
             for mesh_key in self.meshes.iter().skip(1) {
                 let cur_int_geo = mesh_res
-                    .get_geometry(mesh_key)
+                    .get_mesh_geometry(mesh_key)
                     .unwrap()
                     .as_interleaved()
                     .unwrap();
@@ -364,15 +365,18 @@ impl Scene {
             ShaderHelper::add_vertex_output_struct(&mut builder);
 
             // InstanceInput's locations starts from VertexInput's maximu location + 1.
-            let st = unsafe { // Safety: Infallible.
+            let st = unsafe {
+                // Safety: Infallible.
                 builder.get_structure("VertexInput").unwrap_unchecked()
             };
-            let start_loc = st.members
+            let start_loc = st
+                .members
                 .iter()
                 .filter_map(|member| {
-                    member.attrs.find_attribute_partial("location", None).map(|i| {
-                        member.attrs[i].inner_u32().unwrap() + 1
-                    })
+                    member
+                        .attrs
+                        .find_attribute_partial("location", None)
+                        .map(|i| member.attrs[i].inner_u32().unwrap() + 1)
                 })
                 .max()
                 .unwrap_or_default();
@@ -562,13 +566,10 @@ impl Scene {
 
     // TODO: Improve me and sync with shader.
     /// Builds pass graph and returns old value.
-    pub fn build_pass_graph(
-        &mut self,
-        label: impl Into<RcStr>,
-    ) -> Option<PassGraph> {
+    pub fn build_pass_graph(&mut self, label: impl Into<RcStr>) -> Option<PassGraph> {
         const INVALID: usize = usize::MAX;
         let label = label.into();
-        let mut pass_graph = PassGraph::new(&label, &self.gpu.as_ref().unwrap());
+        let mut pass_graph = PassGraph::new(&label, self.gpu.as_ref().unwrap());
 
         // Uses only one camera for now.
         let cam_cmd = if let Some(cam) = self.camera_binds.values().next() {
@@ -614,13 +615,18 @@ impl Scene {
             INVALID
         };
 
-        let mut pass = RenderPassDesc::new(label, Some(self.surf_pack_index.clone()));
-
-        for (geo_key, mat_key) in self.mesh_map.values() {
-            let mat_bind = self.mat_binds.get(mat_key).unwrap();
+        // Material binds
+        let mut mat_cmds = AHashMap::new();
+        for (mat_key, mat_bind) in self.mat_binds.iter() {
             let cmd = SetBindGroupCmd::new(1, Rc::clone(mat_bind));
             let mat_cmd = pass_graph.insert_command(cmd);
+            mat_cmds.insert(mat_key.clone(), mat_cmd);
+        }
 
+        let mut pass = RenderPassDesc::new(label, Some(self.surf_pack_index.clone()));
+
+        // Draw call per mesh.
+        for (mesh_key, (geo_key, mat_key)) in self.mesh_map.iter() {
             let geo_view = self.geos.get(geo_key).unwrap();
             let vert_view = geo_view.get_vertex_buffer_view();
             let index_view = geo_view.get_index_buffer_view();
@@ -628,8 +634,16 @@ impl Scene {
             let base_vertex = vert_view.get_index_offset() as i32;
             let start_index = index_view.get_index_offset() as u32;
             let end_index = start_index + index_view.get_item_num() as u32;
-            let cmd = DrawIndexedCmd::new(start_index..end_index, base_vertex, 0..1);
+
+            let inst_range = self.hierarchy.get_transform_buffer_range(mesh_key).unwrap();
+
+            let cmd = DrawIndexedCmd::new(
+                start_index..end_index,
+                base_vertex,
+                inst_range.start as u32..inst_range.end as u32,
+            );
             let draw_cmd = pass_graph.insert_command(cmd);
+
             if cam_cmd != INVALID {
                 pass_graph.add_dependency(draw_cmd, cam_cmd);
             }
@@ -645,6 +659,7 @@ impl Scene {
             if pipe_cmd != INVALID {
                 pass_graph.add_dependency(draw_cmd, pipe_cmd);
             }
+            let mat_cmd = *mat_cmds.get(mat_key).unwrap();
             pass_graph.add_dependency(draw_cmd, mat_cmd);
 
             pass.add_draw_command(draw_cmd);
@@ -675,6 +690,12 @@ impl Scene {
     }
 }
 
+impl Default for Scene {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 decl_return_wrap!(NodeReturn, Scene, usize);
 
 impl<'a> NodeReturn<'a> {
@@ -689,7 +710,7 @@ impl<'a> NodeReturn<'a> {
         } = self;
 
         // Adds camera to the scene.
-        scene.cameras.insert(key.clone(), camera.into());
+        scene.cameras.insert(key.clone(), camera);
 
         // Sets the camera at the node.
         scene
@@ -732,11 +753,7 @@ impl<'a> NodeReturn<'a> {
     }
 
     #[inline]
-    pub fn with_entity<E: Entity>(self, eid: usize) -> Self {
-        self._with_entity(ekey!(E), eid)
-    }
-
-    fn _with_entity(self, ekey: EntityKey, eid: usize) -> Self {
+    pub fn with_entity(self, enti: usize, eid: usize) -> Self {
         let Self {
             recv: scene,
             ret: node_index,
@@ -747,7 +764,7 @@ impl<'a> NodeReturn<'a> {
             .hierarchy
             .get_node_mut(node_index)
             .unwrap()
-            .set_entity(ekey, eid);
+            .set_entity(enti, eid);
 
         Self {
             recv: scene,

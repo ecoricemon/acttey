@@ -234,8 +234,7 @@ impl MeshResource {
     {
         self.meshes
             .get(key)
-            .map(|(geo_key, _)| self.get_geometry(geo_key.borrow()))
-            .flatten()
+            .and_then(|(geo_key, _)| self.get_geometry(geo_key.borrow()))
     }
 
     pub fn get_mesh_geometry_mut<Q>(&mut self, key: &Q) -> Option<&mut RcValue<Geometry>>
@@ -257,8 +256,7 @@ impl MeshResource {
     {
         self.meshes
             .get(key)
-            .map(|(_, mat_key)| self.get_material(mat_key.borrow()))
-            .flatten()
+            .and_then(|(_, mat_key)| self.get_material(mat_key.borrow()))
     }
 
     pub fn get_mesh_material_mut<Q>(&mut self, key: &Q) -> Option<&mut RcValue<Material>>

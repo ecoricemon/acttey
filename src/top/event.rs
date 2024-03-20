@@ -1,3 +1,4 @@
+use crate::worker::msg;
 use ahash::AHashMap;
 use std::collections::{
     vec_deque::{Drain, Iter},
@@ -10,7 +11,7 @@ pub enum Command {
 }
 
 pub enum Event {
-    Resized(u32),
+    Resized(msg::JsMsgCanvasResize),
     Mouse(u32, web_sys::MouseEvent),
     Keyboard(u32, web_sys::KeyboardEvent),
     Command(Command),
@@ -56,7 +57,7 @@ impl From<Closure<dyn Fn(web_sys::KeyboardEvent)>> for EventListener {
 
 pub struct EventManager {
     listeners: AHashMap<String, EventListener>,
-    resized: VecDeque<u32>,
+    resized: VecDeque<msg::JsMsgCanvasResize>,
     mouse: VecDeque<(u32, web_sys::MouseEvent)>,
     keyboard: VecDeque<(u32, web_sys::KeyboardEvent)>,
     command: VecDeque<Command>,
@@ -105,10 +106,7 @@ impl EventManager {
     #[inline]
     pub(crate) fn push(&mut self, event: Event) {
         match event {
-            Event::Resized(handle) => {
-                self.resized.clear();
-                self.resized.push_back(handle);
-            }
+            Event::Resized(msg) => self.resized.push_back(msg),
             Event::Mouse(handle, event) => self.mouse.push_back((handle, event)),
             Event::Keyboard(handle, event) => self.keyboard.push_back((handle, event)),
             Event::Command(command) => self.command.push_back(command),
@@ -129,12 +127,12 @@ impl EventManager {
     }
 
     #[inline]
-    pub fn iter_resized(&self) -> Iter<u32> {
+    pub fn iter_resized(&self) -> Iter<msg::JsMsgCanvasResize> {
         self.resized.iter()
     }
 
     #[inline]
-    pub fn drain_resized(&mut self) -> Drain<u32> {
+    pub fn drain_resized(&mut self) -> Drain<msg::JsMsgCanvasResize> {
         self.resized.drain(..)
     }
 

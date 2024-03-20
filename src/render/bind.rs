@@ -5,7 +5,7 @@ use crate::{
     },
     impl_from_for_enum,
     render::{buffer::BufferView, context::Gpu, descs},
-    util::{key::ResKey, ToStr},
+    util::{key::ResKey, string::ToStr},
 };
 use std::{num::NonZeroU64, rc::Rc};
 

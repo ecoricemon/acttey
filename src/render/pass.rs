@@ -9,7 +9,7 @@ use crate::{
         canvas::{Surface, SurfacePack, SurfacePackBuffer},
         Gpu, RenderError,
     },
-    util::RcStr,
+    util::string::RcStr,
 };
 use std::{num::NonZeroU64, ops::Range, rc::Rc};
 
@@ -89,7 +89,7 @@ impl PassGraph {
         visit_buf.resize(self.graph.len(), false);
 
         // Makes sure `surf_pack_bufs` is as long as passes. Each pass uses its own buffer.
-        surf_pack_bufs.resize_with(self.descs.len(), || SurfacePackBuffer::default());
+        surf_pack_bufs.resize_with(self.descs.len(), SurfacePackBuffer::default);
 
         // Creates command encoder.
         let mut encoder = self.create_command_encoder();

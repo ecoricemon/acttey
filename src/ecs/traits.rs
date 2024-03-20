@@ -1,6 +1,19 @@
-use crate::{ecs::storage::Storage, ty};
+use super::borrow_js::JsAtomic;
+use crate::{
+    ds::{
+        borrow::{BorrowError, Borrowed},
+        common::TypeInfo,
+    },
+    ecs::storage::Storage,
+    ty,
+};
 use erased_generic_trait::erase_generic;
-use std::any::{Any, TypeId};
+use std::{
+    any::{Any, TypeId},
+    fmt::Debug,
+    marker::PhantomData,
+    ptr::NonNull,
+};
 
 /// Granular data such as position, speed, etc.
 pub trait Component: 'static {}
@@ -14,7 +27,7 @@ pub trait Entity: 'static {
     /// DO NOT call me!
     /// This is an internal validation function.
     /// TODO: Validate component identity as well. use uuid?
-    /// TODO: Please fix me with better way :)
+    /// TODO: Please fix me with better way.
     fn validate();
 
     /// Notifies types to the collector.
@@ -23,6 +36,8 @@ pub trait Entity: 'static {
     fn notify_types<T>(collector: &mut T, storage: &mut Storage)
     where
         T: CollectGeneric + Downcast;
+
+    // fn notify_types(storage: &mut Storage, col: Option<Box<dyn Collect>>);
 
     /// Moves itself out into the collector.
     fn moves(self, collector: &mut Box<dyn Collect>, key: usize);
@@ -98,5 +113,168 @@ impl CollectGeneric for dyn Collect {
 }
 
 pub trait Downcast {
-    fn downcast<C: 'static>(any: &mut dyn Any) -> &mut [C];
+    fn downcast<T: 'static>(any: &mut dyn Any) -> &mut [T];
+}
+
+#[derive(Debug)]
+pub struct Getter {
+    pub(crate) me: *mut u8,
+    pub(crate) len: usize,
+    pub(crate) fn_get: unsafe fn(me: *mut u8, index: usize) -> NonNull<u8>,
+}
+
+impl Getter {
+    #[inline]
+    pub fn get(&self, index: usize) -> Option<NonNull<u8>> {
+        if index < self.len {
+            unsafe { Some(self.get_unchecked(index)) }
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub unsafe fn get_unchecked(&self, index: usize) -> NonNull<u8> {
+        (self.fn_get)(self.me, index)
+    }
+
+    #[inline]
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+}
+
+/// Method warpper of [`Getter`] for the `&T`.
+/// `&Getter` and `TypedGetter` are interchangable by the [`From`].
+#[derive(Debug)]
+pub struct TypedGetter<'a, T> {
+    inner: &'a Getter,
+    _marker: PhantomData<T>,
+}
+
+impl<'a, T> TypedGetter<'a, T> {
+    /// # Safety
+    ///
+    /// Boundary is checked, but this method is still unsafe.
+    /// See [`NonNull::as_ref`].
+    #[inline]
+    pub unsafe fn get(&self, index: usize) -> Option<&T> {
+        if index < self.len() {
+            // Safety:
+            unsafe { Some(self.get_unchecked(index)) }
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub unsafe fn get_unchecked(&self, index: usize) -> &T {
+        self.inner.get_unchecked(index).cast().as_ref()
+    }
+
+    #[inline]
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
+impl<'a, T> From<&'a Getter> for TypedGetter<'a, T> {
+    #[inline]
+    fn from(value: &'a Getter) -> Self {
+        Self {
+            inner: value,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<'a, T> From<TypedGetter<'a, T>> for &'a Getter {
+    #[inline]
+    fn from(value: TypedGetter<'a, T>) -> Self {
+        value.inner
+    }
+}
+
+/// Method warpper of [`Getter`] for the `&mut T`.
+/// `&mut Getter` and `TypedGetterMut` are interchangable by the [`From`].
+#[derive(Debug)]
+pub struct TypedGetterMut<'a, T> {
+    inner: &'a mut Getter,
+    _marker: PhantomData<T>,
+}
+
+impl<'a, T> TypedGetterMut<'a, T> {
+    /// # Safety
+    ///
+    /// Boundary is checked, but this method is still unsafe.
+    /// See [`NonNull::as_mut`].
+    #[inline]
+    pub unsafe fn get(&mut self, index: usize) -> Option<&mut T> {
+        if index < self.len() {
+            unsafe { Some(self.get_unchecked(index)) }
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub unsafe fn get_unchecked(&mut self, index: usize) -> &mut T {
+        self.inner.get_unchecked(index).cast().as_mut()
+    }
+
+    #[inline]
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
+impl<'a, T> From<&'a mut Getter> for TypedGetterMut<'a, T> {
+    #[inline]
+    fn from(value: &'a mut Getter) -> Self {
+        Self {
+            inner: value,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<'a, T> From<TypedGetterMut<'a, T>> for &'a mut Getter {
+    #[inline]
+    fn from(value: TypedGetterMut<'a, T>) -> Self {
+        value.inner
+    }
+}
+
+/// Functionalities for collecting heterogeneous static types of data.
+/// In this trait, each types of data are gathered in each column and all columns have the same length like 2d matrix.
+///
+/// When it comes to in/out types, this trait has intentionally raw pointer parameters.
+/// Although it's quite dangerous, it gives us object safety, so that we can have and manage another heterogeneous trait implementations.  
+/// For instance, there's built-in implementation [`SparseSet`](super::sparse_set::SparseSet) which is deeply based on Vec.
+/// You can implement your own data structure like hash map, then you can keep them in a buffer with dyn Together type.
+#[allow(clippy::len_without_is_empty)]
+pub trait Together: Debug {
+    fn add_column(&mut self, tinfo: TypeInfo) -> Option<usize>;
+    fn remove_column(&mut self, ci: usize) -> Option<TypeInfo>;
+    fn new_from_this(&self) -> Box<dyn Together>;
+    fn contains_column(&self, ty: &TypeId) -> bool;
+    fn get_column_index(&self, ty: &TypeId) -> Option<usize>;
+    fn get_column_info(&self, ci: usize) -> Option<&TypeInfo>;
+    fn get_column_num(&self) -> usize;
+
+    fn len(&self) -> usize;
+
+    fn begin_add_item(&mut self);
+    unsafe fn add_item(&mut self, ci: usize, ptr: *const u8);
+    fn end_add_item(&mut self) -> usize;
+    fn remove_item(&mut self, ri: usize) -> bool;
+
+    fn get_item(&self, ci: usize, ri: usize) -> Option<NonNull<u8>>;
+    fn get_item_mut(&mut self, ci: usize, ri: usize) -> Option<NonNull<u8>>;
+
+    fn borrow_column(&self, ci: usize) -> Result<Borrowed<Getter, JsAtomic>, BorrowError>;
+    fn borrow_column_mut(&mut self, ci: usize) -> Result<Borrowed<Getter, JsAtomic>, BorrowError>;
 }

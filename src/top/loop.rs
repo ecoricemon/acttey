@@ -1,15 +1,14 @@
-use crate::util::web;
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::{closure::Closure, JsCast, UnwrapThrowExt};
 
 pub struct Loop {
-    window: web_sys::Window,
+    global: web_sys::DedicatedWorkerGlobalScope,
     callback: Closure<dyn FnMut(f64)>,
 }
 
 impl Loop {
     pub fn new() -> Self {
         Self {
-            window: web::get_window(),
+            global: js_sys::global().unchecked_into(),
             callback: Closure::new(|_| {}),
         }
     }
@@ -20,7 +19,7 @@ impl Loop {
 
     #[inline]
     pub fn request_animation_frame(&self) {
-        self.window
+        self.global
             .request_animation_frame(self.callback.as_ref().unchecked_ref())
             .expect_throw(crate::errmsg::WEBSYS_REQ_ANIMATION);
     }

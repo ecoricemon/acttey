@@ -1,16 +1,16 @@
 use crate::{
+    ds::borrow::Borrowed,
     ecs::{
-        fkey, predefined::resource::ResourcePack, qkey, storage::Store, traits::Component,
-        FilteResKey, QueryKey, SystemKey,
+        fkey, predefined::resource::ResourcePack, qkey, storage::Storage, traits::Component,
+        FilterKey, QueryKey, SystemKey,
     },
     ty,
-    util::{downcast_mut_slice, downcast_slice},
 };
-use std::{
-    any::TypeId,
-    marker::PhantomData,
-    ptr::NonNull,
-    slice::{Iter, IterMut},
+use std::{any::TypeId, marker::PhantomData, ptr::NonNull};
+
+use super::{
+    borrow_js::JsAtomic,
+    traits::{Getter, TypedGetter, TypedGetterMut},
 };
 
 /// A filter to select slices of `Component`.
@@ -48,8 +48,9 @@ pub trait Filter: 'static {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct FilterInfo {
-    pub fkey: FilteResKey,
+    pub fkey: FilterKey,
     pub target: TypeId,
     pub all: Vec<TypeId>,
     pub any: Vec<TypeId>,
@@ -77,6 +78,7 @@ pub trait Identify {
     fn ids() -> Vec<TypeId>;
 }
 
+#[derive(Debug, Clone, Copy)]
 pub struct QueryMutTypeIdSalt;
 
 pub trait Query<'a>: 'static {
@@ -87,8 +89,8 @@ pub trait Query<'a>: 'static {
         qkey!(Self, skey)
     }
 
-    fn query(storage: &mut impl Store, skey: SystemKey) -> Self::Output;
-    fn fkeys(skey: SystemKey) -> Vec<FilteResKey>;
+    fn query(storage: &mut Storage, skey: SystemKey) -> Self::Output;
+    fn fkeys(skey: SystemKey) -> Vec<FilterKey>;
     fn info(skey: SystemKey) -> QueryInfo;
 }
 
@@ -100,11 +102,12 @@ pub trait QueryMut<'a>: 'static {
         qkey!((QueryMutTypeIdSalt, Self), skey)
     }
 
-    fn query_mut(storage: &mut impl Store, skey: SystemKey) -> Self::Output;
-    fn fkeys_mut(skey: SystemKey) -> Vec<FilteResKey>;
+    fn query_mut(storage: &mut Storage, skey: SystemKey) -> Self::Output;
+    fn fkeys_mut(skey: SystemKey) -> Vec<FilterKey>;
     fn info_mut(skey: SystemKey) -> QueryInfo;
 }
 
+#[derive(Debug, Clone)]
 pub struct QueryInfo {
     pub finfo: Vec<FilterInfo>,
 }
@@ -129,21 +132,28 @@ pub trait ResQueryMut<'a> {
     fn query_mut(res_pack: &'a ResourcePack) -> Self::Output;
 }
 
+#[derive(Debug)]
 pub struct QueryIter<'a, T> {
-    iter: Iter<'a, NonNull<[()]>>,
-    _marker: PhantomData<T>,
+    /// Pointer of a slice of `Borrowed<Getter<T>>`.
+    /// But, when the iterator is dropped, each `Borrowed` is dropped too.
+    ptr: NonNull<Borrowed<Getter, JsAtomic>>,
+
+    /// Number of `Borrowed<TypedGetter<T>>` in the slice.
+    len: usize,
+
+    /// Current position on the slice.
+    cur: usize,
+
+    _marker: PhantomData<&'a T>,
 }
 
 impl<'a, T> QueryIter<'a, T> {
-    /// # Safety
-    ///
-    /// Borrow check breaks here.
-    /// Caller should guarantee that `v` is invariant during its usage.
-    /// Plus, generic parameter `T` should match with the original type of the `v`.
     #[inline]
-    pub unsafe fn new(v: &Vec<NonNull<[()]>>) -> Self {
+    pub fn new(v: &[Borrowed<Getter, JsAtomic>]) -> Self {
         Self {
-            iter: (*(v as *const Vec<NonNull<[()]>>)).iter(),
+            ptr: unsafe { NonNull::new_unchecked(v.as_ptr().cast_mut()) },
+            len: v.len(),
+            cur: 0,
             _marker: PhantomData,
         }
     }
@@ -151,39 +161,63 @@ impl<'a, T> QueryIter<'a, T> {
     #[inline]
     pub fn empty() -> Self {
         Self {
-            iter: Default::default(),
+            ptr: NonNull::dangling(),
+            len: 0,
+            cur: 0,
             _marker: PhantomData,
         }
     }
 }
 
-impl<'a, T: 'a> Iterator for QueryIter<'a, T> {
-    type Item = &'a [T];
+impl<'a, T> Iterator for QueryIter<'a, T> {
+    type Item = TypedGetter<'a, T>;
 
-    // Safety: Downcasting will be guaranteed by the caller(See comment at the constructor).
-    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter
-            .next()
-            .map(|ptr| unsafe { downcast_slice(ptr.as_ptr()) })
+        if self.cur < self.len {
+            unsafe {
+                let borrowed = self.ptr.as_ptr().add(self.cur);
+                self.cur += 1;
+                Some((&**borrowed).into())
+            }
+        } else {
+            None
+        }
     }
 }
 
+impl<'a, T> Drop for QueryIter<'a, T> {
+    fn drop(&mut self) {
+        for i in 0..self.len {
+            unsafe {
+                let ptr = self.ptr.as_ptr().add(i);
+                ptr.drop_in_place();
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct QueryIterMut<'a, T> {
-    iter: IterMut<'a, NonNull<[()]>>,
-    _marker: PhantomData<T>,
+    /// Pointer of a slice of `Borrowed<Getter<T>>`.
+    /// But, when the iterator is dropped, each `Borrowed` is dropped too.
+    ptr: NonNull<Borrowed<Getter, JsAtomic>>,
+
+    /// Number of `Borrowed<TypedGetter<T>>` in the slice.
+    len: usize,
+
+    /// Current position on the slice.
+    cur: usize,
+
+    _marker: PhantomData<&'a T>,
 }
 
 impl<'a, T> QueryIterMut<'a, T> {
-    /// # Safety
-    ///
-    /// Borrow check breaks here.
-    /// Caller should guarantee that `v` is invariant during its usage.
-    /// Plus, generic parameter `T` should match with the original type of the `v`.
     #[inline]
-    pub unsafe fn new(v: &mut Vec<NonNull<[()]>>) -> Self {
+    pub fn new(v: &[Borrowed<Getter, JsAtomic>]) -> Self {
         Self {
-            iter: (*(v as *mut Vec<NonNull<[()]>>)).iter_mut(),
+            ptr: unsafe { NonNull::new_unchecked(v.as_ptr().cast_mut()) },
+            len: v.len(),
+            cur: 0,
             _marker: PhantomData,
         }
     }
@@ -191,21 +225,38 @@ impl<'a, T> QueryIterMut<'a, T> {
     #[inline]
     pub fn empty() -> Self {
         Self {
-            iter: Default::default(),
+            ptr: NonNull::dangling(),
+            len: 0,
+            cur: 0,
             _marker: PhantomData,
         }
     }
 }
 
-impl<'a, T: 'a> Iterator for QueryIterMut<'a, T> {
-    type Item = &'a mut [T];
+impl<'a, T> Iterator for QueryIterMut<'a, T> {
+    type Item = TypedGetterMut<'a, T>;
 
-    // Safety: Downcasting will be guaranteed by the caller(See comment at the constructor).
-    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter
-            .next()
-            .map(|ptr| unsafe { downcast_mut_slice(ptr.as_ptr()) })
+        if self.cur < self.len {
+            unsafe {
+                let borrowed = self.ptr.as_ptr().add(self.cur);
+                self.cur += 1;
+                Some((&mut **borrowed).into())
+            }
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a, T> Drop for QueryIterMut<'a, T> {
+    fn drop(&mut self) {
+        for i in 0..self.len {
+            unsafe {
+                let ptr = self.ptr.as_ptr().add(i);
+                ptr.drop_in_place();
+            }
+        }
     }
 }
 
@@ -305,7 +356,7 @@ macro_rules! impl_query {
 
             #[inline]
             fn query(
-                _storage: &mut impl $crate::acttey::ecs::storage::Store,
+                _storage: &mut $crate::acttey::ecs::storage::Storage,
                 _skey: $crate::acttey::ecs::SystemKey,
             ) -> Self::Output {
                 QueryIter::empty()
@@ -313,7 +364,7 @@ macro_rules! impl_query {
 
             #[inline]
             fn fkeys(_skey: $crate::acttey::ecs::SystemKey)
-                -> Vec<$crate::acttey::ecs::FilteResKey>
+                -> Vec<$crate::acttey::ecs::FilterKey>
             {
                 vec![]
             }
@@ -332,7 +383,7 @@ macro_rules! impl_query {
 
             #[inline]
             fn query_mut(
-                _storage: &mut impl $crate::acttey::ecs::storage::Store,
+                _storage: &mut $crate::acttey::ecs::storage::Storage,
                 _skey: $crate::acttey::ecs::SystemKey,
             ) -> Self::Output {
                 QueryIterMut::empty()
@@ -340,7 +391,7 @@ macro_rules! impl_query {
 
             #[inline]
             fn fkeys_mut(_skey: $crate::acttey::ecs::SystemKey)
-                -> Vec<$crate::acttey::ecs::FilteResKey>
+                -> Vec<$crate::acttey::ecs::FilterKey>
             {
                 vec![]
             }
@@ -363,17 +414,17 @@ macro_rules! impl_query {
 
             #[inline]
             fn query(
-                storage: &mut impl $crate::acttey::ecs::storage::Store,
+                storage: &mut $crate::acttey::ecs::storage::Storage,
                 skey: $crate::acttey::ecs::SystemKey,
             ) -> Self::Output {
-                storage.get::<$id>(Self::gen_key(skey))
+                storage.query::<$id>(Self::gen_key(skey))
             }
 
             #[inline]
             fn fkeys(skey: $crate::acttey::ecs::SystemKey)
-                -> Vec<$crate::acttey::ecs::FilteResKey>
+                -> Vec<$crate::acttey::ecs::FilterKey>
             {
-                vec![$crate::acttey::ecs::FilteResKey::new(
+                vec![$crate::acttey::ecs::FilterKey::new(
                     std::any::TypeId::of::<$id>(),
                     Self::gen_key(skey)
                 )]
@@ -395,17 +446,17 @@ macro_rules! impl_query {
 
             #[inline]
             fn query_mut(
-                storage: &mut impl $crate::acttey::ecs::storage::Store,
+                storage: &mut $crate::acttey::ecs::storage::Storage,
                 skey: $crate::acttey::ecs::SystemKey,
             ) -> Self::Output {
-                storage.get_mut::<$id>(Self::gen_key_mut(skey))
+                storage.query_mut::<$id>(Self::gen_key_mut(skey))
             }
 
             #[inline]
             fn fkeys_mut(skey: $crate::acttey::ecs::SystemKey)
-                -> Vec<$crate::acttey::ecs::FilteResKey>
+                -> Vec<$crate::acttey::ecs::FilterKey>
             {
-                vec![$crate::acttey::ecs::FilteResKey::new(
+                vec![$crate::acttey::ecs::FilterKey::new(
                     std::any::TypeId::of::<$id>(),
                     Self::gen_key_mut(skey)
                 )]
@@ -428,20 +479,20 @@ macro_rules! impl_query {
 
             #[inline]
             fn query(
-                storage: &mut impl $crate::acttey::ecs::storage::Store,
+                storage: &mut $crate::acttey::ecs::storage::Storage,
                 skey: $crate::acttey::ecs::SystemKey,
             ) -> Self::Output {
                 let qkey = Self::gen_key(skey);
-                ( $( storage.get::<$id>(qkey) ),+ )
+                ( $( storage.query::<$id>(qkey) ),+ )
             }
 
             #[inline]
             fn fkeys(skey: $crate::acttey::ecs::SystemKey)
-                -> Vec<$crate::acttey::ecs::FilteResKey>
+                -> Vec<$crate::acttey::ecs::FilterKey>
             {
                 let qkey = Self::gen_key(skey);
                 vec![
-                    $( $crate::acttey::ecs::FilteResKey::new(
+                    $( $crate::acttey::ecs::FilterKey::new(
                         std::any::TypeId::of::<$id>(),
                         qkey
                     ) ),+
@@ -464,20 +515,20 @@ macro_rules! impl_query {
 
             #[inline]
             fn query_mut(
-                storage: &mut impl $crate::acttey::ecs::storage::Store,
+                storage: &mut $crate::acttey::ecs::storage::Storage,
                 skey: $crate::acttey::ecs::SystemKey,
             ) -> Self::Output {
                 let qkey = Self::gen_key_mut(skey);
-                ( $( storage.get_mut::<$id>(qkey) ),+ )
+                ( $( storage.query_mut::<$id>(qkey) ),+ )
             }
 
             #[inline]
             fn fkeys_mut(skey: $crate::acttey::ecs::SystemKey)
-                -> Vec<$crate::acttey::ecs::FilteResKey>
+                -> Vec<$crate::acttey::ecs::FilterKey>
             {
                 let qkey = Self::gen_key_mut(skey);
                 vec![
-                    $( $crate::acttey::ecs::FilteResKey::new(
+                    $( $crate::acttey::ecs::FilterKey::new(
                         std::any::TypeId::of::<$id>(),
                         qkey
                     ) ),+
@@ -608,14 +659,12 @@ impl_res_query!(16, A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wasm_bindgen_test::*;
     use crate::{
         acttey,
         ecs::{fkey, skey},
     };
     use acttey_ecs_macros::Component;
-    use wasm_bindgen_test::*;
-
-    wasm_bindgen_test_configure!(run_in_browser);
 
     #[derive(Component)]
     struct CA;

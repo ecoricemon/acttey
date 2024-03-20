@@ -1,57 +1,43 @@
+use super::{
+    borrow_js::JsAtomic,
+    traits::{Getter, Together},
+};
 use crate::{
-    ds::sparse_set::SparseSet,
+    ds::{
+        borrow::Borrowed,
+        common::TypeInfo,
+        map::{DescribeGroup, GroupMap},
+    },
     ecs::{
-        ckey, ekey, fkey,
         query::{Filter, FilterInfo, QueryIter, QueryIterMut},
+        sparse_set::SparseSet,
         system::SystemInfo,
-        traits::{Collect, CollectGeneric, Component, Downcast, Entity},
-        ComponentKey, EntityKey, FilteResKey, QueryKey, SystemKey,
+        FilterKey, QueryKey, SystemKey,
     },
     ty,
-    util::upcast_slice,
 };
-use ahash::AHashMap;
 use std::{
-    any::{type_name, Any, TypeId},
-    iter::once,
-    mem::{transmute, zeroed},
-    ptr::NonNull,
+    any::TypeId,
+    borrow::Cow,
+    collections::HashMap,
+    fmt::Debug,
+    iter,
+    ops::{Deref, DerefMut},
 };
 
-#[derive(Debug)]
-pub enum BorrowState {
-    Available,
-    Borrowed(usize),
-    BorrowedMutably,
-}
-
+/// Storage containing all components.  
 #[derive(Default)]
 pub struct Storage {
-    /// A map storing entities. Each entity type has its own storage.
-    /// Key: `TypeId` of `Entity`.
-    /// Value: `Entity` storage, e.g. `SparseSet`).
-    pub collectors: AHashMap<EntityKey, Box<dyn Collect>>,
+    // TODO: Use a synchronized queue to add/remove entities.
+    // and make central thread to drain the queue and fill the entities.
+    // TODO: Remove pub(crate).
+    /// Entity and component information and its containers.
+    pub(crate) ents: EntityDict,
 
-    //
-    pub downcasters: AHashMap<ComponentKey, NonNull<()>>,
+    cache: HashMap<FilterKey, Filtered, ahash::RandomState>,
 
-    //
-    pub borrow_states: AHashMap<ComponentKey, BorrowState>,
-
-    /// A map holding query results.
-    /// Key: `TypeId` combination of `(Filter, (Query, System))`.
-    /// Value: Vec<ptr to slice of a collector's piece>, e.g. `AnyVec` as a slice as a ptr.
-    query_buffer: AHashMap<FilteResKey, Vec<NonNull<[()]>>>,
-
-    /// A map holding system info.
-    /// Entries will never be removed from the map.
-    sinfo: AHashMap<SystemKey, SystemInfo>,
-
-    //
-    filtered_ekeys: AHashMap<FilteResKey, Vec<EntityKey>>,
-
-    //
-    filtered_ekeys_mut: AHashMap<FilteResKey, Vec<EntityKey>>,
+    /// This will be used for scheduling threads in the future.
+    sinfos: HashMap<SystemKey, SystemInfo>,
 }
 
 impl Storage {
@@ -59,303 +45,254 @@ impl Storage {
         Default::default()
     }
 
-    pub fn insert_default<E: Entity>(&mut self) {
-        self.insert_entity_type::<E, _>(SparseSet::new());
+    #[inline]
+    pub fn register_entity(&mut self, reg: EntityReg) -> usize {
+        self.ents.register_entity(reg)
     }
 
-    pub fn insert_default_with<E: Entity>(&mut self, capacity: usize) {
-        self.insert_entity_type::<E, _>(SparseSet::with_capacity(capacity));
+    #[inline]
+    pub fn register_system(&mut self, skey: SystemKey, sinfo: SystemInfo) {
+        self.sinfos.insert(skey, sinfo);
     }
 
-    pub fn insert_entity_type<E, T>(&mut self, mut collector: T)
-    where
-        E: Entity,
-        T: Collect + CollectGeneric + Downcast,
-    {
-        E::notify_types(&mut collector, self);
-        self.collectors.insert(ekey!(E), Box::new(collector));
+    #[inline]
+    pub fn query<'o, F: Filter>(&mut self, qkey: QueryKey) -> QueryIter<'o, F::Target> {
+        QueryIter::new(self._query::<F>(qkey))
     }
 
-    pub fn insert_entity(&mut self, key: usize, ent: impl Entity) {
-        let collector = self.collectors.get_mut(&ekey!(&&ent)).unwrap();
-        ent.moves(collector, key);
+    #[inline]
+    pub fn query_mut<'o, F: Filter>(&mut self, qkey: QueryKey) -> QueryIterMut<'o, F::Target> {
+        QueryIterMut::new(self._query::<F>(qkey))
     }
 
-    pub fn remove_entity(&mut self, e_ty: TypeId, key: usize) {
-        self.collectors
-            .get_mut(&EntityKey::new(e_ty))
-            .unwrap()
-            .remove(key);
-    }
-
-    pub fn copy_component<C: Component>(&mut self, e_ty: TypeId, key: usize) -> Option<C> {
-        let mut comp: C = unsafe { zeroed() };
-        let collector = self.collectors.get_mut(&EntityKey::new(e_ty)).unwrap();
-        collector.copy(key, &mut comp)?;
-        Some(comp)
-    }
-
-    // Destructured parameters in order to call this function while borrowing self.
-    pub(crate) fn borrow_slice<'a, C: Component>(
-        collectors: &'a mut AHashMap<EntityKey, Box<dyn Collect>>,
-        borrow_states: &mut AHashMap<ComponentKey, BorrowState>,
-        downcasters: &AHashMap<ComponentKey, NonNull<()>>,
-        ekey: EntityKey,
-        mutable: bool,
-    ) -> &'a mut [C] {
-        // Borrow check.
-        let ckey = ckey!(C, ekey);
-        if mutable {
-            borrow_states
-                .entry(ckey)
-                .and_modify(|v| match v {
-                    BorrowState::Available => *v = BorrowState::BorrowedMutably,
-                    _ => panic!(
-                        "You can't borrow {} mutably that is already borrowed",
-                        type_name::<C>()
-                    ),
-                })
-                .or_insert(BorrowState::BorrowedMutably);
-        } else {
-            borrow_states
-                .entry(ckey)
-                .and_modify(|v| match v {
-                    BorrowState::Available => *v = BorrowState::Borrowed(1),
-                    BorrowState::Borrowed(cnt) => *cnt += 1,
-                    BorrowState::BorrowedMutably => panic!(
-                        "You can't borrow {} that is already borrowed mutably.",
-                        type_name::<C>()
-                    ),
-                })
-                .or_insert(BorrowState::Borrowed(1));
-        }
-
-        let values = collectors.get_mut(&ekey).unwrap().values_as_any(&ty!(C));
-        let downcaster = downcasters.get(&ckey).unwrap();
-
-        unsafe {
-            // Make sure that the signature must be same with Downcast::downcast.
-            transmute::<_, fn(&mut dyn Any) -> &mut [C]>(downcaster.as_ptr())(values)
-        }
-    }
-
-    pub fn returns(&mut self, skey: &SystemKey) {
-        let free = |bs: &mut BorrowState| match bs {
-            BorrowState::Borrowed(cnt) if *cnt != 1 => *cnt -= 1,
-            BorrowState::Available => {
-                unreachable!("Tried to return something that was not borrowed.")
-            }
-            _ => *bs = BorrowState::Available,
-        };
-
-        let sinfo = self.sinfo.get(skey).unwrap();
-        for ckey in sinfo.reads.iter().chain(sinfo.writes.iter()) {
-            free(self.borrow_states.get_mut(ckey).unwrap());
-        }
-    }
-
-    pub fn get_filtered<F: Filter>(
-        &mut self,
-        qkey: QueryKey,
-        mutable: bool,
-    ) -> &mut Vec<NonNull<[()]>> {
-        let fkey = fkey!(F, qkey);
-        let ekeys = if mutable {
-            self.filtered_ekeys_mut.get(&fkey).unwrap()
-        } else {
-            self.filtered_ekeys.get(&fkey).unwrap()
-        };
-
-        self.query_buffer
+    fn _query<F: Filter>(&mut self, qkey: QueryKey) -> &Vec<Borrowed<Getter, JsAtomic>> {
+        let fkey = FilterKey::new(ty!(F), qkey);
+        let Self { cache, ents, .. } = self;
+        let filtered = cache
             .entry(fkey)
-            .and_modify(|prev| {
-                prev.clear();
-                for ekey in ekeys.iter().cloned() {
-                    // Safety: `borrow_slice` returns a valid reference, therefore its upcasted pointer is also non-null.
-                    prev.push(unsafe {
-                        NonNull::new_unchecked(upcast_slice(Self::borrow_slice::<F::Target>(
-                            &mut self.collectors,
-                            &mut self.borrow_states,
-                            &self.downcasters,
-                            ekey,
-                            mutable,
-                        )))
-                    });
-                }
+            .and_modify(|filtered| {
+                Self::update_query_result(filtered, ents);
             })
-            .or_insert_with(|| {
-                // Safety: `borrow_slice` returns a valid reference, therefore its upcasted pointer is also non-null.
-                ekeys
-                    .iter()
-                    .map(|&e_ty| unsafe {
-                        NonNull::new_unchecked(upcast_slice(Self::borrow_slice::<F::Target>(
-                            &mut self.collectors,
-                            &mut self.borrow_states,
-                            &self.downcasters,
-                            e_ty,
-                            mutable,
-                        )))
-                    })
-                    .collect()
-            })
+            .or_insert(Self::filter(ents, F::info(qkey)));
+        &filtered.query_res
     }
 
-    pub(crate) fn insert_sinfo(&mut self, key: SystemKey, value: SystemInfo) {
-        self.sinfo.insert(key, value);
+    fn update_query_result(filtered: &mut Filtered, ents: &EntityDict) {
+        // We call Vec::set_len() instead of Vec::clear() not to call Borrowed::drop() here.
+        // When a system ends its operation, it drops QueryIter or QueryIterMut that it received.
+        // The iterator drops the items, which are Borrowed, in this vector manually.
+        // Therefore, Borrowed is dropped as soon as it's used.
+        // See QueryIter::drop() and QueryIterMut::drop().
+        // Safety: Infallible.
+        unsafe { filtered.query_res.set_len(0) };
+
+        filtered
+            .indices
+            .iter()
+            .map(|(enti, coli)| {
+                let cont = ents.get_entity_container(*enti).unwrap();
+                cont.borrow_column(*coli).unwrap()
+            })
+            .for_each(|borrowed| filtered.query_res.push(borrowed));
     }
 
-    pub(crate) fn invalidate_sinfo(&mut self) {
-        self.filtered_ekeys.clear();
-        self.filtered_ekeys_mut.clear();
+    // TODO: Once someone add/remove entity or filter, we need to update it to cache.
+    fn filter(ents: &EntityDict, finfo: FilterInfo) -> Filtered {
+        let indices = ents
+            .iter_entity_container()
+            .filter_map(|(_, enti, cont)| {
+                (finfo.all.iter().all(|ty| cont.contains_column(ty))
+                    && iter::once(&finfo.target)
+                        .chain(finfo.any.iter())
+                        .any(|ty| cont.contains_column(ty))
+                    && !finfo.none.iter().any(|ty| cont.contains_column(ty)))
+                .then_some((enti, cont.get_column_index(&finfo.target).unwrap()))
+            })
+            .collect::<Vec<_>>();
 
-        let gen_ekeys = |finfo: &FilterInfo| {
-            self.collectors
-                .iter()
-                .filter_map(|(ekey, collector)| {
-                    (finfo.all.iter().all(|ty| collector.contains_type(ty))
-                        && once(&finfo.target)
-                            .chain(finfo.any.iter())
-                            .any(|ty| collector.contains_type(ty))
-                        && !finfo.none.iter().any(|ty| collector.contains_type(ty)))
-                    .then_some(*ekey)
-                })
-                .collect::<Vec<_>>()
-        };
-
-        for sinfo in self.sinfo.values_mut() {
-            let mut reads = vec![];
-            let mut writes = vec![];
-
-            for finfo in sinfo.qinfo.finfo.iter() {
-                let ekeys = gen_ekeys(finfo);
-                for ekey in ekeys.iter() {
-                    reads.push(ComponentKey::new(finfo.target, *ekey));
-                }
-                self.filtered_ekeys.insert(finfo.fkey, ekeys);
-            }
-            for finfo in sinfo.qinfo_mut.finfo.iter() {
-                let ekeys = gen_ekeys(finfo);
-                for ekey in ekeys.iter() {
-                    writes.push(ComponentKey::new(finfo.target, *ekey));
-                }
-                self.filtered_ekeys_mut.insert(finfo.fkey, ekeys);
-            }
-
-            sinfo.set_rw(reads, writes);
+        Filtered {
+            indices,
+            query_res: Vec::new(),
+            finfo,
         }
     }
 }
 
-pub trait Store {
-    fn get<'a, F: Filter>(&mut self, qkey: QueryKey) -> QueryIter<'a, F::Target>;
-    fn get_mut<'a, F: Filter>(&mut self, qkey: QueryKey) -> QueryIterMut<'a, F::Target>;
+#[derive(Debug)]
+pub struct Filtered {
+    /// Index pair of entity and component for a filter.
+    indices: Vec<(usize, usize)>,
+
+    /// Temporary buffer for the query result.
+    /// Content will be replaced for every query, but we can reuse the capacity.
+    /// Notice that this doesn't actually own [`Borrowed`] because this is just a temporary buffer.
+    /// Real user, system, owns it and will drop it after using it.
+    query_res: Vec<Borrowed<Getter, JsAtomic>>,
+
+    /// Filter information.
+    finfo: FilterInfo,
 }
 
-impl Store for Storage {
-    #[inline]
-    fn get<'a, F: Filter>(&mut self, qkey: QueryKey) -> QueryIter<'a, F::Target> {
-        let query_value = self.get_filtered::<F>(qkey, false);
+/// Entity dictionary that you can find static information about entities and components
+/// such as names, types, and their relationships.
+/// Plus the dictionary has component data for each entity in [`EntityContainer`].
+/// Each `EntityContainer` has all component data related to the entity.
+///
+/// You can get or remove entries from their indices or keys.
+/// Using indices may be faster than using keys in most cases.
+#[derive(Debug)]
+pub struct EntityDict(GroupMap<Vec<TypeId>, EntityContainer, TypeId, TypeInfo>);
 
-        // Safety: `k` is unique of all *System-Query-Filter* combinations.
-        // As a result, we can guarantee that `v` is invariant during its usage because no one can generate the same `k` except itself.
-        // Also, It means downcasting is valid.
-        unsafe { QueryIter::new(query_value) }
+impl EntityDict {
+    pub fn new() -> Self {
+        Self(GroupMap::new())
     }
 
     #[inline]
-    fn get_mut<'a, F: Filter>(&mut self, qkey: QueryKey) -> QueryIterMut<'a, F::Target> {
-        let query_value = self.get_filtered::<F>(qkey, true);
+    pub fn get_entity_container(&self, index: usize) -> Option<&EntityContainer> {
+        self.0.get_group(index).map(|(ent, _)| ent)
+    }
 
-        // Safety: `k` is unique of all *System-Query-Filter* combinations.
-        // As a result, we can guarantee that `v` is invariant during its usage because no one can generate the same `k` except itself.
-        // Also, It means downcasting is valid.
-        unsafe { QueryIterMut::new(query_value) }
+    #[inline]
+    pub fn get_entity_container2(&self, key: &[TypeId]) -> Option<&EntityContainer> {
+        self.0.get_group2(key).map(|(ent, _)| ent)
+    }
+
+    #[inline]
+    pub fn get_entity_container_mut(&mut self, index: usize) -> Option<&mut EntityContainer> {
+        self.0.get_group_mut(index).map(|(ent, _)| ent)
+    }
+
+    #[inline]
+    pub fn get_entity_key(&self, index: usize) -> Option<&Vec<TypeId>> {
+        self.0.get_group_key(index)
+    }
+
+    #[inline]
+    pub fn get_component_info(&self, index: usize) -> Option<&TypeInfo> {
+        self.0.get_item(index).map(|(comp, _)| comp)
+    }
+
+    #[inline]
+    pub fn get_component_info2(&self, key: &TypeId) -> Option<&TypeInfo> {
+        self.0.get_item2(key).map(|(comp, _)| comp)
+    }
+
+    /// Registers new entity and its components information and returns entity index.
+    /// If you want to change entity information, you must remove if first. See [`Self::unregister_entity`].
+    /// Also, this method doesn't overwrite component information.
+    ///
+    /// # Panics
+    ///
+    /// - Panics if `form` doesn't have component information at all.
+    /// - Panics if the dictionary has had entity information already.
+    #[inline]
+    pub fn register_entity(&mut self, reg: EntityReg) -> usize {
+        self.0.add_group(reg)
+    }
+
+    /// Unregister entity and tries to unregister corresponding components as well.
+    /// But components that are linked to another entity won't be unregistered.
+    #[inline]
+    pub fn unregister_entity(&mut self, index: usize) -> Option<EntityContainer> {
+        self.0.remove_group(index)
+    }
+
+    #[inline]
+    pub fn unregister_entity2(&mut self, key: &[TypeId]) -> Option<EntityContainer> {
+        self.0.remove_group2(key)
+    }
+
+    #[inline]
+    pub fn iter_entity_container(
+        &self,
+    ) -> impl Iterator<Item = (&Vec<TypeId>, usize, &EntityContainer)> {
+        self.0.iter_group()
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::acttey::*;
-    use acttey_ecs_macros::{Component, Entity};
-    use wasm_bindgen_test::*;
+impl Default for EntityDict {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-    wasm_bindgen_test_configure!(run_in_browser);
+/// A registration form of an entity for [`EntCompDict`].
+pub struct EntityReg {
+    ent: EntityContainer,
+    comps: Vec<(TypeId, TypeInfo)>,
+}
 
-    #[derive(Component, Default, Clone, PartialEq, Debug)]
-    struct CompA {
-        x: i32,
+impl EntityReg {
+    /// You can pass your own empty component container `cont`, otherwise [`SparseSet`] is used.
+    #[inline]
+    pub fn new(
+        name: impl Into<Cow<'static, str>>,
+        ty: Option<TypeId>,
+        cont: Option<Box<dyn Together>>,
+    ) -> Self {
+        fn _new(
+            name: Cow<'static, str>,
+            ty: Option<TypeId>,
+            cont: Option<Box<dyn Together>>,
+        ) -> EntityReg {
+            EntityReg {
+                ent: EntityContainer {
+                    name,
+                    ty,
+                    cont: cont.unwrap_or(Box::new(SparseSet::new())),
+                },
+                comps: Vec::new(),
+            }
+        }
+
+        _new(name.into(), ty, cont)
     }
 
-    #[derive(Component, Default, Clone, PartialEq, Debug)]
-    struct CompB(i32);
-
-    #[derive(Component, Default, Clone, PartialEq, Debug)]
-    struct CompC;
-
-    #[derive(Entity, Default, Clone, PartialEq, Debug)]
-    struct EntAB {
-        a: CompA,
-        b: CompB,
+    pub fn add_component(&mut self, tinfo: TypeInfo) {
+        if !self.ent.cont.contains_column(&tinfo.id) {
+            self.ent.cont.add_column(tinfo);
+        }
+        self.comps.push((tinfo.id, tinfo));
     }
+}
 
-    #[wasm_bindgen_test]
-    fn test_entity_state_insert_remove() {
-        let mut state = Storage::new();
+impl DescribeGroup<Vec<TypeId>, EntityContainer, TypeId, TypeInfo> for EntityReg {
+    fn into_group_and_items(self) -> (Vec<TypeId>, EntityContainer, Vec<(TypeId, TypeInfo)>) {
+        let Self { ent, comps } = self;
 
-        // Adds entity type `EntAB` which has CompA and CompB.
-        state.insert_default::<EntAB>();
-        let collector = state.collectors.get(&ekey!(EntAB)).unwrap();
-        assert!(collector.contains_type(&ty!(CompA)));
-        assert!(collector.contains_type(&ty!(CompB)));
-        assert!(!collector.contains_type(&ty!(CompC)));
+        let comp_ids = comps.iter().map(|(ty, _)| *ty).collect::<Vec<_>>();
 
-        // Test entities
-        let ents = [
-            EntAB {
-                a: CompA { x: 1 },
-                b: CompB(2),
-            },
-            EntAB {
-                a: CompA { x: 3 },
-                b: CompB(4),
-            },
-        ];
+        (comp_ids, ent, comps)
+    }
+}
 
-        // Inserts the test entities.
-        for (id, ent) in ents.iter().enumerate() {
-            state.insert_entity(id, ent.clone());
-        }
+/// A structure including entity information and its container.
+/// That container contains compoent data without concrete type.
+#[derive(Debug)]
+pub struct EntityContainer {
+    /// Optional name of the entity.
+    name: Cow<'static, str>,
 
-        // Inserted correctly?
-        let collector = state.collectors.get(&ekey!(EntAB)).unwrap();
-        assert_eq!(ents.len(), collector.len());
-        for (id, ent) in ents.iter().enumerate() {
-            assert_eq!(
-                Some(ent.a.clone()),
-                state.copy_component::<CompA>(ty!(&ent), id)
-            );
-            assert_eq!(
-                Some(ent.b.clone()),
-                state.copy_component::<CompB>(ty!(&ent), id)
-            )
-        }
+    /// Optional [`TypeId`] of the entity.
+    ty: Option<TypeId>,
 
-        // Removes the first one.
-        state.remove_entity(ty!(EntAB), 0);
+    /// Container that including components for the entity.
+    cont: Box<dyn Together>,
+}
 
-        // Removed correctly?
-        let collector = state.collectors.get(&ekey!(EntAB)).unwrap();
-        assert_eq!(ents.len() - 1, collector.len());
-        for (id, ent) in ents.iter().enumerate().skip(1) {
-            assert_eq!(
-                Some(ent.a.clone()),
-                state.copy_component::<CompA>(ty!(&ent), id)
-            );
-            assert_eq!(
-                Some(ent.b.clone()),
-                state.copy_component::<CompB>(ty!(&ent), id)
-            )
-        }
+impl Deref for EntityContainer {
+    type Target = dyn Together;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &*self.cont
+    }
+}
+
+impl DerefMut for EntityContainer {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut *self.cont
     }
 }

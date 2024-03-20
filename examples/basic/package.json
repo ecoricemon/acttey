@@ -1,38 +1,38 @@
 {
+  "type": "module",
   "author": "ecoricemon",
   "name": "basic",
   "version": "0.1.0",
   "scripts": {
-    "wasm-dev": "wasm-pack build --dev . --out-name wasm-index",
-    "wasm-release": "wasm-pack build --release . --out-name wasm-index",
-    "wasm-dev-gpu": "npm run wasm-dev -- --out-dir pkg_gpu",
-    "wasm-release-gpu": "npm run wasm-release -- --out-dir pkg_gpu",
-    "wasm-dev-gl": "npm run wasm-dev -- --out-dir pkg_gl --features acttey/webgl",
-    "wasm-release-gl": "npm run wasm-release -- --out-dir pkg_gl --features acttey/webgl",
+    "wasm-d": "wasm-pack build --dev --out-name wasm-index --target web .",
+    "wasm-r": "wasm-pack build --release --out-name wasm-index --target web .",
+    "wasm-d-gpu": "npm run wasm-d -- --out-dir pkg_gpu",
+    "wasm-r-gpu": "npm run wasm-r -- --out-dir pkg_gpu",
+    "wasm-d-gl": "npm run wasm-d -- --out-dir pkg_gl --features acttey/webgl",
+    "wasm-r-gl": "npm run wasm-r -- --out-dir pkg_gl --features acttey/webgl",
 
-    "bundle-dev": "webpack --config webpack.dev.js",
-    "bundle-prod": "webpack --config webpack.prod.js",
+    "bundle-d": "vite build --mode development",
+    "bundle-r": "vite build",
 
     "clean": "rimraf --glob dist pkg_gpu pkg_gl",
     "clean-all": "rimraf --glob dist pkg_gpu pkg_gl target node_modules",
 
-    "build": "run-s clean wasm-dev-gpu bundle-dev",
-    "build-gl": "run-s clean wasm-dev-gl bundle-dev",
-    "build-all": "run-s clean wasm-dev-gpu wasm-dev-gl bundle-dev",
-    "build-release": "run-s clean wasm-release-gpu bundle-prod",
-    "build-release-gl": "run-s clean wasm-release-gl bundle-prod",
-    "build-release-all": "run-s clean wasm-release-gpu wasm-release-gl bundle-prod",
+    "build": "run-s clean wasm-d-gpu bundle-d",
+    "build-gl": "run-s clean wasm-d-gl bundle-d",
+    "build-all": "run-s clean wasm-d-gpu wasm-d-gl bundle-d",
+    "build-r": "run-s clean wasm-r-gpu bundle-r",
+    "build-r-gl": "run-s clean wasm-r-gl bundle-r",
+    "build-r-all": "run-s clean wasm-r-gpu wasm-r-gl bundle-r",
 
-    "start": "webpack serve --config webpack.dev.js",
-    "test": "wasm-pack test --chrome --headless --workspace"
+    "start": "vite preview",
+    "test": "wasm-pack test --node"
   },
   "devDependencies": {
-    "copy-webpack-plugin": "^11.0.0",
-    "npm-run-all": "^4.1.5",
+    "vite": "^5.1.6",
+    "vite-plugin-wasm": "^3.3.0",
+    "vite-plugin-top-level-await": "^1.4.1",
+    "rollup-plugin-copy": "^3.5.0",
     "rimraf": "^5.0.1",
-    "webpack": "^5.88.2",
-    "webpack-cli": "^5.1.4",
-    "webpack-dev-server": "^4.15.1",
-    "webpack-merge": "^5.9.0"
+    "npm-run-all": "^4.1.5"
   }
 }

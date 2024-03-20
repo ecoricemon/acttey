@@ -70,6 +70,8 @@ macro_rules! ntimes {
 /// # Examples
 ///
 /// ```
+/// # use acttey::impl_from_for_enum;
+///
 /// struct AA;
 /// struct BB;
 /// enum MyEnum {

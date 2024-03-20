@@ -2,13 +2,10 @@ use crate::{
     debug_format,
     primitive::mesh::InterleavedGeometry,
     render::{Gpu, RenderError},
-    util::{gcd, View, Window},
+    util::{gcd, View},
 };
 use smallvec::SmallVec;
-use std::{
-    num::{NonZeroU64, NonZeroUsize},
-    rc::Rc,
-};
+use std::rc::Rc;
 use wgpu::util::DeviceExt;
 
 pub struct BufferPool {
@@ -324,7 +321,7 @@ impl BufferGroup {
         let need_size = match size_or_data {
             SizeOrData::Size(size, true) => {
                 to_aligned_addr(size) // Must be a multiple of `wgpu::COPY_BUFFER_ALIGNMENT`.
-            },
+            }
             SizeOrData::Size(size, false) => {
                 // If only size is required, we can reuse old buffers.
                 let need_size = to_aligned_addr(size);
@@ -336,28 +333,22 @@ impl BufferGroup {
             SizeOrData::Data(data) => data.len() as u64,
         };
 
-        // We're going to allocate new buffer. 
+        // We're going to allocate new buffer.
         if need_size > self.max_size {
-            Err(RenderError::BufferError(
-                debug_format!(
-                    "buffer({}) reached to its maximum size",
-                    self.label.as_deref().unwrap_or_default(),
-                )
-            ))
+            Err(RenderError::BufferError(debug_format!(
+                "buffer({}) reached to its maximum size",
+                self.label.as_deref().unwrap_or_default(),
+            )))
         } else if self.alloc_size + need_size > self.quota {
-            Err(RenderError::BufferError(
-                debug_format!(
-                    "buffer({}) reached to its quota",
-                    self.label.as_deref().unwrap_or_default(),
-                )
-            ))
+            Err(RenderError::BufferError(debug_format!(
+                "buffer({}) reached to its quota",
+                self.label.as_deref().unwrap_or_default(),
+            )))
         } else if self.bufs.len() >= self.max_num {
-            Err(RenderError::BufferError(
-                debug_format!(
-                    "buffer({}) reached to its maximum number",
-                    self.label.as_deref().unwrap_or_default(),
-                )
-            ))
+            Err(RenderError::BufferError(debug_format!(
+                "buffer({}) reached to its maximum number",
+                self.label.as_deref().unwrap_or_default(),
+            )))
         } else {
             Ok(Rc::clone(self.alloc(device, usage, size_or_data)))
         }
@@ -636,7 +627,7 @@ impl BufferView {
         wgpu::VertexBufferLayout {
             array_stride: self.get_item_size() as u64,
             step_mode: self.vert_step_mode,
-            attributes: &self.get_vertex_attributes(),
+            attributes: self.get_vertex_attributes(),
         }
     }
 }

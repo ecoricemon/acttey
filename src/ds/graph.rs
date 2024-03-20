@@ -47,7 +47,7 @@ impl<T> DirectedGraph<T> {
     //
     /// Returns nodes, inbounds, and outbounds.
     /// Do not insert or remove any nodes.
-    pub fn each(
+    pub fn destruct(
         &mut self,
     ) -> (
         &mut OptVec<T>,
@@ -81,7 +81,7 @@ impl<T> DirectedGraph<T> {
         self.nodes.get_unchecked(index)
     }
 
-    /// Returns mutable reference of the node, 
+    /// Returns mutable reference of the node,
     /// but it can be None if `index` is out of bound or the slot is vacant.
     #[inline]
     pub fn get_node_mut(&mut self, index: usize) -> Option<&mut T> {
@@ -98,7 +98,7 @@ impl<T> DirectedGraph<T> {
     }
 
     pub fn insert_node(&mut self, value: T) -> usize {
-        let index = self.nodes.insert(value);
+        let index = self.nodes.add(value);
         if index == self.nodes.len() - 1 {
             self.outbounds.push(SetVec::new());
             self.inbounds.push(AHashSet::new());
@@ -150,13 +150,13 @@ impl<T> DirectedGraph<T> {
         self.nodes.iter_occupied()
     }
 
-    pub fn iter_outbounds<'a>(&'a self, index: usize) -> impl Iterator<Item = usize> + Clone + 'a {
+    pub fn iter_outbounds(&self, index: usize) -> impl Iterator<Item = usize> + Clone + '_ {
         self.outbounds[index]
             .values()
             .filter_map(|to| to.as_ref().map(|to| to.get()))
     }
 
-    pub fn iter_inbounds<'a>(&'a self, index: usize) -> impl Iterator<Item = usize> + Clone + 'a {
+    pub fn iter_inbounds(&self, index: usize) -> impl Iterator<Item = usize> + Clone + '_ {
         self.inbounds[index].iter().cloned()
     }
 
@@ -200,6 +200,12 @@ impl<T> DirectedGraph<T> {
     fn disconnect_root(&mut self, index: usize) {
         self.outbounds[0].take_by_value(&NonZeroUsize::new(index).unwrap());
         self.inbounds[index].remove(&0);
+    }
+}
+
+impl<T> Default for DirectedGraph<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

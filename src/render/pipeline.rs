@@ -9,7 +9,7 @@ use crate::{
         shaders::Shader,
         Gpu,
     },
-    util::{key::ResKey, ToStr},
+    util::{key::ResKey, string::ToStr},
 };
 use std::{borrow::Borrow, rc::Rc};
 

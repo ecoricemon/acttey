@@ -1,30 +1,28 @@
-use crate::{
-    render::{
-        canvas::{Canvas, Surface},
-        RenderError,
-    },
-    util::web,
+use super::{
+    canvas::{OffCanvas, Surface},
+    RenderError,
 };
 use std::rc::Rc;
+use wasm_bindgen::JsCast;
 
 pub struct RenderContext {
-    pub window: web_sys::Window,
+    pub global: web_sys::DedicatedWorkerGlobalScope,
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
 }
 
 impl RenderContext {
-    pub async fn new(ref_canvas: &Rc<Canvas>) -> Result<Self, RenderError> {
-        // web_sys::Window.
-        let window = web::get_window();
+    pub async fn new(ref_canvas: Rc<OffCanvas>) -> Result<Self, RenderError> {
+        // Worker's scope.
+        let global = js_sys::global().unchecked_into();
 
         // wgpu::Instance.
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: if cfg!(feature = "webgl") {
-                crate::log!("[Info] WebGL mode");
+                crate::log!("[I] WebGL mode");
                 wgpu::Backends::GL
             } else {
-                crate::log!("[Info] WebGPU mode");
+                crate::log!("[I] WebGPU mode");
                 wgpu::Backends::BROWSER_WEBGPU
             },
             ..Default::default()
@@ -42,7 +40,7 @@ impl RenderContext {
             .ok_or(RenderError::RequestAdapterError)?;
 
         Ok(Self {
-            window,
+            global,
             instance,
             adapter,
         })
@@ -87,8 +85,8 @@ impl Gpu {
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: None,
-                    features,
-                    limits,
+                    required_features: features,
+                    required_limits: limits,
                 },
                 None,
             )

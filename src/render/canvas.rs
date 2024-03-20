@@ -1,11 +1,12 @@
 use crate::{
     ds::generational::{GenIndexRc, GenVecRc},
-    render::RenderError,
-    util::{web, RcStr},
+    worker::msg::JsMsgCanvasResize,
 };
-use ahash::AHashMap;
-use std::{collections::BTreeMap, mem::ManuallyDrop, rc::Rc};
-use wasm_bindgen::prelude::*;
+use std::{
+    mem::ManuallyDrop,
+    ops::Deref,
+    rc::Rc,
+};
 
 /// A set of textures and views from the surfaces used in a single render pass.
 /// In a render pass, call [`SurfacePack::create_color_attachments`] and [`SurfacePack::present`].
@@ -60,7 +61,7 @@ impl SurfacePack {
         surfaces: &GenVecRc<Surface>,
         buf: &'b mut SurfacePackBuffer,
     ) -> ManuallyDrop<Vec<Option<wgpu::RenderPassColorAttachment<'b>>>> {
-        let (textures, views, ptr, len, cap) = buf.each();
+        let (textures, views, ptr, len, cap) = buf.destruct();
         // Safety: Raw parts are valid because we are calling reflect...
         let mut attachments = unsafe { Vec::from_raw_parts(ptr, len, cap) };
 
@@ -147,7 +148,7 @@ impl SurfacePackBuffer {
     /// Caller can generate a vector from the raw parts.
     /// But then, caller must call [`Self::reflect_color_attachments()`]
     /// to reflect the change and guarantee the raw parts are always valid.
-    pub fn each(
+    pub fn destruct(
         &mut self,
     ) -> (
         &mut Vec<wgpu::SurfaceTexture>,
@@ -217,8 +218,8 @@ impl Drop for SurfacePackBuffer {
 }
 
 pub struct Surface {
-    pub canvas: Rc<Canvas>,
-    pub surface: wgpu::Surface,
+    pub offcanvas: Rc<OffCanvas>,
+    pub surface: wgpu::Surface<'static>,
     pub surface_conf: wgpu::SurfaceConfiguration,
     pub color_target: wgpu::ColorTargetState,
     // To keep no lifetime (lost label instead)
@@ -229,21 +230,23 @@ pub struct Surface {
 impl Surface {
     /// Creates surface related to the canvas.
     /// Caller should call `configure()` before using this.
-    pub fn new(instance: &wgpu::Instance, canvas: &Rc<Canvas>) -> Self {
-        // Safety: `canvas` is owned so that it lives as long as `surface`.
-        // TODO: But, if HTML canvas element is removed somewhere?
-        let surface = unsafe { instance.create_surface(canvas.as_ref()).ok() }
-            .expect_throw("Failed to create surface.");
+    pub fn new(instance: &wgpu::Instance, offcanvas: Rc<OffCanvas>) -> Self {
+        let surface = instance
+            .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(
+                web_sys::OffscreenCanvas::clone(&offcanvas.element),
+            ))
+            .unwrap();
 
         // Dummy conf. Caller should call `configure()` to set a proper configuration.
         let surface_conf = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: wgpu::TextureFormat::Bgra8Unorm,
-            width: canvas.element.width(),
-            height: canvas.element.height(),
+            width: offcanvas.width(),
+            height: offcanvas.height(),
             present_mode: wgpu::PresentMode::Fifo,
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
             view_formats: vec![],
+            desired_maximum_frame_latency: 2,
         };
 
         // Default color target.
@@ -263,7 +266,7 @@ impl Surface {
         let color_ops = Default::default();
 
         Self {
-            canvas: Rc::clone(canvas),
+            offcanvas,
             surface,
             surface_conf,
             color_target,
@@ -277,11 +280,16 @@ impl Surface {
         instance: &wgpu::Instance,
         adapter: &wgpu::Adapter,
         device: &wgpu::Device,
-        canvas: &Rc<Canvas>,
+        offcanvas: Rc<OffCanvas>,
     ) -> Self {
-        let mut inst = Self::new(instance, canvas);
+        let mut inst = Self::new(instance, offcanvas);
         inst.configure(adapter, device, None);
         inst
+    }
+
+    #[inline]
+    pub fn handle(&self) -> u32 {
+        self.offcanvas.handle()
     }
 
     /// Sets `wgpu::ColorTargetState` without format.
@@ -312,11 +320,6 @@ impl Surface {
         self.color_ops
     }
 
-    #[inline]
-    pub fn get_canvas_selectors(&self) -> &RcStr {
-        &self.canvas.selectors
-    }
-
     /// Configures the surface.
     /// If `conf` is None, it configures the surface in a way, fits well to the adapter.
     /// Note that color target's format is changed along the conf.
@@ -331,11 +334,12 @@ impl Surface {
         self.surface_conf = conf.unwrap_or(wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surf_caps.formats[0],
-            width: self.canvas.element.width(),
-            height: self.canvas.element.height(),
+            width: self.offcanvas.width(),
+            height: self.offcanvas.height(),
             present_mode: surf_caps.present_modes[0],
             alpha_mode: surf_caps.alpha_modes[0],
             view_formats: vec![],
+            desired_maximum_frame_latency: 2,
         });
         self.surface.configure(device, &self.surface_conf);
 
@@ -343,32 +347,14 @@ impl Surface {
         self.color_target.format = self.surface_conf.format;
     }
 
-    pub fn resize(&mut self, scale_factor: f64, device: &wgpu::Device) {
-        let canvas = &self.canvas.element;
-        let new_width = (canvas.client_width() as f64 * scale_factor) as u32;
-        let new_height = (canvas.client_height() as f64 * scale_factor) as u32;
-
-        if new_width != canvas.width() || new_height != canvas.height() {
-            // Configuration of surface will make the canvas have the same size with it.
+    pub fn resize(&mut self, device: &wgpu::Device, scale: f64, msg: JsMsgCanvasResize) {
+        let new_width = (msg.width as f64 * scale) as u32;
+        let new_height = (msg.height as f64 * scale) as u32;
+        if new_width != self.offcanvas.width() || new_height != self.offcanvas.height() {
             self.surface_conf.width = new_width;
             self.surface_conf.height = new_height;
             self.surface.configure(device, &self.surface_conf);
-
-            debug_assert!(
-                new_width == canvas.width() && new_height == canvas.height(),
-                "Canvas couldn't resize itself"
-            );
-            debug_assert!(
-                new_width == self.surface.get_current_texture().unwrap().texture.width()
-                    && new_height == self.surface.get_current_texture().unwrap().texture.height(),
-                "Surface couldn't resize itself"
-            );
-            crate::log!(
-                "cavas {} resized: ({}, {})",
-                self.canvas.handle,
-                new_width,
-                new_height
-            );
+            crate::log!("[D] Surface::resize(): surface({}) has been resized to {} x {}", self.handle(), new_width, new_height);
         }
     }
 
@@ -379,210 +365,34 @@ impl Surface {
     }
 }
 
-#[derive(Debug)]
-pub struct CanvasPack {
-    /// Handle to Canvas map.
-    handle_to_canvas: BTreeMap<u32, Rc<Canvas>>,
-    /// Selectors to Handle map.
-    selectors_to_handle: AHashMap<RcStr, u32>,
-    /// Monotonically increasing handle number.
-    cur_handle: u32,
-}
-
-impl CanvasPack {
-    const HANDLE_DUMMY: u32 = u32::MAX - 1;
-
-    pub fn new() -> Self {
-        let mut inst = Self {
-            handle_to_canvas: BTreeMap::new(),
-            selectors_to_handle: AHashMap::new(),
-            cur_handle: Self::HANDLE_DUMMY,
-        };
-
-        // Creates dummy canvas to make compatible wgpu::Adapter.
-        // TODO: is this really effective? Test it.
-        let dummy_id = "acttey-dummy-canvas";
-        let dummy_selectors = "#acttey-dummy-canvas";
-        let dummy_canvas: web_sys::HtmlCanvasElement =
-            web::create_element("canvas").expect_throw(crate::errmsg::WEBSYS_ADD_ELEMENT);
-        web::set_attributes(
-            &dummy_canvas,
-            [("id", dummy_id), ("hidden", "")].into_iter(),
-        )
-        .unwrap();
-
-        // Adds dummy canvas.
-        inst.add(dummy_selectors).unwrap();
-
-        // Handle starts from 1.
-        inst.cur_handle = 1;
-
-        inst
-    }
-
-    /// Adds the canvas selected by the given `selectors`.
-    pub fn add(&mut self, selectors: impl Into<RcStr>) -> Result<Rc<Canvas>, RenderError> {
-        let selectors = selectors.into();
-        let canvas = Rc::new(Canvas::new(selectors.clone(), self.cur_handle)?);
-        if let Some(orphan_handle) = self.selectors_to_handle.insert(selectors, self.cur_handle) {
-            self.handle_to_canvas.remove(&orphan_handle);
-        }
-        self.handle_to_canvas
-            .insert(self.cur_handle, Rc::clone(&canvas));
-        self.cur_handle += 1;
-        Ok(canvas)
-    }
-
-    pub fn get_by_selectors(&self, selectors: &str) -> Option<&Rc<Canvas>> {
-        if let Some(handle) = self.selectors_to_handle.get(selectors) {
-            self.handle_to_canvas.get(handle)
-        } else {
-            None
-        }
-    }
-
-    pub fn get_by_handle(&self, handle: &u32) -> Option<&Rc<Canvas>> {
-        self.handle_to_canvas.get(handle)
-    }
-
-    pub fn get_dummy(&self) -> &Rc<Canvas> {
-        self.get_by_handle(&Self::HANDLE_DUMMY).unwrap()
-    }
-
-    pub fn get_first(&self) -> Option<&Rc<Canvas>> {
-        self.handle_to_canvas
-            .values()
-            .find(|canvas| canvas.handle != Self::HANDLE_DUMMY)
-    }
-
-    pub fn get_last(&self) -> Option<&Rc<Canvas>> {
-        self.handle_to_canvas
-            .values()
-            .rfind(|canvas| canvas.handle != Self::HANDLE_DUMMY)
-    }
-
-    pub fn selectors_to_handle(&self, selectors: &str) -> Option<u32> {
-        self.selectors_to_handle.get(selectors).cloned()
-    }
-
-    /// Time complexity: O(n)
-    pub fn handle_to_selectors(&self, handle: u32) -> Option<&str> {
-        self.selectors_to_handle
-            .iter()
-            .find_map(|(selectors, &this_handle)| {
-                (this_handle == handle).then_some(selectors.as_ref())
-            })
-    }
-
-    pub fn contains_selectors(&self, selectors: &str) -> bool {
-        self.get_by_selectors(selectors).is_some()
-    }
-
-    pub fn contains_handle(&self, handle: &u32) -> bool {
-        self.get_by_handle(handle).is_some()
-    }
-
-    /// Clears unused canvases from external and returns the number of removed canvases.
-    pub fn clear(&mut self) -> usize {
-        let unused = self
-            .handle_to_canvas
-            .iter()
-            .filter_map(|(&handle, canvas)| {
-                (handle != Self::HANDLE_DUMMY && Rc::strong_count(canvas) == 1).then_some(handle)
-            })
-            .collect::<Vec<_>>();
-        let removed = unused.len();
-        for handle in unused {
-            self.handle_to_canvas.remove(&handle);
-        }
-        removed
-    }
-}
-
-impl Default for CanvasPack {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[derive(Debug)]
-pub struct Canvas {
-    /// HTML element.
-    element: web_sys::HtmlCanvasElement,
-
-    // ref: https://docs.rs/raw-window-handle/0.5.0/raw_window_handle/struct.WebWindowHandle.html
-    /// Integer handle. This is automatically inserted as an element attribute.
+#[derive(Debug, Clone)]
+pub struct OffCanvas {
+    element: web_sys::OffscreenCanvas,
     handle: u32,
-
-    /// CSS selectors that used to find this canvas.
-    selectors: RcStr,
 }
 
-impl Canvas {
-    pub fn new(selectors: impl Into<RcStr>, handle: u32) -> Result<Self, RenderError> {
-        // 0 is reserved for window itself.
-        assert!(handle > 0);
-
-        // Injects `data-raw-handle` attribute into the canvas element.
-        // This is required by `wgpu::Surface` and `raw-window-handle`.
-        let selectors = selectors.into();
-        let element = Self::get_canvas_element(&selectors)?;
-        web::set_attributes(
-            &element,
-            [("data-raw-handle", handle.to_string().as_str())].into_iter(),
-        )
-        .unwrap();
-
-        Ok(Self {
-            element,
-            handle,
-            selectors,
-        })
-    }
-
-    pub fn get_canvas_element(selectors: &str) -> Result<web_sys::HtmlCanvasElement, RenderError> {
-        let element = web::query_selector(selectors)
-            .map_err(|_| RenderError::CanvasQueryError(selectors.to_owned()))?;
-        let element = element.ok_or(RenderError::CanvasQueryError(selectors.to_owned()))?;
-        let canvas = element
-            .dyn_into::<web_sys::HtmlCanvasElement>()
-            .map_err(|_| RenderError::CanvasQueryError(selectors.to_owned()))?;
-        let width = canvas.client_width() as u32;
-        let height = canvas.client_height() as u32;
-        canvas.set_width(width);
-        canvas.set_height(height);
-        crate::log!(
-            "Canvas({selectors}) size: ({}, {})",
-            canvas.width(),
-            canvas.height()
-        );
-        Ok(canvas)
+impl OffCanvas {
+    #[inline]
+    pub const fn new(element: web_sys::OffscreenCanvas, handle: u32) -> Self {
+        Self { element, handle }
     }
 
     #[inline]
-    pub fn handle(&self) -> u32 {
+    pub fn destruct(self) -> (web_sys::OffscreenCanvas, u32) {
+        (self.element, self.handle)
+    }
+
+    #[inline]
+    pub const fn handle(&self) -> u32 {
         self.handle
     }
+}
+
+impl Deref for OffCanvas {
+    type Target = web_sys::OffscreenCanvas;
 
     #[inline]
-    pub fn selectors(&self) -> &RcStr {
-        &self.selectors
-    }
-}
-
-unsafe impl raw_window_handle::HasRawWindowHandle for Canvas {
-    fn raw_window_handle(&self) -> raw_window_handle::RawWindowHandle {
-        use raw_window_handle::{RawWindowHandle, WebWindowHandle};
-        let mut handle = WebWindowHandle::empty();
-        handle.id = self.handle;
-        RawWindowHandle::Web(handle)
-    }
-}
-
-unsafe impl raw_window_handle::HasRawDisplayHandle for Canvas {
-    fn raw_display_handle(&self) -> raw_window_handle::RawDisplayHandle {
-        use raw_window_handle::{RawDisplayHandle, WebDisplayHandle};
-        let handle = WebDisplayHandle::empty();
-        RawDisplayHandle::Web(handle)
+    fn deref(&self) -> &Self::Target {
+        &self.element
     }
 }

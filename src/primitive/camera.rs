@@ -61,7 +61,7 @@ impl PerspectiveCamera {
 
     #[rustfmt::skip]
     pub fn look_at(camera: Vector<f32, 3>, at: Vector<f32, 3>, up: Vector<f32, 3>) -> Matrix4f {
-        let forward = (camera - at).unit();
+        let forward = (camera - at).into_unit();
         let right = up.normal(forward);
         let up = forward.cross(right);
         Matrix4f::new([

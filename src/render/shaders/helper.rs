@@ -3,7 +3,7 @@ use crate::{
         camera::Camera,
         mesh::{InterleavedGeometry, Material, VertexAttributeVariant},
     },
-    util::trim_end_digits,
+    util::string::{increase_rnumber, trim_rdigits},
 };
 use my_wgsl::*;
 use smallvec::SmallVec;
@@ -137,14 +137,15 @@ impl ShaderHelper {
         let mut st = <InstanceInput as AsStructure>::as_structure();
 
         // Inserts model matrix members into the structure.
+        let mut ident = "model0".to_owned();
         for loc in start_loc..start_loc + 4 {
             // Creates structure member looks like `@location(x) model0: vec4<f32>`
-            let ident = format!("model{}", loc - start_loc);
             let ty = "vec4f".to_string();
             let loc = loc.to_string();
-            let mut member = StructureMember::new(ident, ty);
+            let mut member = StructureMember::new(ident.clone(), ty);
             member.insert_attribute("location", Some(loc.as_str()));
             st.members.push(member);
+            increase_rnumber(&mut ident);
         }
 
         builder.push_structure(st);
@@ -176,7 +177,7 @@ impl ShaderHelper {
 
         // If there's only one member, trims number from the member ident.
         if st.members.len() == 1 {
-            trim_end_digits(&mut st.members[0].ident);
+            trim_rdigits(&mut st.members[0].ident);
         }
 
         builder.push_structure(st);
@@ -261,7 +262,7 @@ impl ShaderHelper {
     fn texture_format_to_shader_str(format: wgpu::TextureFormat) -> &'static str {
         use wgpu::TextureSampleType;
 
-        if let Some(_type) = format.sample_type(None) {
+        if let Some(_type) = format.sample_type(None, None) {
             match _type {
                 TextureSampleType::Float { .. } => return "vec4f",
                 TextureSampleType::Uint => return "vec4u",

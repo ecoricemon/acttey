@@ -1,16 +1,9 @@
 #![allow(dead_code)]
 
-use std::{
-    borrow::{Borrow, Cow},
-    hash::Hash,
-    mem::{size_of, transmute},
-    ops::{Deref, DerefMut, Div, Mul, Rem},
-    rc::Rc,
-    thread,
-};
-
 pub mod key;
 pub mod macros;
+pub mod slice;
+pub mod string;
 pub mod web;
 
 pub mod prelude {
@@ -18,32 +11,13 @@ pub mod prelude {
     pub use crate::{log, ty};
 }
 
-use std::mem::{transmute_copy, MaybeUninit};
+use std::{
+    mem::{size_of, transmute},
+    ops::{Deref, DerefMut, Div, Mul, Rem},
+    thread,
+};
 
-#[inline(always)]
-pub(crate) fn upcast_slice<T>(v: &mut [T]) -> *mut [()] {
-    v as *mut [T] as *mut [()]
-}
-
-/// # Safety
-///
-/// Caller must provide the original type `T` of the `ptr`.
-/// Calling this method with the incorrect type is *undefined behavior*.
-#[inline(always)]
-pub(crate) unsafe fn downcast_slice<'a, T>(ptr: *mut [()]) -> &'a [T] {
-    &*(ptr as *const [T])
-}
-
-/// # Safety
-///
-/// Caller must provide the original type `T` of the `ptr`.
-/// Calling this method with the incorrect type is *undefined behavior*.
-#[inline(always)]
-pub(crate) unsafe fn downcast_mut_slice<'a, T>(ptr: *mut [()]) -> &'a mut [T] {
-    &mut *(ptr as *mut [T])
-}
-
-pub(crate) fn current_thread_id() -> u64 {
+pub fn current_thread_id() -> u64 {
     let id = thread::current().id();
 
     // Safety: ThreadId and u64 are both 8 bytes.
@@ -51,195 +25,54 @@ pub(crate) fn current_thread_id() -> u64 {
     unsafe { transmute(id) }
 }
 
+/// A structure representing 2^k value.
+/// But you can designate zero to this structure although zero is not 2^k.
+/// In that case, zero is considered as usize::MAX + 1.
 #[derive(Debug, Clone)]
-pub(crate) struct PowerOfTwo {
-    pub(crate) value: usize,
-    pub(crate) power: usize,
-    pub(crate) r_mask: usize,
+pub struct PowerOfTwo {
+    value: usize,
+    k: u32,
+    mask: usize,
 }
 
 impl PowerOfTwo {
-    /// # Panics
-    ///
-    /// Calling with `value` 0 can cause panic.
-    pub(crate) fn new(value: usize) -> Option<Self> {
-        value.is_power_of_two().then_some(Self {
-            value,
-            power: value.trailing_zeros() as usize,
-            r_mask: value - 1,
-        })
+    pub const fn new(value: usize) -> Option<Self> {
+        if value.is_power_of_two() {
+            Some(if value == 0 {
+                Self {
+                    value,
+                    k: 0,
+                    mask: 0,
+                }
+            } else {
+                Self {
+                    value,
+                    k: value.trailing_zeros(),
+                    mask: usize::MAX,
+                }
+            })
+        } else {
+            None
+        }
     }
 
     #[inline(always)]
-    pub(crate) fn quotient(&self, lhs: usize) -> usize {
-        lhs >> self.power
+    pub const fn get(&self) -> usize {
+        self.value
     }
 
     #[inline(always)]
-    pub(crate) fn remainder(&self, lhs: usize) -> usize {
-        lhs & self.r_mask
+    pub const fn quotient(&self, lhs: usize) -> usize {
+        (lhs >> self.k) & self.mask
+    }
+
+    #[inline(always)]
+    pub const fn remainder(&self, lhs: usize) -> usize {
+        lhs & self.value.wrapping_sub(1)
     }
 }
 
-/// Splits slice into some of individual shared references.
-/// `indices` must be sorted in ascending order and valid for the given `v`.
-pub(crate) fn split<T, const N: usize>(mut v: &[T], mut indices: [usize; N]) -> [&T; N] {
-    debug_assert!(
-        indices.windows(2).all(|window| window[0] < window[1])
-            && N <= v.len()
-            && indices[N - 1] < v.len()
-    );
-
-    // Calculates diff of indices.
-    for i in (1..indices.len()).rev() {
-        indices[i] -= indices[i - 1] + 1;
-    }
-
-    // Safety: We're going to initialze right away.
-    let mut arr: [MaybeUninit<&T>; N] = unsafe { MaybeUninit::uninit().assume_init() };
-
-    for (i, mid) in indices.into_iter().enumerate() {
-        let (x, tail) = v.split_at(mid).1.split_first().unwrap();
-        arr[i].write(x);
-        v = tail;
-    }
-
-    // Safety: Everything is initialized and type is correct.
-    // I don't know why we can't use transmute here?
-    unsafe { transmute_copy::<_, _>(&arr) }
-}
-
-/// Splits slice into some of individual mutable references.
-/// `indices` must be sorted in ascending order and valid for the given `v`.
-pub(crate) fn split_mut<T, const N: usize>(
-    mut v: &mut [T],
-    mut indices: [usize; N],
-) -> [&mut T; N] {
-    debug_assert!(
-        indices.windows(2).all(|window| window[0] < window[1])
-            && N <= v.len()
-            && indices[N - 1] < v.len()
-    );
-
-    // Calculates diff of indices.
-    for i in (1..indices.len()).rev() {
-        indices[i] -= indices[i - 1] + 1;
-    }
-
-    // Safety: We're going to initialze right away.
-    let mut arr: [MaybeUninit<&mut T>; N] = unsafe { MaybeUninit::uninit().assume_init() };
-
-    for (i, mid) in indices.into_iter().enumerate() {
-        let (x, tail) = v.split_at_mut(mid).1.split_first_mut().unwrap();
-        arr[i].write(x);
-        v = tail;
-    }
-
-    // Safety: Everything is initialized and type is correct.
-    // I don't know why we can't use transmute here?
-    unsafe { transmute_copy::<_, _>(&arr) }
-}
-
-/// Updates value located at `target` using value at `by`.
-/// If you need more values, consider using [`split_mut`], which is more powerful but more complex.
-///
-/// # Panics
-///
-/// Panics if `target` or `by` is out of index, or `target` is equal to `by`.
-pub(crate) fn update_slice_by<T>(
-    values: &mut [T],
-    target: usize,
-    by: usize,
-    f: impl FnOnce(&mut T, &T),
-) {
-    if target < by {
-        let (tvalue, tail) = values.split_at_mut(target).1.split_first_mut().unwrap();
-        f(tvalue, &tail[by - target - 1]);
-    } else {
-        let (bvalue, tail) = values.split_at_mut(by).1.split_first_mut().unwrap();
-        f(&mut tail[target - by - 1], bvalue);
-    }
-}
-
-pub(crate) fn concat_string(l: &str, r: &str) -> String {
-    let mut s = String::with_capacity(l.len() + r.len());
-    s.push_str(l);
-    s.push_str(r);
-    s
-}
-
-pub(crate) fn concat_opt_string(l: Option<&str>, r: &str) -> Option<String> {
-    l.map(|l| concat_string(l, r))
-}
-
-pub(crate) fn trim_end_digits(s: &mut String) {
-    let digit_num = s.chars().rev().take_while(|c| c.is_ascii_digit()).count();
-    s.truncate(s.len() - digit_num);
-}
-
-/// Used to be shown as a string even if it's not a string type.
-pub trait ToStr {
-    fn to_str(&self) -> Cow<str>;
-}
-
-/// Common [`ToStr`] implementation for [`str`].
-impl ToStr for str {
-    fn to_str(&self) -> Cow<str> {
-        Cow::Borrowed(self)
-    }
-}
-
-/// Common [`ToStr`] implementation for [`String`].
-impl ToStr for String {
-    fn to_str(&self) -> Cow<str> {
-        Cow::Borrowed(self.as_str())
-    }
-}
-
-/// Common [`ToStr`] implementation for [`Rc<str>`].
-impl ToStr for Rc<str> {
-    fn to_str(&self) -> Cow<str> {
-        Cow::Borrowed(self)
-    }
-}
-
-/// Common [`ToStr`] implementation for [`Box<str>`].
-impl ToStr for Box<str> {
-    fn to_str(&self) -> Cow<str> {
-        Cow::Borrowed(self)
-    }
-}
-
-/// Encodes a single byte into base64.
-#[inline(always)]
-pub const fn encode_base64(byte: u8) -> u8 {
-    match byte {
-        0..=25 => b'A' + byte,
-        26..=51 => b'a' + byte - 26,
-        52..=61 => b'0' + byte - 52,
-        // URL safe version, standard: '+'
-        62 => b'-',
-        // URL safe version, standard: '/'
-        63 => b'_',
-        _ => panic!(),
-    }
-}
-
-/// Encodes a single u32 value into base64.
-#[inline]
-pub const fn encode_base64_u32(value: u32) -> [u8; 6] {
-    const MASK: u32 = (1 << 6) - 1;
-    [
-        encode_base64(((value >> 26) & MASK) as u8),
-        encode_base64(((value >> 20) & MASK) as u8),
-        encode_base64(((value >> 14) & MASK) as u8),
-        encode_base64(((value >> 8) & MASK) as u8),
-        encode_base64(((value >> 2) & MASK) as u8),
-        encode_base64(((value << 4) & MASK) as u8),
-    ]
-}
-
-/// It's same with Into<&\[u8\>.
+/// It's same with Into<&\[u8]\>.
 /// Structs that implements Into<&\[u8\]> also implements this automatically.
 pub trait AsBytes {
     fn as_bytes(&self) -> &[u8];
@@ -258,117 +91,6 @@ where
 
 pub trait AsMultiBytes {
     fn as_bytes(&self, index: usize) -> &[u8];
-}
-
-/// A wrapper of `Option<&str>`. Empty string is considered as None.
-/// This is interchangable with `Option<&str>` and `&str` using [`From::from()`] or [`Into::into()`].
-pub struct OptionStr<'a>(Option<&'a str>);
-
-impl<'a> OptionStr<'a> {
-    /// Creates `Option<RcStr>` from the [`OptionStr`].
-    /// You can use that for a shared string.
-    #[inline]
-    pub fn as_rc_str(&self) -> Option<RcStr> {
-        self.0.map(RcStr::from)
-    }
-}
-
-impl<'a> Deref for OptionStr<'a> {
-    type Target = Option<&'a str>;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-// &str -> OptionStr
-impl<'a> From<&'a str> for OptionStr<'a> {
-    #[inline]
-    fn from(value: &'a str) -> Self {
-        Self(if value.is_empty() { None } else { Some(value) })
-    }
-}
-
-// OptionStr -> &str
-impl<'a> From<OptionStr<'a>> for &'a str {
-    #[inline]
-    fn from(value: OptionStr<'a>) -> Self {
-        value.0.unwrap_or_default()
-    }
-}
-
-// Option<&str> -> OptionStr
-impl<'a> From<Option<&'a str>> for OptionStr<'a> {
-    #[inline]
-    fn from(value: Option<&'a str>) -> Self {
-        match value {
-            Some(s) if !s.is_empty() => Self(value),
-            _ => Self(None),
-        }
-    }
-}
-
-// OptionStr -> Option<&str>
-impl<'a> From<OptionStr<'a>> for Option<&'a str> {
-    #[inline]
-    fn from(value: OptionStr<'a>) -> Self {
-        value.0
-    }
-}
-
-/// Rc\<str\> with From implementations.
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct RcStr(Rc<str>);
-
-impl From<&Rc<str>> for RcStr {
-    fn from(value: &Rc<str>) -> Self {
-        Self(Rc::clone(value))
-    }
-}
-
-impl From<Rc<str>> for RcStr {
-    fn from(value: Rc<str>) -> Self {
-        Self(value)
-    }
-}
-
-impl From<&RcStr> for RcStr {
-    fn from(value: &RcStr) -> Self {
-        value.clone()
-    }
-}
-
-impl From<&str> for RcStr {
-    fn from(value: &str) -> Self {
-        Self(Rc::from(value))
-    }
-}
-
-impl From<String> for RcStr {
-    fn from(value: String) -> Self {
-        Self(Rc::from(value))
-    }
-}
-
-impl Deref for RcStr {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Borrow<str> for RcStr {
-    fn borrow(&self) -> &str {
-        &self.0
-    }
-}
-
-impl AsRef<str> for RcStr {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
 }
 
 pub fn gcd<T>(a: T, b: T) -> T
@@ -441,6 +163,19 @@ impl Window {
         self.offset + self.len
     }
 
+    /// Retrieves offset + index.  
+    /// You can add them manually if you don't want bound check.
+    ///
+    /// # Panics
+    ///
+    /// Panics if offset + index is out of bound.
+    #[inline]
+    pub const fn index(&self, index: usize) -> usize {
+        let res = self.offset + index;
+        assert!(res < self.end());
+        res
+    }
+
     /// Shrinks window from left side by `amount`.
     ///
     /// # Panic
@@ -461,13 +196,16 @@ pub struct View<T = usize> {
     item_size: T,
 }
 
-impl<T> View<T> 
+impl<T> View<T>
 where
-    T: Copy + From<usize> + Mul<T, Output = T> 
+    T: Copy + From<usize> + Mul<T, Output = T>,
 {
     #[inline]
     pub const fn new(offset: usize, len: usize, item_size: T) -> Self {
-        Self { win: Window::new(offset, len), item_size }
+        Self {
+            win: Window::new(offset, len),
+            item_size,
+        }
     }
 
     /// Sets unit item size in bytes.

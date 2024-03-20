@@ -226,12 +226,24 @@ fn impl_entity(input: TokenStream, check: bool) -> TokenStream {
             )
             where
                 T: acttey::ecs::traits::CollectGeneric +
-                   acttey::ecs::traits::Downcast
+                    acttey::ecs::traits::Downcast
             {
                 // *Expand example*
                 // collector.collect_type<CompA>();
                 // collector.collect_type<CompB>();
                 #(#collect_types)*
+
+            // fn notify_types(
+            //     storage: &mut acttey::ecs::storage::Storage,
+            //     col: std::option::Option<std::boxed::Box<
+            //         acttey::ecs::traits::Collect
+            //     >>,
+            // ) {
+                // #(storage.collectors.register_component::<#field_types>();)*
+                // storage.collectors.add_collector(
+                //     vec![#(std::any::TypeId::of::<#field_types>()),*],
+                //     col
+                // );
 
                 #(#insert_downcasters)*
 

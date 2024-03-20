@@ -4,7 +4,7 @@ use crate::{
     render::{
         bind::{BindPack, Binding},
         buffer::SizeOrData,
-        canvas::{Canvas, CanvasPack, Surface, SurfacePack},
+        canvas::{OffCanvas, Surface, SurfacePack},
         context::{Gpu, RenderContext},
         descs,
         pipeline::{PipelineBuilder, PipelineLayoutBuilder, PipelinePack},
@@ -12,19 +12,19 @@ use crate::{
         BufferPool, RenderError,
     },
     ty,
-    util::{key::ResKey, RcStr},
+    util::key::ResKey,
 };
 use ahash::AHashMap;
 use smallvec::{smallvec, SmallVec};
-use std::{borrow::Borrow, hash::Hash, mem::transmute_copy, rc::Rc};
+use std::{borrow::Borrow, collections::HashMap, hash::Hash, mem::transmute_copy, rc::Rc};
 
 /// Top struct in render module.
 pub struct RenderResource {
     /// [`wgpu::Device`] and [`wgpu::Queue`].
     pub gpu: Rc<Gpu>,
 
-    /// A set of [`Canvas`].
-    pub canvases: CanvasPack,
+    /// A set of [`OffCanvas`].
+    pub canvases: HashMap<u32, Rc<OffCanvas>, ahash::RandomState>,
 
     /// [`web_sys::Window`], [`wgpu::Instance`] and [`wgpu::Adapter`].
     pub context: RenderContext,
@@ -36,7 +36,7 @@ pub struct RenderResource {
     pub surf_packs: GenVecRc<SurfacePack>,
 
     /// A map to find [`Surface`] from a canvas' CSS selectors.
-    pub canvas_to_surf: AHashMap<RcStr, SmallVec<[GenIndex; 1]>>,
+    pub canvas_to_surf: AHashMap<u32, SmallVec<[GenIndex; 1]>>,
 
     /// All GPU buffers are here.
     pub bufs: BufferPool,
@@ -49,12 +49,19 @@ pub struct RenderResource {
 
     /// TODO
     pub pipelines: PipelinePack,
+
+    pub scale: f64,
 }
 
 impl RenderResource {
-    pub async fn new() -> Result<Self, RenderError> {
-        let canvases = CanvasPack::new();
-        let context = RenderContext::new(canvases.get_dummy()).await?;
+    pub async fn new(offcanvas: OffCanvas) -> Result<Self, RenderError> {
+        // Canvases.
+        let mut canvases = HashMap::default();
+        let offcanvas = Rc::new(offcanvas);
+        canvases.insert(offcanvas.handle(), Rc::clone(&offcanvas));
+
+        // Render context.
+        let context = RenderContext::new(offcanvas).await?;
 
         // Default gpu.
         let gpu = Rc::new(Gpu::new(&context.adapter, None, None).await?);
@@ -82,6 +89,7 @@ impl RenderResource {
             shaders,
             binds,
             pipelines,
+            scale: 0.0,
         })
     }
 
@@ -103,23 +111,27 @@ impl RenderResource {
 
     /// Adds a new canvas and returns [`Canvas`].
     /// Use it to make a [`Surface`].
-    /// Unused canvases will be removed when [`Self::clear_unused_canvas`] called.
+    /// Unused canvases will be removed when [`Self::clear_unused_canvas`] is called.
     #[inline]
-    pub fn add_canvas(&mut self, selectors: impl Into<RcStr>) -> CanvasReturn {
-        let ret = self.canvases.add(selectors);
-        CanvasReturn { recv: self, ret }
+    pub fn add_canvas(&mut self, offcanvas: OffCanvas) -> CanvasReturn {
+        let offcanvas = Rc::new(offcanvas);
+        // TODO: use Error
+        let old = self
+            .canvases
+            .insert(offcanvas.handle(), Rc::clone(&offcanvas));
+        if old.is_some() {
+            panic!();
+        }
+        CanvasReturn {
+            recv: self,
+            ret: offcanvas,
+        }
     }
 
     /// Gets the canvas.
     #[inline]
-    pub fn get_canvas(&self, selectors: &str) -> Option<&Rc<Canvas>> {
-        self.canvases.get_by_selectors(selectors)
-    }
-
-    /// Clears unused canvases and returns the number of removed canvases.
-    #[inline]
-    pub fn clear_unused_canvas(&mut self) -> usize {
-        self.canvases.clear()
+    pub fn get_canvas(&self, handle: u32) -> Option<&Rc<OffCanvas>> {
+        self.canvases.get(&handle)
     }
 
     /// Adds a new surface.
@@ -165,20 +177,19 @@ impl RenderResource {
     /// Adds a new surface pack from the given canvas selectors.
     /// Each canvas can have multiple surfaces, and the surface pack will be composed of
     /// all surfaces from all canvases.
-    pub fn add_surface_pack_from<'a, I, II>(&mut self, canvases: I) -> GenIndexRc
+    pub fn add_surface_pack_from<'a, I>(&mut self, handles: I) -> GenIndexRc
     where
-        I: Iterator<Item = &'a II> + Clone,
-        II: Borrow<str> + 'a,
+        I: Iterator<Item = &'a u32> + Clone,
     {
         // Fixes the mapping if it's broken.
-        for selectors in canvases.clone() {
-            self.fix_canvas_surfaces(selectors.borrow());
+        for handle in handles.clone() {
+            self.fix_canvas_surfaces(*handle);
         }
 
         // Gathers all surfaces and make a surface pack from them.
         let mut surf_pack = SurfacePack::new();
-        for selectors in canvases {
-            if let Some(surf_indices) = self.canvas_to_surf.get(selectors.borrow()) {
+        for handle in handles {
+            if let Some(surf_indices) = self.canvas_to_surf.get(handle) {
                 for index in surf_indices.iter() {
                     // Vacant item will result in an empty slot in surface pack.
                     let rc_index = self.surfaces.own(index.index);
@@ -245,7 +256,7 @@ impl RenderResource {
 
     /// Requests a writable uniform buffer and then adds it.
     #[inline]
-    pub fn add_uniform_buffer<'a>(
+    pub fn add_uniform_buffer(
         &mut self,
         size_or_data: SizeOrData,
     ) -> Result<Rc<wgpu::Buffer>, RenderError> {
@@ -257,7 +268,7 @@ impl RenderResource {
 
     /// Requests a read-only uniform buffer and then adds it.
     #[inline]
-    pub fn add_ro_uniform_buffer<'a>(
+    pub fn add_ro_uniform_buffer(
         &mut self,
         size_or_data: SizeOrData,
     ) -> Result<Rc<wgpu::Buffer>, RenderError> {
@@ -450,21 +461,14 @@ impl RenderResource {
         }
     }
 
-    pub fn resize_surface(&mut self, index: GenIndex) {
-        if let Some(surf) = self.surfaces.sneak_get_mut(index) {
-            let scale_factor = self.context.window.device_pixel_ratio();
-            surf.resize(scale_factor, &self.gpu.device);
-        }
-    }
-
     /// [`Self::canvas_to_surf`] is like weak references, its indices can be broken.
     /// This fixes the mapping if it was broken.
-    pub fn fix_canvas_surfaces(&mut self, selectors: &str) {
+    pub fn fix_canvas_surfaces(&mut self, handle: u32) {
         // Checks if there's something broken.
-        let broken = if let Some(surf_indices) = self.canvas_to_surf.get(selectors) {
+        let broken = if let Some(surf_indices) = self.canvas_to_surf.get(&handle) {
             surf_indices.iter().any(|&index| {
                 if let Some(surf) = self.surfaces.get(index) {
-                    surf.canvas.selectors().as_ref() != selectors
+                    surf.offcanvas.handle() != handle
                 } else {
                     true
                 }
@@ -476,15 +480,14 @@ impl RenderResource {
         // Re-generate surface indices only if it was broken.
         if broken {
             // Safety: Infallible.
-            let surf_indices = unsafe { self.canvas_to_surf.get_mut(selectors).unwrap_unchecked() };
+            let surf_indices = unsafe { self.canvas_to_surf.get_mut(&handle).unwrap_unchecked() };
             *surf_indices = self
                 .surfaces
                 .iter()
                 .enumerate()
                 .filter_map(|(index, surf)| {
                     if let Some(surf) = surf.as_ref() {
-                        (surf.canvas.selectors().as_ref() == selectors)
-                            .then_some(GenIndex::new_forced(index))
+                        (surf.offcanvas.handle() == handle).then_some(GenIndex::new_forced(index))
                     } else {
                         None
                     }
@@ -495,20 +498,12 @@ impl RenderResource {
 
     /// Adds a mapping of canvas' CSS selectors to surface index.
     /// The index becomes forced index, so that no generation check takes place.
-    pub(crate) fn add_canvas_to_surface(
-        &mut self,
-        selectors: impl Into<RcStr>,
-        surface_index: GenIndex,
-    ) {
+    pub(crate) fn add_canvas_to_surface(&mut self, handle: u32, surface_index: GenIndex) {
         let surface_index = surface_index.into_forced();
         self.canvas_to_surf
-            .entry(selectors.into())
+            .entry(handle)
             .and_modify(|indices| indices.push(surface_index))
             .or_insert(smallvec![surface_index]);
-    }
-
-    pub fn device_pixel_ratio(&self) -> f64 {
-        self.context.window.device_pixel_ratio()
     }
 
     /// Changes all sub-references to the current one.
@@ -517,35 +512,39 @@ impl RenderResource {
     }
 }
 
-decl_return_wrap!(
-    CanvasReturn,
-    RenderResource,
-    Result<Rc<Canvas>, RenderError>
-);
+decl_return_wrap!(CanvasReturn, RenderResource, Rc<OffCanvas>);
 
 impl<'a> CanvasReturn<'a> {
+    pub fn into_return(self) -> Rc<OffCanvas> {
+        self.ret
+    }
+
     /// Adds a default [`Surface`] with the canvas for render attachment.
     ///
     /// If you are going to make another type of `Surface`,
     /// use [`RenderResource::add_surface`] instead.
-    pub fn with_default(self) -> Result<(), RenderError> {
-        let Self { recv: render, ret } = self;
-        {
-            // Creates a default surface.
-            let canvas = ret?;
-            let surface = Surface::default(
-                &render.context.instance,
-                &render.context.adapter,
-                &render.gpu.device,
-                &canvas,
-            );
-            let index = render.add_surface(surface);
+    pub fn with_default_surface(self) -> Self {
+        let Self {
+            recv: render,
+            ret: canvas,
+        } = self;
 
-            // Adds a mapping of CSS selectors to surface index.
-            render.add_canvas_to_surface(canvas.selectors(), index.index);
+        // Creates a default surface.
+        let surface = Surface::default(
+            &render.context.instance,
+            &render.context.adapter,
+            &render.gpu.device,
+            Rc::clone(&canvas),
+        );
+        let index = render.add_surface(surface);
+
+        // Adds a mapping of CSS selectors to surface index.
+        render.add_canvas_to_surface(canvas.handle(), index.index);
+
+        Self {
+            recv: render,
+            ret: canvas,
         }
-
-        Ok(())
     }
 }
 

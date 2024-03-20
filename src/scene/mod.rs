@@ -1,8 +1,8 @@
 pub mod hierarchy;
-pub mod scene;
+pub mod inner;
 
 pub mod prelude {
-    pub use super::{scene::Scene, SceneError};
+    pub use super::{inner::Scene, SceneError};
 }
 
 use crate::prelude::RenderError;

@@ -9,8 +9,8 @@ use crate::{
     },
 };
 
+/// Object safe trait for various types of systems.
 pub trait Invokable {
-    // Depends on DataPool for object safety.
     fn invoke(&mut self, res_pack: &ResourcePack);
 }
 
@@ -19,37 +19,31 @@ impl<S: System> Invokable for S {
     fn invoke(&mut self, res_pack: &ResourcePack) {
         let storage = res_pack.get::<Storage>();
         let skey = skey!(S);
-        self.run(
-            <S::Ref as Query>::query(storage, skey),
-            <S::Mut as QueryMut>::query_mut(storage, skey),
-            <S::ResRef as ResQuery>::query(res_pack),
-            <S::ResMut as ResQueryMut>::query_mut(res_pack),
-        );
-        storage.returns(&skey);
+        let param = SysParam {
+            read: <S::Read as Query>::query(storage, skey),
+            write: <S::Write as QueryMut>::query_mut(storage, skey),
+            res_read: <S::ResRead as ResQuery>::query(res_pack),
+            res_write: <S::ResWrite as ResQueryMut>::query_mut(res_pack),
+        };
+        self.run(param);
     }
 }
 
-pub trait System: 'static {
-    type Ref: for<'a> Query<'a>;
-    type Mut: for<'a> QueryMut<'a>;
-    type ResRef: for<'a> ResQuery<'a>;
-    type ResMut: for<'a> ResQueryMut<'a>;
+pub trait System: 'static + Sized {
+    type Read: for<'a> Query<'a>;
+    type Write: for<'a> QueryMut<'a>;
+    type ResRead: for<'a> ResQuery<'a>;
+    type ResWrite: for<'a> ResQueryMut<'a>;
 
-    fn run(
-        &mut self,
-        r: <Self::Ref as Query>::Output,
-        m: <Self::Mut as QueryMut>::Output,
-        rr: <Self::ResRef as ResQuery>::Output,
-        rm: <Self::ResMut as ResQueryMut>::Output,
-    );
+    fn run(&mut self, param: SysParam<'_, Self>);
 
     fn info() -> SystemInfo {
         let skey = skey!(Self);
         SystemInfo {
-            qkey: <Self::Ref as Query>::gen_key(skey),
-            qkey_mut: <Self::Mut as QueryMut>::gen_key_mut(skey),
-            qinfo: <Self::Ref as Query>::info(skey),
-            qinfo_mut: <Self::Mut as QueryMut>::info_mut(skey),
+            qkey: <Self::Read as Query>::gen_key(skey),
+            qkey_mut: <Self::Write as QueryMut>::gen_key_mut(skey),
+            qinfo: <Self::Read as Query>::info(skey),
+            qinfo_mut: <Self::Write as QueryMut>::info_mut(skey),
             reads: vec![],
             writes: vec![],
         }
@@ -58,6 +52,21 @@ pub trait System: 'static {
     fn key() -> SystemKey {
         skey!(Self)
     }
+}
+
+/// A shallow warpper of query retrieval results.
+pub struct SysParam<'a, S: System> {
+    /// Retrieved data for the query [`System::Read`].
+    pub read: <S::Read as Query<'a>>::Output,
+
+    /// Retrieved data for the query [`System::Write`].
+    pub write: <S::Write as QueryMut<'a>>::Output,
+
+    /// Retrieved data for the query [`System::ResRead`].
+    pub res_read: <S::ResRead as ResQuery<'a>>::Output,
+
+    /// Retrieved data for the query [`System::ResWrite`].
+    pub res_write: <S::ResWrite as ResQueryMut<'a>>::Output,
 }
 
 pub struct SystemInfo {

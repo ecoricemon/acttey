@@ -309,13 +309,11 @@ pub fn create_icosphere(radius: f32, division: usize, color: Color) -> Geometry 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wasm_bindgen_test::*;
     use crate::primitive::{
         transform::{rotate_z, scale},
         constant::colors,
     };
-    use wasm_bindgen_test::*;
-
-    wasm_bindgen_test_configure!(run_in_browser);
 
     const EPS: f32 = 1e-6;
 

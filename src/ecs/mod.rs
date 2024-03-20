@@ -1,5 +1,7 @@
+pub mod borrow_js;
 pub mod predefined;
 pub mod query;
+pub mod sparse_set;
 pub mod storage;
 pub mod system;
 pub mod traits;
@@ -10,7 +12,7 @@ pub mod prelude {
     pub use super::{
         predefined::prelude::*,
         query::{Filter, Query, QueryMut, ResQuery, ResQueryMut},
-        system::{System, Systems},
+        system::{SysParam, System, Systems},
     };
     pub use acttey_ecs_macros::{Component, Entity};
 }
@@ -71,12 +73,12 @@ macro_rules! qkey {
 pub(crate) use qkey;
 
 #[derive(Hash, PartialEq, Eq, Clone, Copy, Debug)]
-pub struct FilteResKey {
+pub struct FilterKey {
     f_ty: TypeId,
     qkey: QueryKey,
 }
 
-impl FilteResKey {
+impl FilterKey {
     #[inline]
     pub fn new(f_ty: TypeId, qkey: QueryKey) -> Self {
         Self { f_ty, qkey }
@@ -86,13 +88,13 @@ impl FilteResKey {
 #[allow(unused_macros)]
 macro_rules! fkey {
     (&$t:ident, $qkey:expr) => {
-        $crate::ecs::FilteResKey::new($crate::ty!(&$t), $qkey)
+        $crate::ecs::FilterKey::new($crate::ty!(&$t), $qkey)
     };
     (&&$t:ident, $qkey:expr) => {
-        $crate::ecs::FilteResKey::new($crate::ty!(&&$t), $qkey)
+        $crate::ecs::FilterKey::new($crate::ty!(&&$t), $qkey)
     };
     ($t:ty, $qkey:expr) => {
-        $crate::ecs::FilteResKey::new($crate::ty!($t), $qkey)
+        $crate::ecs::FilterKey::new($crate::ty!($t), $qkey)
     };
 }
 

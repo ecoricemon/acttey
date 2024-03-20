@@ -1,4 +1,4 @@
-use crate::util::{RcStr, ToStr};
+use crate::util::string::{RcStr, ToStr};
 use std::{
     borrow::Cow,
     hash::{Hash, Hasher},

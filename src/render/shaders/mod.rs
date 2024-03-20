@@ -7,7 +7,7 @@ use crate::{
         sparse_set::MonoSparseSet,
     },
     render::Gpu,
-    util::{key::ResKey, ToStr},
+    util::{key::ResKey, string::ToStr},
 };
 use my_wgsl::*;
 use std::{borrow::Cow, rc::Rc};
