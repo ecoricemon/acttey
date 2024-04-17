@@ -15,10 +15,11 @@ lto = true
 panic = "abort"
 
 [dependencies]
-wasm-bindgen = { version = "0.2.87" }
-wasm-bindgen-futures = { version = "0.4.37" }
-js-sys = { version = "0.3.64" }
-web-sys = { version = "0.3.64", features = [
+wasm-bindgen = { version = "0.2.92" }
+# Cargo issue (https://github.com/rustwasm/wasm-bindgen/issues/3830)
+wasm-bindgen-futures = { version = "=0.4.40" } 
+js-sys = { version = "0.3.69" }
+web-sys = { version = "0.3.69", features = [
     "console",
     "Node",
     "Window",
@@ -30,6 +31,8 @@ web-sys = { version = "0.3.64", features = [
     "OffscreenCanvas",
     "Worker",
     "DedicatedWorkerGlobalScope",
+    "WorkerGlobalScope",
+    "WorkerNavigator",
     "Event",
     "EventTarget",
     "MessageEvent",

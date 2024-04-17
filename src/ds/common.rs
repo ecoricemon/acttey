@@ -94,6 +94,8 @@ impl<T: 'static + Clone> CloneDetector<T> {
 /// This macro exploits Rust's function look-up procedures to determine if the type implenets `Clone`.
 /// See [`CloneDetector::type_info`] for more details.
 ///
+/// Plus, you can re-assign type's name by putting yours in like `tinfo!(T, "new-name")`.
+///
 /// # Examples
 ///
 /// ```
@@ -126,5 +128,17 @@ macro_rules! tinfo {
         } else {
             <$ty as $crate::ds::common::AsTypeInfo>::as_type_info()
         }
+    }};
+    ($ty:ty, $name:literal) => {{
+        #[allow(unused)]
+        use $crate::ds::common::Uncloneable;
+
+        let mut info = if let Some(info) = $crate::ds::common::CloneDetector::<$ty>::type_info() {
+            info
+        } else {
+            <$ty as $crate::ds::common::AsTypeInfo>::as_type_info()
+        };
+        info.name = $name;
+        info
     }};
 }

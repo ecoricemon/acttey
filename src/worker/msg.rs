@@ -1,51 +1,19 @@
-use paste::paste;
-use std::mem;
+use super::WorkerId;
+use crate::ecs::{
+    request::{RequestBuffer, RequestKey},
+    system::Invokable,
+};
+use std::{fmt::Debug, mem, ptr::NonNull, thread::Thread};
 use wasm_bindgen::{JsCast, JsValue};
 
-#[repr(C)]
-union Primitive {
-    i8: i8,
-    u8: u8,
-    i16: i16,
-    u16: u16,
-    i32: i32,
-    u32: u32,
-    f32: f32,
-    i64: i64,
-    u64: u64,
-    f64: f64,
-}
-/// Declares `transmute_<>_to_f64` and `transmute_f64_to_<>`.
-/// Those functions copy data in bit level.  
-/// Only pimitive types, that are smaller than or equal to f64, are allowed.
-macro_rules! decl_transmute_f64 {
-    ($ty:ty) => {
-        paste! {
-            #[allow(dead_code)]
-            #[inline]
-            fn [<transmute_$ty _to_f64>](value: $ty) -> f64 {
-                unsafe { Primitive { $ty: value }.f64 }
-            }
-
-            #[allow(dead_code)]
-            #[inline]
-            fn [<transmute_f64_to_$ty>](value: f64) -> $ty {
-                unsafe { Primitive { f64: value }.$ty }
-            }
-        }
-    };
-}
-
-decl_transmute_f64!(i8);
-decl_transmute_f64!(i16);
-decl_transmute_f64!(u32);
-decl_transmute_f64!(u64);
-
-// TODO: Pack with other fields?
+/// Message event header.  
+/// Inner value will be transmuted into f64 and vice versa.
+/// You must guarantee that f64 representation is not Nan (or Inf).
+/// If so, someone(maybe JS) will change it's bits except Nan bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct JsMsgHeader(pub u64);
+pub struct MsgEventHeader(pub u64);
 
-impl JsMsgHeader {
+impl MsgEventHeader {
     /// Common message group.
     const COMMON: u64 = 0;
     /// Window message group.
@@ -63,6 +31,9 @@ impl JsMsgHeader {
 
     pub const FN_INNER: u64 = Self::CANVAS_INNER + 1;
     pub const FN: Self = Self(Self::FN_INNER);
+
+    pub const RUN_INNER: u64 = Self::FN_INNER + 1;
+    pub const RUN: Self = Self(Self::RUN_INNER);
 
     /// --- Window message group starts from here --- ///
 
@@ -82,54 +53,39 @@ impl JsMsgHeader {
 
     #[inline]
     pub fn into_js_value(self) -> JsValue {
-        JsValue::from_f64(transmute_u64_to_f64(self.0))
+        let value = f64::from_bits(self.0);
+        debug_assert!(value.is_finite()); // Nan or Inf are now allowed.
+        JsValue::from_f64(value)
     }
 
     #[inline]
-    pub fn from_js_value(value: JsValue) -> Self {
-        let value = value.as_f64().unwrap();
-        Self(transmute_f64_to_u64(value))
+    pub(crate) fn from_js_value(value: JsValue) -> Self {
+        Self(value.unchecked_into_f64().to_bits())
     }
 }
 
-const UNIT_SIZE: usize = mem::size_of::<f64>();
-const ROUND_UP: usize = UNIT_SIZE - 1;
-const HEADER_LEN: usize = (mem::size_of::<JsMsgHeader>() + ROUND_UP) / UNIT_SIZE;
-
-/// Checks if f64 messge's `required_array_len()` is sufficient or not to avoid mistakes in compile time.
-macro_rules! assert_required_array_len {
-    ($ty:ty) => {
-        const _: () = {
-            // Compares including padding bytess.
-            const BODY_LEN: usize = (mem::size_of::<$ty>() + ROUND_UP) / UNIT_SIZE;
-
-            assert!(<$ty>::required_array_len() as usize == HEADER_LEN + BODY_LEN)
-        };
-    };
-}
+const F64_SIZE: usize = mem::size_of::<f64>();
+const F64_ROUND_UP: usize = F64_SIZE - 1;
+const HEADER_LEN: usize = (mem::size_of::<MsgEventHeader>() + F64_ROUND_UP) / F64_SIZE;
+const U32_SIZE: usize = mem::size_of::<u32>();
+const U32_ROUND_UP: usize = U32_SIZE - 1;
 
 /// Instant message for initializing main worker.
 #[derive(Debug, Clone)]
-pub struct JsMsgInit(pub JsMsgCanvas /* dummy canvas */);
+pub struct MsgEventInit(pub MsgEventCanvas /* dummy canvas */);
 
-impl JsMsgInit {
-    const HEADER: JsMsgHeader = JsMsgHeader::INIT;
-
-    #[inline]
-    const fn required_array_len_wo_header() -> u32 {
-        // 2
-        JsMsgCanvas::required_array_len_wo_header()
-    }
+impl MsgEventInit {
+    const HEADER: MsgEventHeader = MsgEventHeader::INIT;
 
     /// Returns minimum length of [`js_sys::Array`] for this message.
     #[inline]
-    const fn required_array_len() -> u32 {
+    const fn message_array_len() -> u32 {
         // 3
-        Self::required_array_len_wo_header() + HEADER_LEN as u32
+        MsgEventCanvas::message_array_len()
     }
 
     pub fn post_to(self, worker: &web_sys::Worker) {
-        let buf = js_sys::Array::new_with_length(Self::required_array_len());
+        let buf = js_sys::Array::new_with_length(Self::message_array_len());
         Self::write_header(&buf);
         let tr = self.0.write_body(&buf);
         worker.post_message_with_transfer(&buf, &tr).unwrap();
@@ -142,35 +98,31 @@ impl JsMsgInit {
 
     #[inline]
     pub fn read_body(buf: &js_sys::Array) -> Self {
-        debug_assert!(buf.length() >= Self::required_array_len());
-        debug_assert_eq!(Self::HEADER, JsMsgHeader::from_js_value(buf.get(0)));
-        Self(JsMsgCanvas::_read_body(buf))
+        debug_assert!(buf.length() >= Self::message_array_len());
+        debug_assert_eq!(Self::HEADER, MsgEventHeader::from_js_value(buf.get(0)));
+        Self(MsgEventCanvas::_read_body(buf))
     }
 }
 
 /// Instant message for sending offscreen canvas from window to main worker.
 #[derive(Debug, Clone)]
-pub struct JsMsgCanvas {
+pub struct MsgEventCanvas {
     pub element: web_sys::OffscreenCanvas,
     pub handle: u32,
 }
 
-impl JsMsgCanvas {
-    const HEADER: JsMsgHeader = JsMsgHeader::CANVAS;
-
-    #[inline]
-    const fn required_array_len_wo_header() -> u32 {
-        2
-    }
+impl MsgEventCanvas {
+    const HEADER: MsgEventHeader = MsgEventHeader::CANVAS;
 
     /// Returns minimum length of [`js_sys::Array`] for this message.
     #[inline]
-    const fn required_array_len() -> u32 {
-        Self::required_array_len_wo_header() + HEADER_LEN as u32
+    const fn message_array_len() -> u32 {
+        // 3
+        HEADER_LEN as u32 + 2
     }
 
     pub fn post_to(self, worker: &web_sys::Worker) {
-        let buf = js_sys::Array::new_with_length(Self::required_array_len());
+        let buf = js_sys::Array::new_with_length(Self::message_array_len());
         Self::write_header(&buf);
         let tr = self.write_body(&buf);
         worker.post_message_with_transfer(&buf, &tr).unwrap();
@@ -181,19 +133,17 @@ impl JsMsgCanvas {
         buf.set(0, Self::HEADER.into_js_value());
     }
 
-    #[must_use]
     fn write_body(self, buf: &js_sys::Array) -> js_sys::Array {
         buf.set(1, JsValue::from(self.element.clone()));
-        buf.set(2, JsValue::from_f64(transmute_u32_to_f64(self.handle)));
+        buf.set(2, JsValue::from_f64(f64::from_bits(self.handle as u64)));
         let tr = js_sys::Array::new_with_length(1);
         tr.set(0, JsValue::from(self.element));
         tr
     }
 
-    #[inline]
     pub fn read_body(buf: &js_sys::Array) -> Self {
-        debug_assert!(buf.length() >= Self::required_array_len());
-        debug_assert_eq!(Self::HEADER, JsMsgHeader::from_js_value(buf.get(0)));
+        debug_assert!(buf.length() >= Self::message_array_len());
+        debug_assert_eq!(Self::HEADER, MsgEventHeader::from_js_value(buf.get(0)));
         Self::_read_body(buf)
     }
 
@@ -201,46 +151,47 @@ impl JsMsgCanvas {
     fn _read_body(buf: &js_sys::Array) -> Self {
         Self {
             element: buf.get(1).unchecked_into(),
-            handle: transmute_f64_to_u32(buf.get(2).as_f64().unwrap()),
+            handle: buf.get(2).unchecked_into_f64().to_bits() as u32,
         }
     }
 }
 
 /// Instant message for sending a function.
 #[derive(Debug, Clone, Copy)]
-pub struct JsMsgFn {
+pub struct MsgEventFn {
     /// Platform agnostic function pointer converted from fn(), fn(A), fn(A, B) and so on.
     pub f: u64,
 
     /// Discriminant of function pointer.
-    /// Use [`JsMsgFnDisc`] for this value.
+    /// Use [`MsgEventFnDisc`] for this value.
     pub disc: u32,
 }
 
 #[repr(C)]
-union JsMsgFnCodec {
-    src: JsMsgFn,
-    dst: [f64; JsMsgFn::required_array_len_wo_header() as usize],
+union MsgEventFnCodec {
+    src: MsgEventFn,
+    dst: [u32; MsgEventFn::body_array_len() as usize],
 }
 
-impl JsMsgFn {
-    const HEADER: JsMsgHeader = JsMsgHeader::FN;
+impl MsgEventFn {
+    const HEADER: MsgEventHeader = MsgEventHeader::FN;
 
+    /// Returns minimum length of [`js_sys::Uint32Array`] for this message's body.
     #[inline]
-    const fn required_array_len_wo_header() -> u32 {
-        // 2
-        ((mem::size_of::<Self>() + ROUND_UP) / UNIT_SIZE) as u32
+    const fn body_array_len() -> u32 {
+        // 4 including padding
+        ((mem::size_of::<Self>() + U32_ROUND_UP) / U32_SIZE) as u32
     }
 
     /// Returns minimum length of [`js_sys::Array`] for this message.
     #[inline]
-    pub const fn required_array_len() -> u32 {
-        // 3
-        Self::required_array_len_wo_header() + HEADER_LEN as u32
+    const fn message_array_len() -> u32 {
+        // 2, header + body array
+        HEADER_LEN as u32 + 1
     }
 
     pub fn post_to(self, worker: &web_sys::Worker) {
-        let buf = js_sys::Array::new_with_length(Self::required_array_len());
+        let buf = js_sys::Array::new_with_length(Self::message_array_len());
         Self::write_header(&buf);
         self.write_body(&buf);
         worker.post_message(&buf).unwrap();
@@ -251,54 +202,74 @@ impl JsMsgFn {
         buf.set(0, Self::HEADER.into_js_value());
     }
 
-    #[inline]
     fn write_body(&self, buf: &js_sys::Array) {
-        let encoded = self.encode();
-        for (i, elem) in encoded.into_iter().enumerate() {
-            buf.set((i + HEADER_LEN) as u32, JsValue::from_f64(elem));
-        }
+        let body = js_sys::Uint32Array::new_with_length(Self::body_array_len());
+        body.copy_from(&self.encode());
+        buf.set(1, body.into());
     }
 
-    #[inline]
     pub fn read_body(buf: &js_sys::Array) -> Self {
-        debug_assert!(buf.length() >= Self::required_array_len());
-        debug_assert_eq!(Self::HEADER, JsMsgHeader::from_js_value(buf.get(0)));
-        Self::_read_body(buf)
+        debug_assert!(buf.length() >= Self::message_array_len());
+        debug_assert_eq!(Self::HEADER, MsgEventHeader::from_js_value(buf.get(0)));
+
+        let body: js_sys::Uint32Array = buf.get(1).unchecked_into();
+        let mut buf: [u32; Self::body_array_len() as usize] = [0; Self::body_array_len() as usize];
+        body.copy_to(&mut buf);
+        Self::decode(buf)
     }
 
     #[inline]
-    fn _read_body(buf: &js_sys::Array) -> Self {
-        Self::decode([buf.get(1).as_f64().unwrap(), buf.get(2).as_f64().unwrap()])
+    const fn encode(self) -> [u32; Self::body_array_len() as usize] {
+        unsafe { MsgEventFnCodec { src: self }.dst }
     }
 
     #[inline]
-    const fn encode(self) -> [f64; Self::required_array_len_wo_header() as usize] {
-        unsafe { JsMsgFnCodec { src: self }.dst }
-    }
-
-    #[inline]
-    const fn decode(encoded: [f64; Self::required_array_len_wo_header() as usize]) -> Self {
-        unsafe { JsMsgFnCodec { dst: encoded }.src }
+    const fn decode(encoded: [u32; Self::body_array_len() as usize]) -> Self {
+        unsafe { MsgEventFnCodec { dst: encoded }.src }
     }
 }
 
-assert_required_array_len!(JsMsgFn);
-
-/// Used for [`JsMsgFn::disc`].
-pub enum JsMsgFnDisc {
+/// Used for [`MsgEventFn::disc`].
+pub enum MsgEventFnDisc {
     /// acttey uses from `Begin`.
     Begin = 0x1000_0000,
     UserInit,
 }
 
+/// Instant message for requesting run.
+#[derive(Debug, Clone, Copy)]
+pub struct MsgEventRun;
+
+impl MsgEventRun {
+    const HEADER: MsgEventHeader = MsgEventHeader::RUN;
+
+    /// Returns minimum length of [`js_sys::Array`] for this message.
+    #[inline]
+    const fn message_array_len() -> u32 {
+        // 1, header only message
+        HEADER_LEN as u32
+    }
+
+    pub fn post_to(self, worker: &web_sys::Worker) {
+        let buf = js_sys::Array::new_with_length(Self::message_array_len());
+        Self::write_header(&buf);
+        worker.post_message(&buf).unwrap();
+    }
+
+    #[inline]
+    fn write_header(buf: &js_sys::Array) {
+        buf.set(0, Self::HEADER.into_js_value());
+    }
+}
+
 /// Message for sending current window scale factor (device pixel ratio).
 #[derive(Debug, Clone, Copy)]
-pub struct JsMsgWindowScale {
+pub struct MsgEventWindowScale {
     pub scale: f64,
 }
 
-impl JsMsgWindowScale {
-    const HEADER: JsMsgHeader = JsMsgHeader::WINDOW_SCALE;
+impl MsgEventWindowScale {
+    const HEADER: MsgEventHeader = MsgEventHeader::WINDOW_SCALE;
 
     pub fn create_buffer() -> js_sys::Array {
         let buf = js_sys::Array::new_with_length(Self::required_array_len());
@@ -306,21 +277,15 @@ impl JsMsgWindowScale {
         buf
     }
 
-    #[inline]
-    const fn required_array_len_wo_header() -> u32 {
-        // 1
-        ((mem::size_of::<Self>() + ROUND_UP) / UNIT_SIZE) as u32
-    }
-
     /// Returns minimum length of [`js_sys::Array`] for this message.
     #[inline]
     pub const fn required_array_len() -> u32 {
         // 2
-        Self::required_array_len_wo_header() + HEADER_LEN as u32
+        HEADER_LEN as u32 + 1
     }
 
     #[inline]
-    pub fn write_header(buf: &js_sys::Array) {
+    fn write_header(buf: &js_sys::Array) {
         debug_assert!(buf.length() >= Self::required_array_len());
         buf.set(0, Self::HEADER.into_js_value());
     }
@@ -328,116 +293,96 @@ impl JsMsgWindowScale {
     #[inline]
     pub fn write_body(&self, buf: &js_sys::Array) {
         debug_assert!(buf.length() >= Self::required_array_len());
-        self._write_body(buf)
-    }
-
-    #[inline]
-    fn _write_body(&self, buf: &js_sys::Array) {
         buf.set(1, JsValue::from_f64(self.scale));
     }
 
     #[inline]
     pub fn read_body(buf: &js_sys::Array) -> Self {
         debug_assert!(buf.length() >= Self::required_array_len());
-        debug_assert_eq!(Self::HEADER, JsMsgHeader::from_js_value(buf.get(0)));
-        Self::_read_body(buf)
-    }
-
-    #[inline]
-    fn _read_body(buf: &js_sys::Array) -> Self {
+        debug_assert_eq!(Self::HEADER, MsgEventHeader::from_js_value(buf.get(0)));
         Self {
-            scale: buf.get(1).as_f64().unwrap(),
+            scale: buf.get(1).unchecked_into_f64(),
         }
     }
 }
 
-assert_required_array_len!(JsMsgWindowScale);
-
 /// Message for sending current canvas size according to window resize event.
 #[derive(Debug, Clone, Copy)]
-pub struct JsMsgCanvasResize {
+pub struct MsgEventCanvasResize {
     pub handle: u32,
     pub width: i16,
     pub height: i16,
 }
 
 #[repr(C)]
-union JsMsgCanvasResizeCodec {
-    src: JsMsgCanvasResize,
-    dst: [f64; JsMsgCanvasResize::required_array_len_wo_header() as usize],
+union MsgEventCanvasResizeCodec {
+    src: MsgEventCanvasResize,
+    dst: [u32; MsgEventCanvasResize::body_array_len() as usize],
 }
 
-impl JsMsgCanvasResize {
-    const HEADER: JsMsgHeader = JsMsgHeader::CANVAS_RESIZE;
+impl MsgEventCanvasResize {
+    const HEADER: MsgEventHeader = MsgEventHeader::CANVAS_RESIZE;
 
     pub fn create_buffer() -> js_sys::Array {
-        let buf = js_sys::Array::new_with_length(Self::required_array_len());
+        let buf = js_sys::Array::new_with_length(Self::message_array_len());
         Self::write_header(&buf);
         buf
     }
 
+    /// Returns minimum length of [`js_sys::Uint32Array`] for this message's body.
     #[inline]
-    const fn required_array_len_wo_header() -> u32 {
-        // 1
-        ((mem::size_of::<Self>() + ROUND_UP) / UNIT_SIZE) as u32
+    const fn body_array_len() -> u32 {
+        // 2
+        ((mem::size_of::<Self>() + U32_ROUND_UP) / U32_SIZE) as u32
     }
 
     /// Returns minimum length of [`js_sys::Array`] for this message.
     #[inline]
-    pub const fn required_array_len() -> u32 {
-        // 2
-        Self::required_array_len_wo_header() + HEADER_LEN as u32
+    const fn message_array_len() -> u32 {
+        // 2, header + body array
+        HEADER_LEN as u32 + 1
     }
 
     #[inline]
-    pub fn write_header(buf: &js_sys::Array) {
-        debug_assert!(buf.length() >= Self::required_array_len());
+    fn write_header(buf: &js_sys::Array) {
+        debug_assert!(buf.length() >= Self::message_array_len());
         buf.set(0, Self::HEADER.into_js_value());
     }
 
-    #[inline]
     pub fn write_body(&self, buf: &js_sys::Array) {
-        debug_assert!(buf.length() >= Self::required_array_len());
-        self._write_body(buf)
+        debug_assert!(buf.length() >= Self::message_array_len());
+        debug_assert_eq!(Self::HEADER, MsgEventHeader::from_js_value(buf.get(0)));
+
+        let body = js_sys::Uint32Array::new_with_length(Self::body_array_len());
+        body.copy_from(&self.encode());
+        buf.set(1, body.into());
     }
 
-    #[inline]
-    fn _write_body(&self, buf: &js_sys::Array) {
-        let encoded = self.encode();
-        for (i, elem) in encoded.into_iter().enumerate() {
-            buf.set((i + HEADER_LEN) as u32, JsValue::from_f64(elem));
-        }
-    }
-
-    #[inline]
     pub fn read_body(buf: &js_sys::Array) -> Self {
-        debug_assert!(buf.length() >= Self::required_array_len());
-        debug_assert_eq!(Self::HEADER, JsMsgHeader::from_js_value(buf.get(0)));
-        Self::_read_body(buf)
+        debug_assert!(buf.length() >= Self::message_array_len());
+        debug_assert_eq!(Self::HEADER, MsgEventHeader::from_js_value(buf.get(0)));
+
+        let body: js_sys::Uint32Array = buf.get(1).unchecked_into();
+        let mut buf: [u32; Self::body_array_len() as usize] = [0; Self::body_array_len() as usize];
+        body.copy_to(&mut buf);
+        Self::decode(buf)
     }
 
     #[inline]
-    fn _read_body(buf: &js_sys::Array) -> Self {
-        Self::decode([buf.get(1).as_f64().unwrap()])
+    const fn encode(self) -> [u32; Self::body_array_len() as usize] {
+        unsafe { MsgEventCanvasResizeCodec { src: self }.dst }
     }
 
     #[inline]
-    const fn encode(self) -> [f64; Self::required_array_len_wo_header() as usize] {
-        unsafe { JsMsgCanvasResizeCodec { src: self }.dst }
-    }
-
-    #[inline]
-    const fn decode(encoded: [f64; Self::required_array_len_wo_header() as usize]) -> Self {
-        unsafe { JsMsgCanvasResizeCodec { dst: encoded }.src }
+    const fn decode(encoded: [u32; Self::body_array_len() as usize]) -> Self {
+        unsafe { MsgEventCanvasResizeCodec { dst: encoded }.src }
     }
 }
-
-assert_required_array_len!(JsMsgCanvasResize);
 
 /// Message for other mouse messages.
 /// Field types may shrink compared to types in [`web_sys::MouseEvent`].
 #[derive(Debug, Clone, Copy)]
-struct JsMsgMouse {
+struct MsgEventMouse {
     pub button: i8,
     pub client_x: i16,
     pub client_y: i16,
@@ -448,139 +393,191 @@ struct JsMsgMouse {
 }
 
 #[repr(C)]
-union JsMsgMouseCodec {
-    src: JsMsgMouse,
-    dst: [f64; JsMsgMouse::required_array_len_wo_header() as usize],
+union MsgEventMouseCodec {
+    src: MsgEventMouse,
+    dst: [u32; MsgEventMouse::body_array_len() as usize],
 }
 
-impl JsMsgMouse {
+impl MsgEventMouse {
+    /// Returns minimum length of [`js_sys::Uint32Array`] for this message's body.
     #[inline]
-    const fn required_array_len_wo_header() -> u32 {
-        // 2
-        ((mem::size_of::<Self>() + ROUND_UP) / UNIT_SIZE) as u32
+    const fn body_array_len() -> u32 {
+        // 4 including padding
+        ((mem::size_of::<Self>() + U32_ROUND_UP) / U32_SIZE) as u32
     }
 
     /// Returns minimum length of [`js_sys::Array`] for this message.
     #[inline]
-    const fn required_array_len() -> u32 {
-        // 3
-        Self::required_array_len_wo_header() + HEADER_LEN as u32
+    const fn message_array_len() -> u32 {
+        // 2, header + body array
+        HEADER_LEN as u32 + 1
     }
 
     #[inline]
     fn write_body(self, buf: &js_sys::Array) {
-        let encoded = self.encode();
-        for (i, elem) in encoded.into_iter().enumerate() {
-            buf.set((i + HEADER_LEN) as u32, JsValue::from_f64(elem));
-        }
+        let body = js_sys::Uint32Array::new_with_length(Self::body_array_len());
+        body.copy_from(&self.encode());
+        buf.set(1, body.into());
     }
 
     #[inline]
     fn read_body(buf: &js_sys::Array) -> Self {
-        Self::decode([buf.get(1).as_f64().unwrap(), buf.get(2).as_f64().unwrap()])
+        let body: js_sys::Uint32Array = buf.get(1).unchecked_into();
+        let mut buf: [u32; Self::body_array_len() as usize] = [0; Self::body_array_len() as usize];
+        body.copy_to(&mut buf);
+        Self::decode(buf)
     }
 
     #[inline]
-    const fn encode(self) -> [f64; Self::required_array_len_wo_header() as usize] {
-        unsafe { JsMsgMouseCodec { src: self }.dst }
+    const fn encode(self) -> [u32; Self::body_array_len() as usize] {
+        unsafe { MsgEventMouseCodec { src: self }.dst }
     }
 
     #[inline]
-    const fn decode(encoded: [f64; Self::required_array_len_wo_header() as usize]) -> Self {
-        unsafe { JsMsgMouseCodec { dst: encoded }.src }
+    const fn decode(encoded: [u32; Self::body_array_len() as usize]) -> Self {
+        unsafe { MsgEventMouseCodec { dst: encoded }.src }
     }
 }
 
-assert_required_array_len!(JsMsgMouse);
-
 /// Message for seding mouse move event to main worker.
-/// This structure is a wrapper of common mouse message [`JsMsgMouse`].
+/// This structure is a wrapper of common mouse message [`MsgEventMouse`].
 #[derive(Debug, Clone, Copy)]
-pub struct JsMsgMouseMove(JsMsgMouse);
+pub struct MsgEventMouseMove(MsgEventMouse);
 
-impl JsMsgMouseMove {
-    const HEADER: JsMsgHeader = JsMsgHeader::MOUSE_MOVE;
+impl MsgEventMouseMove {
+    const HEADER: MsgEventHeader = MsgEventHeader::MOUSE_MOVE;
 
     pub fn create_buffer() -> js_sys::Array {
-        let buf = js_sys::Array::new_with_length(Self::required_array_len());
+        let buf = js_sys::Array::new_with_length(Self::message_array_len());
         Self::write_header(&buf);
         buf
     }
 
+    /// Returns minimum length of [`js_sys::Uint32Array`] for this message's body.
     #[inline]
-    pub const fn required_array_len() -> u32 {
-        JsMsgMouse::required_array_len()
+    const fn body_array_len() -> u32 {
+        // 4 including padding
+        MsgEventMouse::body_array_len()
+    }
+
+    /// Returns minimum length of [`js_sys::Array`] for this message.
+    #[inline]
+    const fn message_array_len() -> u32 {
+        // 2, header + body array
+        MsgEventMouse::message_array_len()
     }
 
     #[inline]
-    pub fn write_header(buf: &js_sys::Array) {
-        debug_assert!(buf.length() >= Self::required_array_len());
+    fn write_header(buf: &js_sys::Array) {
+        debug_assert!(buf.length() >= Self::message_array_len());
         buf.set(0, Self::HEADER.into_js_value());
     }
 
     #[inline]
     pub fn write_body(&self, buf: &js_sys::Array) {
-        debug_assert!(buf.length() >= Self::required_array_len());
-        self._write_body(buf)
-    }
+        debug_assert!(buf.length() >= Self::message_array_len());
+        debug_assert_eq!(Self::HEADER, MsgEventHeader::from_js_value(buf.get(0)));
 
-    #[inline]
-    fn _write_body(&self, buf: &js_sys::Array) {
         self.0.write_body(buf);
     }
 
     #[inline]
     pub fn read_body(buf: &js_sys::Array) -> Self {
-        debug_assert!(buf.length() >= Self::required_array_len());
-        debug_assert_eq!(Self::HEADER, JsMsgHeader::from_js_value(buf.get(0)));
-        Self::_read_body(buf)
-    }
+        debug_assert!(buf.length() >= Self::message_array_len());
+        debug_assert_eq!(Self::HEADER, MsgEventHeader::from_js_value(buf.get(0)));
 
-    #[inline]
-    fn _read_body(buf: &js_sys::Array) -> Self {
-        Self(JsMsgMouse::read_body(buf))
+        Self(MsgEventMouse::read_body(buf))
     }
 }
 
 /// Message for sending mouse click event to main worker.
-/// This structure is a wrapper of common mouse message [`JsMsgMouse`].
+/// This structure is a wrapper of common mouse message [`MsgEventMouse`].
 #[derive(Debug, Clone, Copy)]
-pub struct JsMsgMouseClick(JsMsgMouse);
+pub struct MsgEventMouseClick(MsgEventMouse);
 
-impl JsMsgMouseClick {
-    const HEADER: JsMsgHeader = JsMsgHeader::MOUSE_CLICK;
+impl MsgEventMouseClick {
+    const HEADER: MsgEventHeader = MsgEventHeader::MOUSE_CLICK;
 
+    pub fn create_buffer() -> js_sys::Array {
+        let buf = js_sys::Array::new_with_length(Self::message_array_len());
+        Self::write_header(&buf);
+        buf
+    }
+
+    /// Returns minimum length of [`js_sys::Uint32Array`] for this message's body.
     #[inline]
-    pub const fn required_array_len() -> u32 {
-        JsMsgMouse::required_array_len()
+    const fn body_array_len() -> u32 {
+        // 4 including padding
+        MsgEventMouse::body_array_len()
+    }
+
+    /// Returns minimum length of [`js_sys::Array`] for this message.
+    #[inline]
+    const fn message_array_len() -> u32 {
+        // 2, header + body array
+        MsgEventMouse::message_array_len()
     }
 
     #[inline]
-    pub fn write_header(buf: &js_sys::Array) {
-        debug_assert!(buf.length() >= Self::required_array_len());
+    fn write_header(buf: &js_sys::Array) {
+        debug_assert!(buf.length() >= Self::message_array_len());
         buf.set(0, Self::HEADER.into_js_value());
     }
 
     #[inline]
     pub fn write_body(&self, buf: &js_sys::Array) {
-        debug_assert!(buf.length() >= Self::required_array_len());
-        self._write_body(buf);
-    }
+        debug_assert!(buf.length() >= Self::message_array_len());
+        debug_assert_eq!(Self::HEADER, MsgEventHeader::from_js_value(buf.get(0)));
 
-    #[inline]
-    fn _write_body(&self, buf: &js_sys::Array) {
         self.0.write_body(buf);
     }
 
     #[inline]
     pub fn read_body(buf: &js_sys::Array) -> Self {
-        debug_assert!(buf.length() >= Self::required_array_len());
-        debug_assert_eq!(Self::HEADER, JsMsgHeader::from_js_value(buf.get(0)));
-        Self::_read_body(buf)
-    }
+        debug_assert!(buf.length() >= Self::message_array_len());
+        debug_assert_eq!(Self::HEADER, MsgEventHeader::from_js_value(buf.get(0)));
 
-    #[inline]
-    fn _read_body(buf: &js_sys::Array) -> Self {
-        Self(JsMsgMouse::read_body(buf))
+        Self(MsgEventMouse::read_body(buf))
+    }
+}
+
+/// Channel message that conveyed by channels between main and sub workers.
+/// Every sub worker has its own channel when it's spawned.
+/// When it comes to procedure of message transportation,
+/// worker first is woken up by main worker's call to [`Worker::open`](crate::worker::Worker::open),
+/// then the worker starts to listen to the channel and process this channel message.  
+/// Don't be confused between *channel message* and *message event*,
+/// which is a type of event used on JS.
+pub enum ChMsg {
+    /// Main worker requests Rust handle from the sub worker.
+    ReqHandle,
+
+    /// Main worker sends this to the sub worker in order to notify the end of work at this frame.
+    End,
+
+    /// Main worker sends a task to the sub worker.
+    Task(NonNull<dyn Invokable>, NonNull<RequestBuffer>),
+
+    /// Sub worker sends this to the main worker as a response of [`ChMsg::ReqHandle`].
+    Handle(Thread),
+
+    /// Sub worker notifies the task is done.
+    Fin(WorkerId, RequestKey),
+}
+
+impl Debug for ChMsg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        const FROM_MAIN: &str = "ChMsg(main -> sub):";
+        const FROM_SUB: &str = "ChMsg(sub -> main):";
+
+        match self {
+            Self::ReqHandle => write!(f, "{FROM_MAIN} ReqHandle"),
+            Self::Task(task_ptr, buf_ptr) => {
+                write!(f, "{FROM_MAIN} Task({:?}, {:?})", task_ptr, buf_ptr)
+            }
+            Self::End => write!(f, "{FROM_MAIN} End"),
+            Self::Handle(handle) => write!(f, "{FROM_SUB} Handle({:?})", handle),
+            Self::Fin(wid, rkey) => write!(f, "{FROM_SUB} Fin({:?}, {:?})", wid, rkey),
+        }
     }
 }

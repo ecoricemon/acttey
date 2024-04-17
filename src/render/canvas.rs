@@ -1,15 +1,12 @@
 use crate::{
     ds::generational::{GenIndexRc, GenVecRc},
-    worker::msg::JsMsgCanvasResize,
+    worker::msg::MsgEventCanvasResize,
 };
-use std::{
-    mem::ManuallyDrop,
-    ops::Deref,
-    rc::Rc,
-};
+use std::{mem::ManuallyDrop, ops::Deref, rc::Rc};
 
 /// A set of textures and views from the surfaces used in a single render pass.
 /// In a render pass, call [`SurfacePack::create_color_attachments`] and [`SurfacePack::present`].
+#[derive(Debug)]
 pub struct SurfacePack {
     pub(crate) surf_indices: Vec<Option<GenIndexRc>>,
 }
@@ -61,7 +58,7 @@ impl SurfacePack {
         surfaces: &GenVecRc<Surface>,
         buf: &'b mut SurfacePackBuffer,
     ) -> ManuallyDrop<Vec<Option<wgpu::RenderPassColorAttachment<'b>>>> {
-        let (textures, views, ptr, len, cap) = buf.destruct();
+        let (textures, views, ptr, len, cap) = buf.destructure();
         // Safety: Raw parts are valid because we are calling reflect...
         let mut attachments = unsafe { Vec::from_raw_parts(ptr, len, cap) };
 
@@ -148,7 +145,7 @@ impl SurfacePackBuffer {
     /// Caller can generate a vector from the raw parts.
     /// But then, caller must call [`Self::reflect_color_attachments()`]
     /// to reflect the change and guarantee the raw parts are always valid.
-    pub fn destruct(
+    pub fn destructure(
         &mut self,
     ) -> (
         &mut Vec<wgpu::SurfaceTexture>,
@@ -217,6 +214,7 @@ impl Drop for SurfacePackBuffer {
     }
 }
 
+#[derive(Debug)]
 pub struct Surface {
     pub offcanvas: Rc<OffCanvas>,
     pub surface: wgpu::Surface<'static>,
@@ -347,14 +345,19 @@ impl Surface {
         self.color_target.format = self.surface_conf.format;
     }
 
-    pub fn resize(&mut self, device: &wgpu::Device, scale: f64, msg: JsMsgCanvasResize) {
+    pub fn resize(&mut self, device: &wgpu::Device, scale: f64, msg: MsgEventCanvasResize) {
         let new_width = (msg.width as f64 * scale) as u32;
         let new_height = (msg.height as f64 * scale) as u32;
         if new_width != self.offcanvas.width() || new_height != self.offcanvas.height() {
             self.surface_conf.width = new_width;
             self.surface_conf.height = new_height;
             self.surface.configure(device, &self.surface_conf);
-            crate::log!("[D] Surface::resize(): surface({}) has been resized to {} x {}", self.handle(), new_width, new_height);
+            crate::log!(
+                "[D] Surface::resize(): surface({}) has been resized to {} x {}",
+                self.handle(),
+                new_width,
+                new_height
+            );
         }
     }
 
@@ -378,7 +381,7 @@ impl OffCanvas {
     }
 
     #[inline]
-    pub fn destruct(self) -> (web_sys::OffscreenCanvas, u32) {
+    pub fn destructure(self) -> (web_sys::OffscreenCanvas, u32) {
         (self.element, self.handle)
     }
 

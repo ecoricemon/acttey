@@ -5,6 +5,7 @@ use super::{
 use std::rc::Rc;
 use wasm_bindgen::JsCast;
 
+#[derive(Debug)]
 pub struct RenderContext {
     pub global: web_sys::DedicatedWorkerGlobalScope,
     pub instance: wgpu::Instance,
@@ -62,10 +63,10 @@ impl Gpu {
         // Unwraps features and limits or set them as default.
         let features = features.unwrap_or(wgpu::Features::empty());
         let limits = limits.unwrap_or(if cfg!(feature = "webgl") {
-            crate::log!("[Info] Limits: downlevel_webgl2");
+            crate::log!("[I] Limits: downlevel_webgl2");
             wgpu::Limits::downlevel_webgl2_defaults()
         } else {
-            crate::log!("[Info] Limits: default");
+            crate::log!("[I] Limits: default");
             wgpu::Limits::default() // WebGL will get error with this limit
         });
 

@@ -7,15 +7,16 @@ use crate::{
         sparse_set::MonoSparseSet,
     },
     render::Gpu,
-    util::{key::ResKey, string::ToStr},
+    util::{key::ObjectKey, string::ToStr},
 };
 use my_wgsl::*;
 use std::{borrow::Cow, rc::Rc};
 
+#[derive(Debug)]
 pub struct ShaderPack {
     gpu: Rc<Gpu>,
     pub builders: GenVec<my_wgsl::Builder>,
-    pub shaders: MonoSparseSet<ResKey, Rc<Shader>>,
+    pub shaders: MonoSparseSet<ObjectKey, Rc<Shader>>,
 }
 
 impl ShaderPack {
@@ -33,7 +34,7 @@ impl ShaderPack {
     /// # Panics
     ///
     /// Panics if `builder_index` is invalid or overwrting fails.
-    pub fn create_shader(&mut self, builder_index: GenIndex, key: &ResKey) -> &Rc<Shader> {
+    pub fn create_shader(&mut self, builder_index: GenIndex, key: &ObjectKey) -> &Rc<Shader> {
         let builder = self.builders.get(builder_index).unwrap();
         let entry_point = match (
             builder.get_vertex_stage_ident(),
@@ -76,7 +77,7 @@ pub struct Shader {
 
 impl Shader {
     pub fn new(
-        key: ResKey,
+        key: ObjectKey,
         device: &wgpu::Device,
         builder: &Builder,
         entry_point: EntryPoint,

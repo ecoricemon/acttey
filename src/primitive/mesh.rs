@@ -4,7 +4,7 @@ use crate::{
     ds::{refs::RcValue, sparse_set::MonoSparseSet},
     impl_from_for_enum,
     primitive::{constant::colors, vector::Vector, Color},
-    util::{key::ResKey, AsMultiBytes},
+    util::{key::ObjectKey, AsMultiBytes},
 };
 use ahash::AHashMap;
 use std::{
@@ -61,11 +61,11 @@ impl Geometry {
 #[derive(Debug)]
 pub struct MeshResource {
     /// Geometries.
-    geos: MonoSparseSet<ResKey, RcValue<Geometry>>,
+    geos: MonoSparseSet<ObjectKey, RcValue<Geometry>>,
     /// Materials.
-    mats: MonoSparseSet<ResKey, RcValue<Material>>,
+    mats: MonoSparseSet<ObjectKey, RcValue<Material>>,
     /// Mesh name to geometry and material.
-    meshes: AHashMap<ResKey, (ResKey, ResKey)>,
+    meshes: AHashMap<ObjectKey, (ObjectKey, ObjectKey)>,
 }
 
 impl MeshResource {
@@ -80,7 +80,7 @@ impl MeshResource {
     #[inline]
     pub fn contains_geometry<Q>(&self, key: &Q) -> bool
     where
-        ResKey: Borrow<Q>,
+        ObjectKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.geos.contains_key(key)
@@ -89,19 +89,19 @@ impl MeshResource {
     #[inline]
     pub fn contains_material<Q>(&self, key: &Q) -> bool
     where
-        ResKey: Borrow<Q>,
+        ObjectKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.mats.contains_key(key)
     }
 
     #[inline]
-    pub fn iter_geo(&self) -> impl Iterator<Item = (&ResKey, &Geometry)> {
+    pub fn iter_geo(&self) -> impl Iterator<Item = (&ObjectKey, &Geometry)> {
         self.geos.iter().map(|(k, v)| (k, &**v))
     }
 
     #[inline]
-    pub fn iter_mat(&self) -> impl Iterator<Item = (&ResKey, &Material)> {
+    pub fn iter_mat(&self) -> impl Iterator<Item = (&ObjectKey, &Material)> {
         self.mats.iter().map(|(k, v)| (k, &**v))
     }
 
@@ -109,7 +109,7 @@ impl MeshResource {
     #[inline]
     pub fn add_geometry(
         &mut self,
-        key: ResKey,
+        key: ObjectKey,
         geo: impl Into<Geometry>,
     ) -> Option<RcValue<Geometry>> {
         self._add_geometry(key, geo.into())
@@ -117,7 +117,7 @@ impl MeshResource {
 
     /// A function with concrete types, not generic, for [`Self::add_geometry`].
     /// It can help us to ruduce binary size caused by generic bloating.
-    fn _add_geometry(&mut self, key: ResKey, geo: Geometry) -> Option<RcValue<Geometry>> {
+    fn _add_geometry(&mut self, key: ObjectKey, geo: Geometry) -> Option<RcValue<Geometry>> {
         self.geos.insert(key, RcValue::new(geo))
     }
 
@@ -125,7 +125,7 @@ impl MeshResource {
     #[inline]
     pub fn add_material(
         &mut self,
-        key: ResKey,
+        key: ObjectKey,
         mat: impl Into<Material>,
     ) -> Option<RcValue<Material>> {
         self._add_material(key, mat.into())
@@ -133,7 +133,7 @@ impl MeshResource {
 
     /// A function with concrete types, not generic, for [`Self::add_material`].
     /// It can help us to ruduce binary size caused by generic bloating.
-    fn _add_material(&mut self, key: ResKey, mat: Material) -> Option<RcValue<Material>> {
+    fn _add_material(&mut self, key: ObjectKey, mat: Material) -> Option<RcValue<Material>> {
         self.mats.insert(key, RcValue::new(mat))
     }
 
@@ -141,17 +141,17 @@ impl MeshResource {
     #[inline]
     pub fn add_mesh(
         &mut self,
-        mesh_key: ResKey,
-        geo_key: ResKey,
-        mat_key: ResKey,
-    ) -> Option<(ResKey, ResKey)> {
+        mesh_key: ObjectKey,
+        geo_key: ObjectKey,
+        mat_key: ObjectKey,
+    ) -> Option<(ObjectKey, ObjectKey)> {
         self.meshes.insert(mesh_key, (geo_key, mat_key))
     }
 
     #[inline]
     pub fn get_geometry<Q>(&self, key: &Q) -> Option<&RcValue<Geometry>>
     where
-        ResKey: Borrow<Q>,
+        ObjectKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.geos.get(key)
@@ -160,7 +160,7 @@ impl MeshResource {
     #[inline]
     pub fn get_material<Q>(&self, key: &Q) -> Option<&RcValue<Material>>
     where
-        ResKey: Borrow<Q>,
+        ObjectKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.mats.get(key)
@@ -169,7 +169,7 @@ impl MeshResource {
     #[inline]
     pub fn get_geometry_mut<Q>(&mut self, key: &Q) -> Option<&mut RcValue<Geometry>>
     where
-        ResKey: Borrow<Q>,
+        ObjectKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.geos.get_mut(key)
@@ -178,7 +178,7 @@ impl MeshResource {
     #[inline]
     pub fn get_material_mut<Q>(&mut self, key: &Q) -> Option<&mut RcValue<Material>>
     where
-        ResKey: Borrow<Q>,
+        ObjectKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.mats.get_mut(key)
@@ -187,7 +187,7 @@ impl MeshResource {
     /// Removes only if its reference count is 1.
     pub fn remove_geometry<Q>(&mut self, key: &Q) -> Option<RcValue<Geometry>>
     where
-        ResKey: Borrow<Q>,
+        ObjectKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         if self
@@ -204,7 +204,7 @@ impl MeshResource {
     /// Removes only if its reference count is 1.
     pub fn remove_material<Q>(&mut self, key: &Q) -> Option<RcValue<Material>>
     where
-        ResKey: Borrow<Q>,
+        ObjectKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         if self
@@ -219,9 +219,9 @@ impl MeshResource {
     }
 
     #[inline]
-    pub fn remove_mesh<Q>(&mut self, key: &Q) -> Option<(ResKey, ResKey)>
+    pub fn remove_mesh<Q>(&mut self, key: &Q) -> Option<(ObjectKey, ObjectKey)>
     where
-        ResKey: Borrow<Q>,
+        ObjectKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.meshes.remove(key)
@@ -229,7 +229,7 @@ impl MeshResource {
 
     pub fn get_mesh_geometry<Q>(&self, key: &Q) -> Option<&RcValue<Geometry>>
     where
-        ResKey: Borrow<Q>,
+        ObjectKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.meshes
@@ -239,7 +239,7 @@ impl MeshResource {
 
     pub fn get_mesh_geometry_mut<Q>(&mut self, key: &Q) -> Option<&mut RcValue<Geometry>>
     where
-        ResKey: Borrow<Q>,
+        ObjectKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         if let Some((geo_key, _)) = self.meshes.get(key) {
@@ -251,7 +251,7 @@ impl MeshResource {
 
     pub fn get_mesh_material<Q>(&self, key: &Q) -> Option<&RcValue<Material>>
     where
-        ResKey: Borrow<Q>,
+        ObjectKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.meshes
@@ -261,7 +261,7 @@ impl MeshResource {
 
     pub fn get_mesh_material_mut<Q>(&mut self, key: &Q) -> Option<&mut RcValue<Material>>
     where
-        ResKey: Borrow<Q>,
+        ObjectKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         if let Some((_, mat_key)) = self.meshes.get(key) {
@@ -271,9 +271,9 @@ impl MeshResource {
         }
     }
 
-    pub fn get_mesh_geometry_meta<Q>(&self, key: &Q) -> Option<(ResKey, Rc<()>)>
+    pub fn get_mesh_geometry_meta<Q>(&self, key: &Q) -> Option<(ObjectKey, Rc<()>)>
     where
-        ResKey: Borrow<Q>,
+        ObjectKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         if let Some((geo_key, _)) = self.meshes.get(key) {
@@ -284,9 +284,9 @@ impl MeshResource {
         None
     }
 
-    pub fn get_mesh_material_meta<Q>(&self, key: &Q) -> Option<(ResKey, Rc<()>)>
+    pub fn get_mesh_material_meta<Q>(&self, key: &Q) -> Option<(ObjectKey, Rc<()>)>
     where
-        ResKey: Borrow<Q>,
+        ObjectKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         if let Some((_, mat_key)) = self.meshes.get(key) {
@@ -300,7 +300,7 @@ impl MeshResource {
     /// Makes the mesh's geometries to be interleaved geometries.
     pub fn make_mesh_geometry_interleaved<'a, Q>(&mut self, keys: impl Iterator<Item = &'a Q>)
     where
-        ResKey: Borrow<Q>,
+        ObjectKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized + 'a,
     {
         for key in keys {

@@ -35,7 +35,7 @@ impl<T> VarChunkVec<T> {
 
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            views: OptVec::new(0),
+            views: OptVec::new(),
             frags: Vec::new(),
             deref: HashMap::default(),
             buf: Vec::with_capacity(capacity),

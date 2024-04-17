@@ -5,7 +5,7 @@ use crate::{
     },
     impl_from_for_enum,
     render::{buffer::BufferView, context::Gpu, descs},
-    util::{key::ResKey, string::ToStr},
+    util::{key::ObjectKey, string::ToStr},
 };
 use std::{num::NonZeroU64, rc::Rc};
 
@@ -13,10 +13,10 @@ use std::{num::NonZeroU64, rc::Rc};
 pub struct BindPack {
     gpu: Rc<Gpu>,
     pub builders: GenVec<BindBuilder>,
-    pub layouts: MonoSparseSet<ResKey, Rc<wgpu::BindGroupLayout>>,
+    pub layouts: MonoSparseSet<ObjectKey, Rc<wgpu::BindGroupLayout>>,
     /// Bindings grap Rc connected to the resources such as buffer.
     /// It guarantees that those resources live enough as long as the bind group lives.
-    pub groups: MonoSparseSet<ResKey, (Rc<wgpu::BindGroup>, Vec<Binding>)>,
+    pub groups: MonoSparseSet<ObjectKey, (Rc<wgpu::BindGroup>, Vec<Binding>)>,
 }
 
 impl BindPack {
@@ -34,7 +34,7 @@ impl BindPack {
     /// # Panics
     ///
     /// Panics if `builder_index` is invalid or overwriting fails.
-    pub fn create(&mut self, builder_index: GenIndex, layout_key: ResKey, group_key: ResKey) {
+    pub fn create(&mut self, builder_index: GenIndex, layout_key: ObjectKey, group_key: ObjectKey) {
         let builder = self.builders.get(builder_index).unwrap();
         let (layout, group, bindings) =
             builder.build(&self.gpu.device, layout_key.clone(), group_key.clone());
@@ -98,8 +98,8 @@ impl BindBuilder {
     pub fn build(
         &self,
         device: &wgpu::Device,
-        layout_key: ResKey,
-        group_key: ResKey,
+        layout_key: ObjectKey,
+        group_key: ObjectKey,
     ) -> (wgpu::BindGroupLayout, wgpu::BindGroup, Vec<Binding>) {
         // layout entries and bindings should have the same length.
         assert_eq!(self.layout_entries.len(), self.bindings.len());

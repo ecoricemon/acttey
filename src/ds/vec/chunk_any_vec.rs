@@ -446,8 +446,8 @@ impl ChunkAnyVec {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wasm_bindgen_test::*;
     use crate::tinfo;
+    use wasm_bindgen_test::*;
 
     #[wasm_bindgen_test]
     fn test_chunkanyvec_push_pop() {

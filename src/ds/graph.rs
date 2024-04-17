@@ -1,4 +1,5 @@
-use crate::ds::vec::{OptVec, SetVec};
+use super::set_list::SetValueList;
+use crate::ds::vec::OptVec;
 use ahash::AHashSet;
 use std::{
     num::NonZeroUsize,
@@ -16,23 +17,28 @@ pub struct DirectedGraph<T> {
     /// Outgoing edges of each node.
     /// This field preserves inserted order,
     /// so that we can traverse neighbors in order we expect.  
-    outbounds: Vec<SetVec<NonZeroUsize>>,
+    outbounds: Vec<SetValueList<NonZeroUsize>>,
 
     /// Incoming edges of each node.
     /// This field doesn't preserve inserted order.  
     inbounds: Vec<AHashSet<usize>>,
 }
 
-impl<T> DirectedGraph<T> {
-    /// Creates a directed acyclic graph with root node.
+impl<T: Default> DirectedGraph<T> {
+    /// Creates a directed acyclic graph with default root node.
     pub fn new() -> Self {
+        let mut nodes = OptVec::new();
+        let root_index = nodes.add(T::default());
+        debug_assert_eq!(0, root_index);
         Self {
-            nodes: OptVec::new(1),
-            outbounds: vec![SetVec::new()],  // For default root
-            inbounds: vec![AHashSet::new()], // For default root
+            nodes,
+            outbounds: vec![Self::new_outbound()], // For default root
+            inbounds: vec![AHashSet::new()],       // For default root
         }
     }
+}
 
+impl<T> DirectedGraph<T> {
     // Note
     // Sometimes, we want to update node's values while traversing the graph.
     // However, we have two problems to do so.
@@ -47,24 +53,33 @@ impl<T> DirectedGraph<T> {
     //
     /// Returns nodes, inbounds, and outbounds.
     /// Do not insert or remove any nodes.
-    pub fn destruct(
+    pub fn destructure(
         &mut self,
     ) -> (
         &mut OptVec<T>,
-        &Vec<SetVec<NonZeroUsize>>,
+        &Vec<SetValueList<NonZeroUsize>>,
         &Vec<AHashSet<usize>>,
     ) {
         (&mut self.nodes, &self.outbounds, &self.inbounds)
     }
 
+    // Dev note. Don't implement len(). It's confusing because we put in default node.
+    /// Retrieves the length of node buffer,
+    /// which is default root node + # of vacant slots + # of occupied slots.
     #[inline]
-    pub fn len(&self) -> usize {
+    pub fn len_buf(&self) -> usize {
         self.nodes.len()
     }
 
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
+    /// Retrieves the number of nodes except default head node.
+    pub fn len_occupied(&self) -> usize {
+        self.nodes.len_occupied() - 1
+    }
+
+    /// Returns true if there's no node in the graph.
+    /// Note that default root node is not taken into account.
+    pub fn has_no_occupied(&self) -> bool {
+        self.len_occupied() == 0
     }
 
     #[inline]
@@ -100,7 +115,7 @@ impl<T> DirectedGraph<T> {
     pub fn insert_node(&mut self, value: T) -> usize {
         let index = self.nodes.add(value);
         if index == self.nodes.len() - 1 {
-            self.outbounds.push(SetVec::new());
+            self.outbounds.push(Self::new_outbound());
             self.inbounds.push(AHashSet::new());
         }
         self.connect_root(index);
@@ -116,7 +131,7 @@ impl<T> DirectedGraph<T> {
     ///
     /// Panics if `index` is out of bound or slot was vacant.
     pub fn remove_node(&mut self, index: usize) -> Option<T> {
-        self.outbounds[index].is_empty().then(|| {
+        self.outbounds[index].has_no_occupied().then(|| {
             self.remove_incoming_edges(index);
             self.nodes.take(index).unwrap()
         })
@@ -124,12 +139,12 @@ impl<T> DirectedGraph<T> {
 
     pub fn add_edge(&mut self, from: usize, to: usize) {
         self.disconnect_root(to);
-        self.outbounds[from].insert(NonZeroUsize::new(to).unwrap());
+        self.outbounds[from].push_back(NonZeroUsize::new(to).unwrap());
         self.inbounds[to].insert(from);
     }
 
     pub fn remove_edge(&mut self, from: usize, to: usize) {
-        self.outbounds[from].take_by_value(&NonZeroUsize::new(to).unwrap());
+        self.outbounds[from].remove(&NonZeroUsize::new(to).unwrap());
         self.inbounds[to].remove(&from);
         if self.inbounds[to].is_empty() {
             self.connect_root(to);
@@ -141,7 +156,7 @@ impl<T> DirectedGraph<T> {
     pub fn remove_incoming_edges(&mut self, index: usize) {
         let nz_index = NonZeroUsize::new(index).unwrap();
         for from in self.inbounds[index].iter() {
-            self.outbounds[*from].take_by_value(&nz_index);
+            self.outbounds[*from].remove(&nz_index);
         }
         self.inbounds[index].clear();
     }
@@ -151,9 +166,7 @@ impl<T> DirectedGraph<T> {
     }
 
     pub fn iter_outbounds(&self, index: usize) -> impl Iterator<Item = usize> + Clone + '_ {
-        self.outbounds[index]
-            .values()
-            .filter_map(|to| to.as_ref().map(|to| to.get()))
+        self.outbounds[index].iter().map(|to| to.get())
     }
 
     pub fn iter_inbounds(&self, index: usize) -> impl Iterator<Item = usize> + Clone + '_ {
@@ -171,12 +184,12 @@ impl<T> DirectedGraph<T> {
             v: usize,
             visit: &mut [bool],
             path_visit: &mut [bool],
-            edges: &[SetVec<NonZeroUsize>],
+            edges: &[SetValueList<NonZeroUsize>],
         ) -> bool {
             if !visit[v] {
                 visit[v] = true;
                 path_visit[v] = true;
-                let res = edges[v].values_occupied().any(|&nz_w| {
+                let res = edges[v].iter().any(|&nz_w| {
                     let w = nz_w.get();
                     find(w, visit, path_visit, edges) || path_visit[w]
                 });
@@ -192,24 +205,29 @@ impl<T> DirectedGraph<T> {
 
     /// Orphan node should become a child of default root node.
     fn connect_root(&mut self, index: usize) {
-        self.outbounds[0].insert(NonZeroUsize::new(index).unwrap());
+        self.outbounds[0].push_back(NonZeroUsize::new(index).unwrap());
         self.inbounds[index].insert(0);
     }
 
     /// Child node is not an orphan anymore, therfore it should disconnect to default root node.
     fn disconnect_root(&mut self, index: usize) {
-        self.outbounds[0].take_by_value(&NonZeroUsize::new(index).unwrap());
+        self.outbounds[0].remove(&NonZeroUsize::new(index).unwrap());
         self.inbounds[index].remove(&0);
+    }
+
+    fn new_outbound() -> SetValueList<NonZeroUsize> {
+        let dummy = unsafe { NonZeroUsize::new_unchecked(1) };
+        SetValueList::new(dummy)
     }
 }
 
-impl<T> Default for DirectedGraph<T> {
+impl<T: Default> Default for DirectedGraph<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T> Index<usize> for DirectedGraph<T> {
+impl<T: Default> Index<usize> for DirectedGraph<T> {
     type Output = T;
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -217,7 +235,7 @@ impl<T> Index<usize> for DirectedGraph<T> {
     }
 }
 
-impl<T> IndexMut<usize> for DirectedGraph<T> {
+impl<T: Default> IndexMut<usize> for DirectedGraph<T> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         self.get_node_mut(index).unwrap()
     }

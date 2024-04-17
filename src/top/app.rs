@@ -1,17 +1,19 @@
-use super::{canvas::CanvasPack, AppError};
+use super::{
+    canvas::CanvasPack,
+    event::{Event, EventManager},
+    r#loop::Loop,
+    AppError,
+};
 use crate::{
-    top::{event::{Event, EventManager}, r#loop::Loop},
     decl_return_wrap,
-    ds::refs::RCell,
+    ds::{get::GetterMut, refs::RCell},
     ecs::{
-        predefined::{
-            components,
-            resource::{ResourcePack, TimeStamp},
-        },
-        storage::{EntityReg, Storage},
-        system::{Invokable, System, SystemInfo, Systems},
-        traits::{Component, TypedGetterMut},
-        SystemKey,
+        component::Component,
+        entity::{EntityForm, EntityKey},
+        predefined::components,
+        resource::Resource,
+        schedule::Scheduler,
+        system::{Client, Invokable, System, SystemKey},
     },
     primitive::mesh::{Geometry, Material, MeshResource, SeparateGeometry},
     render::{
@@ -26,10 +28,17 @@ use crate::{
         SceneError,
     },
     ty,
-    util::{key::ResKey, string::RcStr, web, AsBytes},
-    worker::{msg, MainWorker},
+    util::{
+        key::ObjectKey,
+        string::{self, RcStr},
+        web, AsBytes,
+    },
+    worker::{
+        msg::{self, ChMsg},
+        Channel, MainChannel, MainWorker, Worker, WorkerId,
+    },
 };
-use std::{any::Any, cell::RefCell, mem, rc::Rc};
+use std::{any::Any, cell::RefCell, mem, num::NonZeroU32, ptr::NonNull, rc::Rc, thread};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
@@ -48,14 +57,14 @@ impl App {
         let canvases = CanvasPack::new();
 
         // Spawns main worker.
-        let main = MainWorker::spawn("main-worker", 0).expect_throw("failed to spawn web worker");
+        let main = MainWorker::spawn("main-worker").expect_throw("failed to spawn web worker");
         let main = Rc::new(main);
 
         // Sends INIT message with dummy canvas to the main worker.
         let canvas = canvases.get_dummy();
         let offcanvas = canvas.transfer_control_to_offscreen().unwrap();
-        let (element, handle) = offcanvas.destruct();
-        msg::JsMsgInit(msg::JsMsgCanvas { element, handle }).post_to(&main);
+        let (element, handle) = offcanvas.destructure();
+        msg::MsgEventInit(msg::MsgEventCanvas { element, handle }).post_to(main.handle_js());
 
         let mut app = Self {
             main,
@@ -80,8 +89,8 @@ impl App {
         let offcanvas = canvas.transfer_control_to_offscreen()?;
 
         // Transfers offscreen canvas to the main worker.
-        let (element, handle) = offcanvas.destruct();
-        msg::JsMsgCanvas { element, handle }.post_to(&self.main);
+        let (element, handle) = offcanvas.destructure();
+        msg::MsgEventCanvas { element, handle }.post_to(self.main.handle_js());
 
         drop(canvases);
         Ok(self)
@@ -90,20 +99,23 @@ impl App {
     pub fn call_initializer(&self, f: fn(&mut AppState)) {
         // Sends user initialization function.
         let f: fn() = unsafe { mem::transmute(f) };
-        msg::JsMsgFn {
+        msg::MsgEventFn {
             f: f as usize as _,
-            disc: msg::JsMsgFnDisc::UserInit as _,
+            disc: msg::MsgEventFnDisc::UserInit as _,
         }
-        .post_to(&self.main);
+        .post_to(self.main.handle_js());
+
+        // Sends run message.
+        msg::MsgEventRun.post_to(self.main.handle_js());
     }
 
     /// Registers WINDOW_SCALE message proxy.
     fn register_scale_message_proxy(&mut self) {
         let main = Rc::clone(&self.main);
-        let buf = msg::JsMsgWindowScale::create_buffer();
+        let buf = msg::MsgEventWindowScale::create_buffer();
         let proxy =
             Closure::<dyn Fn(web_sys::CustomEvent)>::new(move |event: web_sys::CustomEvent| {
-                let msg = msg::JsMsgWindowScale {
+                let msg = msg::MsgEventWindowScale {
                     scale: event.detail().as_f64().unwrap(),
                 };
                 msg.write_body(&buf);
@@ -119,14 +131,14 @@ impl App {
     fn register_resize_message_proxy(&mut self) {
         let main = Rc::clone(&self.main);
         let canvases = RCell::clone(&self.canvases);
-        let buf = msg::JsMsgCanvasResize::create_buffer();
+        let buf = msg::MsgEventCanvasResize::create_buffer();
         let proxy = Closure::<dyn Fn()>::new(move || {
             let canvases = canvases.borrow();
-            for canvas in canvases.values() {
-                let msg = msg::JsMsgCanvasResize {
+            for canvas in canvases.values().filter(|canvas| !canvas.is_dummy()) {
+                let msg = msg::MsgEventCanvasResize {
                     handle: canvas.handle(),
-                    width: canvas.client_width() as i16,
-                    height: canvas.client_height() as i16,
+                    width: canvas.client_width() as _,
+                    height: canvas.client_height() as _,
                 };
                 msg.write_body(&buf);
                 main.post_message(&buf).unwrap();
@@ -153,33 +165,39 @@ extern "C" {
 }
 
 thread_local! {
-    /// [`MainWorker`] owns this [`AppState`], which means the state belongs to worker.
+    /// [`Worker`] owns this [`AppState`], which means the state belongs to worker.
     /// All graphics jobs will be done in the worker.
     static APP_STATE: RefCell<AppState> = panic!();
 
+    /// Checks out all workers are ready or not.
+    /// Plus, gets thread handle [`Thread`]s from the workers.
+    static FN_WAIT_WORKER: RefCell<Closure<dyn FnMut()>> = panic!();
 }
 
 /// Initializes [`APP_STATE`] on main worker, not in window context.
-/// That's because window and worker don't share memory (We can use shared memory with some restrictions).
+/// That's because we assume that window and worker don't share the memory for future compatibility.
 /// When initialization is over, JS replaces this event handler with [`main_onmessage`].
-#[wasm_bindgen]
-pub async fn main_onmessage_init(event: web_sys::MessageEvent) -> bool {
+#[wasm_bindgen(js_name = mainOnMessageInit)]
+pub async fn main_onmessage_init(event: web_sys::MessageEvent) {
     let data = event.data();
     debug_assert!(data.is_array());
     let buf: js_sys::Array = data.unchecked_into();
-    match msg::JsMsgHeader::from_js_value(buf.get(0)).0 {
-        msg::JsMsgHeader::INIT_INNER => {
+    match msg::MsgEventHeader::from_js_value(buf.get(0)).0 {
+        msg::MsgEventHeader::INIT_INNER => {
             crate::log!("[D] main_onmessage_init(): worker received INIT msg.");
 
             // Initializes `APP_STATE`.
-            let msg = msg::JsMsgInit::read_body(&buf);
+            let msg = msg::MsgEventInit::read_body(&buf);
             let offcanvas = OffCanvas::new(msg.0.element, msg.0.handle);
             let state = AppState::new(offcanvas).await;
             APP_STATE.set(state);
 
-            // Fully initialized. JS will change `onmessage` after receiving true.
-            crate::log!("[D] main_onmessage_init(): worker returns true");
-            return true;
+            // APP_STATE is settled now, so we can know fixed resource address.
+            APP_STATE.with_borrow_mut(|state| {
+                state.set_resource_address();
+            });
+
+            // Fully initialized. JS will change `onmessage` right away.
         }
         _ => {
             crate::log!(
@@ -188,57 +206,128 @@ pub async fn main_onmessage_init(event: web_sys::MessageEvent) -> bool {
             );
         }
     }
-    false
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = mainOnMessage)]
 pub fn main_onmessage(event: web_sys::MessageEvent, _id: u32) {
     let data = event.data();
     debug_assert!(data.is_array());
     let buf: js_sys::Array = data.unchecked_into();
-    match msg::JsMsgHeader::from_js_value(buf.get(0)).0 {
-        msg::JsMsgHeader::CANVAS_INNER => {
+
+    match msg::MsgEventHeader::from_js_value(buf.get(0)).0 {
+        msg::MsgEventHeader::CANVAS_INNER => {
             crate::log!("[D] main_onmessage(): worker received CANVAS msg.");
 
-            let msg = msg::JsMsgCanvas::read_body(&buf);
+            let msg = msg::MsgEventCanvas::read_body(&buf);
             APP_STATE.with_borrow_mut(move |state| {
                 state.register_offcanvas(msg.element, msg.handle);
             });
         }
-        msg::JsMsgHeader::WINDOW_SCALE_INNER => {
+        msg::MsgEventHeader::WINDOW_SCALE_INNER => {
             crate::log!("[D] main_onmessage(): worker received WINDOW_SCALE msg.");
 
-            let msg = msg::JsMsgWindowScale::read_body(&buf);
+            let msg = msg::MsgEventWindowScale::read_body(&buf);
             APP_STATE.with_borrow_mut(|state| {
                 state.update_scale_factor(msg.scale);
             });
         }
-        msg::JsMsgHeader::CANVAS_RESIZE_INNER => {
+        msg::MsgEventHeader::CANVAS_RESIZE_INNER => {
             crate::log!("[D] main_onmessage(): worker received CANVAS_RESIZE msg.");
 
-            let msg = msg::JsMsgCanvasResize::read_body(&buf);
+            let msg = msg::MsgEventCanvasResize::read_body(&buf);
             APP_STATE.with_borrow_mut(|state| {
                 state.ev_mgr.push(Event::Resized(msg));
             });
         }
-        msg::JsMsgHeader::FN_INNER => {
+        msg::MsgEventHeader::FN_INNER => {
             crate::log!("[D] main_onmessage(): worker received FN msg.");
 
-            let msg = msg::JsMsgFn::read_body(&buf);
-            if msg.disc == msg::JsMsgFnDisc::UserInit as u32 {
-                APP_STATE.with_borrow_mut(|state| {
-                    match msg.disc {
-                        disc if disc == msg::JsMsgFnDisc::UserInit as u32 => {
+            let msg = msg::MsgEventFn::read_body(&buf);
+            if msg.disc > msg::MsgEventFnDisc::Begin as u32 {
+                // Acttey function
+                match msg.disc {
+                    disc if disc == msg::MsgEventFnDisc::UserInit as u32 => {
+                        APP_STATE.with_borrow_mut(|state: &mut AppState| {
                             // TODO: This corresponds to App::call_initializer().
                             // But it's too error prone. Come up with better solution.
                             let f: fn(&mut AppState) = unsafe { mem::transmute(msg.f as usize) };
+
+                            // Initializes `AppState` with user's function.
                             f(state);
+                        });
+                    }
+                    _ => {
+                        panic!("unsupported msg: {:?}", msg);
+                    }
+                }
+            } else {
+                // User function
+                todo!()
+            }
+        }
+        msg::MsgEventHeader::RUN_INNER => {
+            crate::log!("[D] main_onmessage(): worker received Run msg.");
+
+            // We need to wait all workers to become ready.
+            let check: Closure<dyn FnMut()> = Closure::new(|| {
+                let mut failed = false;
+                APP_STATE.with_borrow_mut(|state: &mut AppState| {
+                    let main_id = thread::current().id();
+                    for worker in state.workers.iter_mut() {
+                        if !worker.is_ready() {
+                            failed = true;
+                            break;
                         }
-                        _ => {}
+                        if main_id == worker.handle_rust().id() {
+                            worker.open();
+                            worker.send(ChMsg::ReqHandle).unwrap();
+
+                            let msg = state.ch.recv();
+                            if let Ok(ChMsg::Handle(handle)) = msg {
+                                worker.set_handle_rust(handle);
+                            } else {
+                                panic!();
+                            }
+
+                            worker.close().unwrap();
+                        }
+                    }
+
+                    // If any worker is not ready yet, see it next time.
+                    if failed {
+                        FN_WAIT_WORKER.with_borrow(|check: &Closure<dyn FnMut()>| {
+                            let cb = check.as_ref().unchecked_ref();
+                            let global = js_sys::global()
+                                .unchecked_into::<web_sys::DedicatedWorkerGlobalScope>();
+                            global
+                                .set_timeout_with_callback_and_timeout_and_arguments_0(cb, 10)
+                                .unwrap();
+                            crate::log!("[D] main_onmessage(): wait for workers once again");
+                        });
+                    } else {
+                        crate::log!(
+                            "[D] main_onmessage(): all {} sub workers are stable now",
+                            state.workers.len()
+                        );
                     }
                 });
-                AppState::run();
-            }
+
+                // All workers are ready, we can finally run our main loop.
+                if !failed {
+                    crate::log!("[D] main_onmessage(): run AppState's main loop");
+                    AppState::run();
+                }
+            });
+
+            // We must finish our current task in order to let sub workers be spawned and get ready.
+            // Because JS can't do the job until current job is done.
+            // To do that, we use timer here.
+            let cb = check.as_ref().unchecked_ref();
+            let global = js_sys::global().unchecked_into::<web_sys::DedicatedWorkerGlobalScope>();
+            global
+                .set_timeout_with_callback_and_timeout_and_arguments_0(cb, 10)
+                .unwrap();
+            FN_WAIT_WORKER.set(check);
         }
         _ => {
             crate::log!(
@@ -251,13 +340,10 @@ pub fn main_onmessage(event: web_sys::MessageEvent, _id: u32) {
 
 /// Resources representing the app's state.
 pub struct AppState {
-    /// A resource managing all components.
-    storage: Storage,
+    /// System scheduler.
+    sched: Scheduler,
 
-    /// A resource managing all systems.
-    systems: Systems,
-
-    /// TODO: merge to systems.
+    /// TODO: merge to the scheduler.
     super_systems: Vec<Box<dyn Invokable>>,
 
     /// A resource managing all render resources.
@@ -274,20 +360,60 @@ pub struct AppState {
 
     /// Loop function.
     main_loop: Loop,
+
+    /// Sub workers.
+    workers: Vec<Worker>,
+
+    /// Receiving only channel.
+    ch: MainChannel,
+
+    /// The last active system registered through the state.
+    last_sys: Option<SystemKey>,
 }
 
 impl AppState {
     async fn new(offcanvas: OffCanvas) -> Self {
         Self {
-            storage: Storage::new(),
-            systems: Systems::new(),
+            sched: Scheduler::new(),
             super_systems: Vec::new(),
             render: RenderResource::new(offcanvas).await.unwrap(),
             meshes: MeshResource::new(),
             scene_mgr: SceneManager::new(),
             ev_mgr: EventManager::new(),
             main_loop: Loop::new(),
+            workers: Vec::new(),
+            ch: MainChannel::new(),
+            last_sys: None,
         }
+    }
+
+    /// Acquires addresses of resource fields from this app state.
+    /// And then sets those addresses to the scheduler.
+    /// Note that this method must be called once app state is fixed in memory.
+    ///
+    /// For performance reason, we're not going to use `Box` or something like that here.
+    /// Because we are aware of when app state is fixed in memory and its resource fields will never be moved or dropped.
+    fn set_resource_address(&mut self) {
+        use std::ptr::addr_of_mut;
+
+        // Registers `render` resource.
+        // Safety: Infallible.
+        let ptr: NonNull<u8> = unsafe { NonNull::new_unchecked(addr_of_mut!(self.render) as _) };
+        self.sched
+            .register_default_resource(self.render.rkey(), ptr);
+
+        // Registers `scene_mgr` resource.
+        // Safety: Infallible.
+        let ptr: NonNull<u8> = unsafe { NonNull::new_unchecked(addr_of_mut!(self.scene_mgr) as _) };
+        self.sched
+            .register_default_resource(self.scene_mgr.rkey(), ptr);
+
+        // Registers `ev_mgr` resource.
+        let ptr: NonNull<u8> = unsafe { NonNull::new_unchecked(addr_of_mut!(self.ev_mgr) as _) };
+        self.sched
+            .register_default_resource(self.ev_mgr.rkey(), ptr);
+
+        // TODO: other resources
     }
 
     fn register_offcanvas(&mut self, element: web_sys::OffscreenCanvas, handle: u32) {
@@ -300,16 +426,35 @@ impl AppState {
         self.render.scale = scale;
     }
 
+    pub fn spawn_worker(&mut self, num: Option<usize>) {
+        debug_assert!(self.workers.is_empty());
+
+        // Spawns sub workers.
+        let num = num.unwrap_or(web::hardware_concurrency() - 1);
+        let mut name = "sub-worker-00".to_owned();
+        // Worker's id is equal to index + 1.
+        // This helps us find a specific worker easily.
+        self.workers = (1..=num as u32)
+            .map(|id| {
+                // Safety: Infallible.
+                let id = unsafe { NonZeroU32::new_unchecked(id) };
+                string::increase_rnumber(&mut name);
+                let tx_common = self.ch.clone_tx();
+                Worker::spawn(&name, id, tx_common).expect_throw("failed to spawn web worker")
+            })
+            .collect::<Vec<_>>();
+    }
+
     #[inline]
     pub fn add_geometry(
         &mut self,
-        key: impl Into<ResKey>,
+        key: impl Into<ObjectKey>,
         geo: impl Into<SeparateGeometry>,
     ) -> GeometryReturn {
-        fn inner(state: &mut AppState, key: ResKey, geo: SeparateGeometry) -> GeometryReturn {
-            state.meshes.add_geometry(key.clone(), Geometry::from(geo));
+        fn inner(this: &mut AppState, key: ObjectKey, geo: SeparateGeometry) -> GeometryReturn {
+            this.meshes.add_geometry(key.clone(), Geometry::from(geo));
             GeometryReturn {
-                recv: state,
+                recv: this,
                 ret: key,
             }
         }
@@ -320,13 +465,13 @@ impl AppState {
     #[inline]
     pub fn add_material(
         &mut self,
-        key: impl Into<ResKey>,
+        key: impl Into<ObjectKey>,
         mat: impl Into<Material>,
     ) -> MaterialReturn {
-        fn inner(state: &mut AppState, key: ResKey, mat: Material) -> MaterialReturn {
-            state.meshes.add_material(key.clone(), mat);
+        fn inner(this: &mut AppState, key: ObjectKey, mat: Material) -> MaterialReturn {
+            this.meshes.add_material(key.clone(), mat);
             MaterialReturn {
-                recv: state,
+                recv: this,
                 ret: key,
             }
         }
@@ -337,14 +482,19 @@ impl AppState {
     #[inline]
     pub fn add_mesh(
         &mut self,
-        mesh: impl Into<ResKey>,
-        geo: impl Into<ResKey>,
-        mat: impl Into<ResKey>,
+        mesh: impl Into<ObjectKey>,
+        geo: impl Into<ObjectKey>,
+        mat: impl Into<ObjectKey>,
     ) -> MeshReturn {
-        fn inner(state: &mut AppState, mesh: ResKey, geo: ResKey, mat: ResKey) -> MeshReturn {
-            state.meshes.add_mesh(mesh.clone(), geo, mat);
+        fn inner(
+            this: &mut AppState,
+            mesh: ObjectKey,
+            geo: ObjectKey,
+            mat: ObjectKey,
+        ) -> MeshReturn {
+            this.meshes.add_mesh(mesh.clone(), geo, mat);
             MeshReturn {
-                recv: state,
+                recv: this,
                 ret: mesh,
             }
         }
@@ -353,38 +503,50 @@ impl AppState {
     }
 
     #[inline]
-    pub fn register_entity(&mut self, reg: EntityReg) -> usize {
-        self.storage.register_entity(reg)
+    pub fn register_entity(&mut self, reg: EntityForm) -> usize {
+        self.sched.register_entity(reg)
     }
 
     pub fn temp_begin_add_entity(&mut self, enti: usize) {
-        let cont = self.storage.ents.get_entity_container_mut(enti).unwrap();
+        let cont = self
+            .sched
+            .entities
+            .get_entity_container_mut(EntityKey::Index(enti))
+            .unwrap();
         cont.begin_add_item();
     }
 
     pub fn temp_add_entity_comp<C: Component>(&mut self, enti: usize, value: C) {
-        let cont = self.storage.ents.get_entity_container_mut(enti).unwrap();
+        let cont = self
+            .sched
+            .entities
+            .get_entity_container_mut(EntityKey::Index(enti))
+            .unwrap();
         let coli = cont.get_column_index(&ty!(C)).unwrap();
         unsafe { cont.add_item(coli, &value as *const C as *const u8) };
     }
 
     pub fn temp_end_add_entity(&mut self, enti: usize) -> usize {
-        let cont = self.storage.ents.get_entity_container_mut(enti).unwrap();
+        let cont = self
+            .sched
+            .entities
+            .get_entity_container_mut(EntityKey::Index(enti))
+            .unwrap();
         cont.end_add_item()
     }
 
     // TODO: AppError
     #[inline]
-    pub fn add_scene(&mut self, key: impl Into<ResKey>, scene: Scene) -> Result<(), SceneError> {
+    pub fn add_scene(&mut self, key: impl Into<ObjectKey>, scene: Scene) -> Result<(), SceneError> {
         self._add_scene(key.into(), scene)
     }
 
-    fn _add_scene(&mut self, key: ResKey, mut scene: Scene) -> Result<(), SceneError> {
+    fn _add_scene(&mut self, key: ObjectKey, mut scene: Scene) -> Result<(), SceneError> {
         let AppState {
+            sched,
             render,
             meshes,
             scene_mgr,
-            storage,
             ..
         } = self;
 
@@ -395,11 +557,14 @@ impl AppState {
             if let Some((enti, eid)) = node.get_mapped_entity() {
                 // TODO: Use filter, This is duplicate implementation.
                 // Using system may be a good choice.
-                let cont = storage.ents.get_entity_container_mut(enti).unwrap();
+                let cont = sched
+                    .entities
+                    .get_entity_container_mut(EntityKey::Index(enti))
+                    .unwrap();
                 let coli = cont.get_column_index(&ty!(components::Drawable)).unwrap();
                 let mut borrowed = cont.borrow_column_mut(coli).unwrap();
-                let mut getter: TypedGetterMut<'_, components::Drawable> = (&mut *borrowed).into();
-                let value = unsafe { getter.get(eid).unwrap() };
+                let mut getter: GetterMut<'_, components::Drawable> = (&mut *borrowed).into();
+                let value = getter.get(eid).unwrap();
                 value.node.scene_key = key.id;
                 value.node.node_index = i;
             }
@@ -560,82 +725,50 @@ impl AppState {
         Ok(())
     }
 
-    /// Adds a system.
+    /// Registers and activates a system.
     #[inline]
-    pub fn add_system<S: System>(&mut self, system: S) -> &mut Self {
-        fn inner(
-            state: &mut AppState,
-            skey: SystemKey,
-            sinfo: SystemInfo,
-            system: Box<dyn Invokable>,
-        ) -> &mut AppState {
-            {
-                state.systems.insert(skey, system);
-                state.storage.register_system(skey, sinfo);
+    pub fn register_system<S: System>(&mut self, sys: S) -> bool {
+        let res = self.sched.register_system(sys);
+
+        fn activate(this: &mut AppState, skey: SystemKey) {
+            if let Some(last_sys) = this.last_sys.take() {
+                this.sched.activate_system(&skey, &last_sys);
+            } else {
+                this.sched.activate_system_as_first(&skey);
             }
-            state
+            this.last_sys = Some(skey);
         }
 
-        inner(self, S::key(), S::info(), Box::new(system))
+        activate(self, S::key());
+        res
+    }
+
+    #[inline]
+    pub fn register_inactive_system<S: System>(&mut self, _sys: S) {
+        todo!()
     }
 
     /// Adds a super system.
     /// Super systems can add or remove normal systems.
     #[inline]
-    pub fn add_super_system<S: System>(&mut self, system: S) -> &mut Self {
-        fn inner(
-            state: &mut AppState,
-            skey: SystemKey,
-            sinfo: SystemInfo,
-            system: Box<dyn Invokable>,
-        ) -> &mut AppState {
-            {
-                state.super_systems.push(system);
-                state.storage.register_system(skey, sinfo);
-            }
-            state
-        }
-
-        inner(self, S::key(), S::info(), Box::new(system))
+    pub fn add_super_system<S: System>(&mut self, _sys: S) -> &mut Self {
+        todo!()
     }
 
     pub fn run() {
         // Creates main loop which is animation callback.
-        let callback = Closure::<dyn FnMut(f64)>::new(move |time: f64| {
+        let callback = Closure::<dyn FnMut(f64)>::new(move |_time: f64| {
             APP_STATE.with_borrow_mut(|state| {
                 let Self {
-                    storage,
-                    systems,
-                    super_systems,
-                    render,
-                    scene_mgr,
-                    ev_mgr,
+                    sched,
                     main_loop,
+                    workers,
+                    ch,
                     ..
                 } = state;
 
-                let mut res_pack = ResourcePack {
-                    ev_mgr,
-                    storage,
-                    render,
-                    time: &mut TimeStamp(time),
-                    systems: None,
-                    scene_mgr,
-                };
-
-                // Invokes systems.
-                for sys in systems.values_mut() {
-                    sys.invoke(&res_pack);
-                }
-
-                // Invokes super systems.
-                res_pack.systems = Some(systems);
-                for sys in super_systems.iter_mut() {
-                    sys.invoke(&res_pack);
-                }
-
-                // TODO: limit to the size of input.
-                debug_assert!(res_pack.ev_mgr.is_command_empty());
+                // TODO: super system is not scheduled for now.
+                sched.schedule(workers, ch);
 
                 // Requests next frame.
                 main_loop.request_animation_frame();
@@ -650,9 +783,57 @@ impl AppState {
     }
 }
 
-decl_return_wrap!(GeometryReturn, AppState, ResKey);
-decl_return_wrap!(MaterialReturn, AppState, ResKey);
-decl_return_wrap!(MeshReturn, AppState, ResKey);
+#[wasm_bindgen(js_name = subOnMessage)]
+pub unsafe fn sub_onmessage(ch: *const Channel, id: u32) {
+    // Entrypoint to the sub worker's meesage loop.
+    fn entry(client: &mut Client) {
+        while let Ok(msg) = client.recv() {
+            match msg {
+                ChMsg::ReqHandle => {
+                    // crate::log!("[D] sub_onmessage(): worker({id}) ReqHandle msg.");
+
+                    client.send(ChMsg::Handle(thread::current())).unwrap();
+                }
+                ChMsg::End => {
+                    // crate::log!("[D] sub_onmessage(): worker({id}) received End msg.");
+
+                    return;
+                }
+                ChMsg::Task(mut task_ptr, buf_ptr) => {
+                    // crate::log!("[D] sub_onmessage(): worker({id}) received Task msg.");
+
+                    let task = unsafe { task_ptr.as_mut() };
+                    let buf = unsafe { buf_ptr.as_ref() };
+                    task.invoke(buf);
+                    client.send(ChMsg::Fin(client.wid(), task.rkey())).unwrap();
+                }
+                msg => {
+                    panic!(
+                        "[E] sub_onmessage(): worker({}) received unknown msg: {:?}",
+                        client.wid(),
+                        msg
+                    );
+                }
+            }
+        }
+        unreachable!(
+            "[E] sub_onmessage(): worker({}) failed to receive a msg",
+            client.wid()
+        );
+    }
+
+    // Safety: `ch` came from worker, which guarantees `ch` is valid.
+    // See Worker::ch and Worker::open() for more details.
+    let ch = unsafe { ch.as_ref() };
+    let mut client = Client::new(ch.unwrap(), entry, WorkerId::new(id));
+    entry(&mut client);
+
+    // crate::log!("[D] worker({id}) sub_onmessage has finished");
+}
+
+decl_return_wrap!(GeometryReturn, AppState, ObjectKey);
+decl_return_wrap!(MaterialReturn, AppState, ObjectKey);
+decl_return_wrap!(MeshReturn, AppState, ObjectKey);
 
 pub fn set_panic_hook() {
     #[cfg(debug_assertions)]

@@ -169,6 +169,7 @@ impl<'a, T, const N: usize> Drop for UpgradedWeaks<'a, T, N> {
     }
 }
 
+#[derive(Debug)]
 /// Rc<RefCell\<T\>>
 pub struct RCell<T> {
     value: Rc<RefCell<T>>,

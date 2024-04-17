@@ -1,4 +1,4 @@
-use std::{borrow::Cow, ops::Deref, rc::Rc};
+use std::{borrow::Cow, fmt::Display, ops::Deref, rc::Rc, sync::Arc};
 
 pub fn concat_string(l: &str, r: &str) -> String {
     let mut s = String::with_capacity(l.len() + r.len());
@@ -25,7 +25,7 @@ pub fn rdigit_num(s: &str) -> usize {
     let v = s.as_bytes();
     v.iter()
         .rev()
-        .take_while(|c| (b'0'..=b'9').contains(c))
+        .take_while(|c| c.is_ascii_digit())
         .count()
 }
 
@@ -150,7 +150,7 @@ pub const fn encode_base64_u32(value: u32) -> [u8; 6] {
 }
 
 /// A wrapper of `Option<&str>`. Empty string is considered as None.
-/// This is interchangable with `Option<&str>` and `&str` using [`From::from()`] or [`Into::into()`].
+/// This is interchangeable with `Option<&str>` and `&str` using [`From::from()`] or [`Into::into()`].
 pub struct OptionStr<'a>(Option<&'a str>);
 
 impl<'a> OptionStr<'a> {
@@ -158,7 +158,7 @@ impl<'a> OptionStr<'a> {
     /// You can use that for a shared string.
     #[inline]
     pub fn as_rc_str(&self) -> Option<RcStr> {
-        self.0.map(RcStr::from)
+        self.0.map(RcStr::new)
     }
 }
 
@@ -206,56 +206,132 @@ impl<'a> From<OptionStr<'a>> for Option<&'a str> {
     }
 }
 
-/// Rc\<str\> with From implementations.
+/// Rc\<str\>.
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct RcStr(Rc<str>);
 
+impl RcStr {
+    /// Creates new `RcStr` instead of cloning of another one.
+    #[inline]
+    pub fn new(s: &str) -> Self {
+        Self(Rc::from(s))
+    }
+}
+
 impl From<&Rc<str>> for RcStr {
+    #[inline]
     fn from(value: &Rc<str>) -> Self {
         Self(Rc::clone(value))
     }
 }
 
 impl From<Rc<str>> for RcStr {
+    #[inline]
     fn from(value: Rc<str>) -> Self {
         Self(value)
     }
 }
 
 impl From<&RcStr> for RcStr {
+    #[inline]
     fn from(value: &RcStr) -> Self {
         value.clone()
-    }
-}
-
-impl From<&str> for RcStr {
-    fn from(value: &str) -> Self {
-        Self(Rc::from(value))
-    }
-}
-
-impl From<String> for RcStr {
-    fn from(value: String) -> Self {
-        Self(Rc::from(value))
     }
 }
 
 impl Deref for RcStr {
     type Target = str;
 
+    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
 impl std::borrow::Borrow<str> for RcStr {
+    #[inline]
     fn borrow(&self) -> &str {
         &self.0
     }
 }
 
 impl AsRef<str> for RcStr {
+    #[inline]
     fn as_ref(&self) -> &str {
         &self.0
+    }
+}
+
+impl Display for RcStr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+/// Arc\<str\>.  
+/// Note that `Arc` works like `Rc` if it's built for wasm and std was not built with some options like atomic.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct ArcStr(Arc<str>);
+
+impl ArcStr {
+    /// Creates new `ArcStr` instead of cloning of another one.
+    #[inline]
+    pub fn new(s: &str) -> Self {
+        Self(Arc::from(s))
+    }
+
+    #[inline]
+    pub fn as_ptr(this: &Self) -> *const str {
+        Arc::as_ptr(&this.0)
+    }
+}
+
+impl From<&Arc<str>> for ArcStr {
+    #[inline]
+    fn from(value: &Arc<str>) -> Self {
+        Self(Arc::clone(value))
+    }
+}
+
+impl From<Arc<str>> for ArcStr {
+    #[inline]
+    fn from(value: Arc<str>) -> Self {
+        Self(value)
+    }
+}
+
+impl From<&ArcStr> for ArcStr {
+    #[inline]
+    fn from(value: &ArcStr) -> Self {
+        value.clone()
+    }
+}
+
+impl Deref for ArcStr {
+    type Target = str;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::borrow::Borrow<str> for ArcStr {
+    #[inline]
+    fn borrow(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for ArcStr {
+    #[inline]
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Display for ArcStr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
     }
 }

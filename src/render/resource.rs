@@ -12,13 +12,14 @@ use crate::{
         BufferPool, RenderError,
     },
     ty,
-    util::key::ResKey,
+    util::key::ObjectKey,
 };
 use ahash::AHashMap;
 use smallvec::{smallvec, SmallVec};
 use std::{borrow::Borrow, collections::HashMap, hash::Hash, mem::transmute_copy, rc::Rc};
 
 /// Top struct in render module.
+#[derive(Debug)]
 pub struct RenderResource {
     /// [`wgpu::Device`] and [`wgpu::Queue`].
     pub gpu: Rc<Gpu>,
@@ -286,7 +287,7 @@ impl RenderResource {
     #[inline]
     pub fn get_bind_group_layout<Q>(&self, key: &Q) -> Option<&Rc<wgpu::BindGroupLayout>>
     where
-        ResKey: Borrow<Q>,
+        ObjectKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.binds.layouts.get(key)
@@ -295,7 +296,7 @@ impl RenderResource {
     #[inline]
     pub fn get_bind_group<Q>(&self, key: &Q) -> Option<&Rc<wgpu::BindGroup>>
     where
-        ResKey: Borrow<Q>,
+        ObjectKey: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.binds.groups.get(key).map(|(group, _)| group)
@@ -326,7 +327,7 @@ impl RenderResource {
     }
 
     #[inline]
-    pub fn build_shader(&mut self, index: GenIndex, key: &ResKey) -> &Rc<Shader> {
+    pub fn build_shader(&mut self, index: GenIndex, key: &ObjectKey) -> &Rc<Shader> {
         self.shaders.create_shader(index, key)
     }
 
@@ -361,7 +362,7 @@ impl RenderResource {
     pub fn build_pipeline_layout(
         &mut self,
         index: GenIndex,
-        key: ResKey,
+        key: ObjectKey,
     ) -> &Rc<wgpu::PipelineLayout> {
         self.pipelines.create_layout(index, key)
     }
@@ -391,7 +392,7 @@ impl RenderResource {
     }
 
     #[inline]
-    pub fn build_pipeline(&mut self, index: GenIndex, key: ResKey) -> &Rc<wgpu::RenderPipeline> {
+    pub fn build_pipeline(&mut self, index: GenIndex, key: ObjectKey) -> &Rc<wgpu::RenderPipeline> {
         self.pipelines
             .create_pipeline(index, key, &self.surf_packs, &self.surfaces)
     }
@@ -550,20 +551,20 @@ impl<'a> CanvasReturn<'a> {
 
 #[derive(Debug)]
 pub struct IterBindGroupLayout<'a> {
-    pub key: &'a ResKey,
+    pub key: &'a ObjectKey,
     pub layout: &'a Rc<wgpu::BindGroupLayout>,
 }
 
 #[derive(Debug)]
 pub struct IterBindGroup<'a> {
-    pub key: &'a ResKey,
+    pub key: &'a ObjectKey,
     pub group: &'a Rc<wgpu::BindGroup>,
     pub bindings: &'a Vec<Binding>,
 }
 
 #[derive(Debug)]
 pub struct IterShader<'a> {
-    pub key: &'a ResKey,
+    pub key: &'a ObjectKey,
     pub shader: &'a Rc<Shader>,
 }
 
@@ -589,6 +590,6 @@ pub struct IterStorageBuffer<'a> {
 
 #[derive(Debug)]
 pub struct IterRenderPipeline<'a> {
-    pub key: &'a ResKey,
+    pub key: &'a ObjectKey,
     pub pipeline: &'a Rc<wgpu::RenderPipeline>,
 }

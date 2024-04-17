@@ -2,11 +2,11 @@ use std::{
     marker::PhantomData,
     ops::{Deref, DerefMut},
     process,
-    ptr::NonNull,
     sync::atomic::{
         self, AtomicI32,
         Ordering::{self, Acquire, Relaxed, Release},
     },
+    sync::Arc,
     thread,
 };
 
@@ -69,6 +69,35 @@ pub enum BorrowError {
     OutOfBound,
 }
 
+/// A shallow wrapper of [`Holder`].
+#[derive(Debug)]
+pub struct SimpleHolder<V, A: Atomic<i32>>(Holder<V, V, V, A>);
+
+impl<V: Copy, A: Atomic<i32>> SimpleHolder<V, A> {
+    pub fn new(value: V) -> Self {
+        let fn_imm = |value: &V| -> V { *value };
+        let fn_mut = |value: &mut V| -> V { *value };
+        let inner = Holder::new(value, fn_imm, fn_mut);
+        Self(inner)
+    }
+}
+
+impl<V, A: Atomic<i32>> Deref for SimpleHolder<V, A> {
+    type Target = Holder<V, V, V, A>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<V, A: Atomic<i32>> DerefMut for SimpleHolder<V, A> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
 /// Holding a thing within this and borrow it as [`Borrowed`].
 /// Multiple immutable borrowing is allowed, but mutable borrowing is exclusive.
 /// This detects dropping `Borrowed`, then this causes panic or abort if this is dropped while any `Borrowed` is still alive.
@@ -76,7 +105,7 @@ pub enum BorrowError {
 #[derive(Debug)]
 pub struct Holder<V, BI, BM, A: Atomic<i32> = atomic::AtomicI32> {
     value: V,
-    atomic_cnt: NonNull<A>,
+    atomic_cnt: Arc<A>,
     fn_imm: fn(&V) -> BI,
     fn_mut: fn(&mut V) -> BM,
     _marker: PhantomData<(BI, BM)>,
@@ -90,7 +119,7 @@ impl<V, BI, BM, A: Atomic<i32>> Holder<V, BI, BM, A> {
     pub fn new(value: V, fn_imm: fn(&V) -> BI, fn_mut: fn(&mut V) -> BM) -> Self {
         Self {
             value,
-            atomic_cnt: NonNull::new(Box::leak(Box::new(A::new(Self::CNT_INIT)))).unwrap(),
+            atomic_cnt: Arc::new(A::new(Self::CNT_INIT)),
             fn_imm,
             fn_mut,
             _marker: PhantomData,
@@ -106,46 +135,38 @@ impl<V, BI, BM, A: Atomic<i32>> Holder<V, BI, BM, A> {
     }
 
     pub fn borrow(&self) -> Result<Borrowed<BI, A>, BorrowError> {
-        let atomic = unsafe { self.atomic_cnt.as_ref() };
-        let old = atomic.add(1, Relaxed);
-        if old > Self::CNT_MAX {
-            atomic.sub(1, Relaxed);
-            Err(BorrowError::TooManyBorrow)
-        } else if old == Self::CNT_EXC {
-            atomic.sub(1, Relaxed);
-            Err(BorrowError::ExclusiveFailed)
-        } else {
-            Ok(Borrowed {
-                borrow_value: (self.fn_imm)(&self.value),
-                exclusive: false,
-                atomic_cnt: self.atomic_cnt,
-            })
-        }
-    }
-
-    pub fn borrow_mut(&mut self) -> Result<Borrowed<BM, A>, BorrowError> {
-        self._borrow_mut()?;
+        self.count_ref()?;
         Ok(Borrowed {
-            borrow_value: (self.fn_mut)(&mut self.value),
-            exclusive: true,
-            atomic_cnt: self.atomic_cnt,
+            borrow_value: (self.fn_imm)(&self.value),
+            exclusive: false,
+            atomic_cnt: Arc::clone(&self.atomic_cnt),
         })
     }
 
-    /// # Notice
-    ///
-    /// Inner value may be in the middle of modification in other threads.
-    #[inline]
-    pub fn get(&self) -> &V {
-        &self.value
+    pub fn borrow_mut(&mut self) -> Result<Borrowed<BM, A>, BorrowError> {
+        self.count_mut()?;
+        Ok(Borrowed {
+            borrow_value: (self.fn_mut)(&mut self.value),
+            exclusive: true,
+            atomic_cnt: Arc::clone(&self.atomic_cnt),
+        })
+    }
+
+    pub fn get(&self) -> Result<Borrowed<&V, A>, BorrowError> {
+        self.count_ref()?;
+        Ok(Borrowed {
+            borrow_value: &self.value,
+            exclusive: false,
+            atomic_cnt: Arc::clone(&self.atomic_cnt),
+        })
     }
 
     pub fn get_mut(&mut self) -> Result<Borrowed<&mut V, A>, BorrowError> {
-        self._borrow_mut()?;
+        self.count_mut()?;
         Ok(Borrowed {
             borrow_value: &mut self.value,
             exclusive: true,
-            atomic_cnt: self.atomic_cnt,
+            atomic_cnt: Arc::clone(&self.atomic_cnt),
         })
     }
 
@@ -154,13 +175,24 @@ impl<V, BI, BM, A: Atomic<i32>> Holder<V, BI, BM, A> {
     /// If it is [`Self::CNT_EXC`], it means there exist mutable `Borrowed`.
     /// Otherwise, in other words, it's zero, there's no `Borrowed`.
     pub fn borrow_count(&self) -> i32 {
-        let atomic = unsafe { self.atomic_cnt.as_ref() };
-        atomic.load(Relaxed)
+        self.atomic_cnt.load(Relaxed)
     }
 
-    fn _borrow_mut(&mut self) -> Result<(), BorrowError> {
-        let atomic = unsafe { self.atomic_cnt.as_ref() };
-        atomic
+    fn count_ref(&self) -> Result<(), BorrowError> {
+        let old = self.atomic_cnt.add(1, Relaxed);
+        if old > Self::CNT_MAX {
+            self.atomic_cnt.sub(1, Relaxed);
+            Err(BorrowError::TooManyBorrow)
+        } else if old == Self::CNT_EXC {
+            self.atomic_cnt.sub(1, Relaxed);
+            Err(BorrowError::ExclusiveFailed)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn count_mut(&mut self) -> Result<(), BorrowError> {
+        self.atomic_cnt
             .compare_exchange(Self::CNT_INIT, Self::CNT_EXC, Relaxed, Relaxed)
             .map_err(|_| BorrowError::ExclusiveFailed)?;
         Ok(())
@@ -173,15 +205,8 @@ impl<V, BI, BM, A: Atomic<i32>> Drop for Holder<V, BI, BM, A> {
         // Therefore, this thread can observe modification happend before when Borrowed is dropped.
         //
         // Dev note. Can we test whether it fails or not if we used Relaxed here?
-        let atomic = unsafe { self.atomic_cnt.as_ref() };
-        let cnt = atomic.load(Acquire);
-        if cnt == 0 {
-            // Deallocate atomic counter.
-            let ptr = self.atomic_cnt.as_ptr();
-            unsafe {
-                std::alloc::dealloc(ptr.cast(), std::alloc::Layout::for_value(&*ptr));
-            }
-        } else {
+        let cnt = self.atomic_cnt.load(Acquire);
+        if cnt != 0 {
             // Holder may be dropped while some threads are using Borrowed.
             // It's definitely unintended behavior.
             if thread::panicking() {
@@ -197,7 +222,7 @@ impl<V, BI, BM, A: Atomic<i32>> Drop for Holder<V, BI, BM, A> {
 pub struct Borrowed<B, A: Atomic<i32>> {
     borrow_value: B,
     exclusive: bool,
-    atomic_cnt: NonNull<A>,
+    atomic_cnt: Arc<A>,
 }
 
 unsafe impl<B, A: Atomic<i32>> Send for Borrowed<B, A> {}
@@ -220,11 +245,10 @@ impl<B, A: Atomic<i32>> DerefMut for Borrowed<B, A> {
 
 impl<B, A: Atomic<i32>> Drop for Borrowed<B, A> {
     fn drop(&mut self) {
-        let atomic = unsafe { self.atomic_cnt.as_ref() };
         if self.exclusive {
-            atomic.add(1, Release);
+            self.atomic_cnt.add(1, Release);
         } else {
-            atomic.sub(1, Release);
+            self.atomic_cnt.sub(1, Release);
         }
     }
 }

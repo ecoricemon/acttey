@@ -7,7 +7,7 @@ pub mod string;
 pub mod web;
 
 pub mod prelude {
-    pub use super::key::ResKey;
+    pub use super::key::ObjectKey;
     pub use crate::{log, ty};
 }
 

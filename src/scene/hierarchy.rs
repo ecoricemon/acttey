@@ -2,10 +2,11 @@ use crate::{
     ds::{
         buf::VarChunkBuffer,
         graph::DirectedGraph,
-        vec::{OptVec, SetVec},
+        set_list::SetValueList,
+        vec::OptVec,
     },
     primitive::matrix::Matrix4f,
-    util::{key::ResKey, slice::update_slice_by, Index2, View},
+    util::{key::ObjectKey, slice::update_slice_by, Index2, View},
 };
 use std::{mem::size_of, num::NonZeroUsize};
 
@@ -16,7 +17,7 @@ pub struct SceneHierarchy {
     tree: DirectedGraph<Node>,
 
     /// Global transformation matrices per mesh node.
-    mesh_tfs: VarChunkBuffer<ResKey, Matrix4f>,
+    mesh_tfs: VarChunkBuffer<ObjectKey, Matrix4f>,
 
     /// Global transformation matrices per non-mesh node.
     non_mesh_tfs: OptVec<Matrix4f>,
@@ -30,7 +31,7 @@ impl SceneHierarchy {
         Self {
             tree: DirectedGraph::new(),
             mesh_tfs: VarChunkBuffer::with_capacity(64),
-            non_mesh_tfs: OptVec::new(0),
+            non_mesh_tfs: OptVec::new(),
             invalid_nodes: Vec::new(),
         }
     }
@@ -81,7 +82,7 @@ impl SceneHierarchy {
     #[inline]
     pub fn get_transform_buffer_range<Q>(&self, key: &Q) -> Option<std::ops::Range<usize>>
     where
-        ResKey: std::borrow::Borrow<Q>,
+        ObjectKey: std::borrow::Borrow<Q>,
         Q: std::hash::Hash + Eq + ?Sized,
     {
         self.mesh_tfs.get_chunk_window2(key).map(|win| win.range())
@@ -103,14 +104,14 @@ impl SceneHierarchy {
             self.validate();
         }
 
-        let (nodes, outbounds, _) = self.tree.destruct();
+        let (nodes, outbounds, _) = self.tree.destructure();
 
         fn update(
             v: usize,
             p: usize,
             nodes: &mut OptVec<Node>,
-            edges: &Vec<SetVec<NonZeroUsize>>,
-            mesh_tfs: &mut VarChunkBuffer<ResKey, Matrix4f>,
+            edges: &Vec<SetValueList<NonZeroUsize>>,
+            mesh_tfs: &mut VarChunkBuffer<ObjectKey, Matrix4f>,
             non_mesh_tfs: &mut OptVec<Matrix4f>,
             mut need_update: bool,
         ) {
@@ -140,7 +141,7 @@ impl SceneHierarchy {
                 });
             }
 
-            for w in edges[v].values_occupied() {
+            for w in edges[v].iter() {
                 update(
                     w.get(),
                     v,
@@ -153,7 +154,7 @@ impl SceneHierarchy {
             }
         }
 
-        for v in outbounds[0].values_occupied() {
+        for v in outbounds[0].iter() {
             update(
                 v.get(),
                 0,
@@ -189,15 +190,15 @@ impl SceneHierarchy {
                     node.gtf_index.into_pair(ii, ci);
                 }
                 // Case 3. w/o mesh -> w/ mesh. (mesh has attached)
-                ((Some(ii), None), Some(key)) => {
+                ((Some(_ii), None), Some(_key)) => {
                     todo!()
                 }
                 // Case 4. w/ mesh -> w/o mesh. (mesh has detached)
-                ((Some(ii), Some(ci)), None) => {
+                ((Some(_ii), Some(_ci)), None) => {
                     todo!()
                 }
                 // Case 5. w/ mesh -> w/ mesh. (mesh has changed)
-                ((Some(ii), Some(ci)), Some(key)) => {
+                ((Some(_ii), Some(_ci)), Some(_key)) => {
                     todo!()
                 }
                 _ => {}
@@ -235,10 +236,10 @@ pub struct Node {
     gtf_index: Index2,
 
     /// Optional camera key.
-    camera: Option<ResKey>,
+    camera: Option<ObjectKey>,
 
     /// Optional mesh key and its corresponding chunk index.
-    mesh: Option<ResKey>,
+    mesh: Option<ObjectKey>,
 
     /// Optional mapping with ECS's entity.
     entity: Option<(usize, usize)>,
@@ -264,27 +265,27 @@ impl Node {
 
     /// Sets camera key.
     #[inline]
-    pub fn set_camera(&mut self, camera: ResKey) {
+    pub fn set_camera(&mut self, camera: ObjectKey) {
         self.camera = Some(camera);
         self.dirty |= NodeDirty::CAMERA;
     }
 
     /// Gets camera key.
     #[inline]
-    pub fn get_camera(&self) -> Option<&ResKey> {
+    pub fn get_camera(&self) -> Option<&ObjectKey> {
         self.camera.as_ref()
     }
 
     /// Sets mesh key.
     #[inline]
-    pub fn set_mesh(&mut self, mesh: ResKey) {
+    pub fn set_mesh(&mut self, mesh: ObjectKey) {
         self.mesh = Some(mesh);
         self.dirty |= NodeDirty::MESH;
     }
 
     /// Retrieves mesh key.
     #[inline]
-    pub fn get_mesh_key(&self) -> Option<&ResKey> {
+    pub fn get_mesh_key(&self) -> Option<&ObjectKey> {
         self.mesh.as_ref()
     }
 

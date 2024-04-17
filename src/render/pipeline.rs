@@ -9,7 +9,7 @@ use crate::{
         shaders::Shader,
         Gpu,
     },
-    util::{key::ResKey, string::ToStr},
+    util::{key::ObjectKey, string::ToStr},
 };
 use std::{borrow::Borrow, rc::Rc};
 
@@ -18,8 +18,8 @@ pub struct PipelinePack {
     gpu: Rc<Gpu>,
     pub layout_builders: GenVec<PipelineLayoutBuilder>,
     pub pipeline_builders: GenVec<PipelineBuilder>,
-    pub layouts: MonoSparseSet<ResKey, Rc<wgpu::PipelineLayout>>,
-    pub pipelines: MonoSparseSet<ResKey, Rc<wgpu::RenderPipeline>>,
+    pub layouts: MonoSparseSet<ObjectKey, Rc<wgpu::PipelineLayout>>,
+    pub pipelines: MonoSparseSet<ObjectKey, Rc<wgpu::RenderPipeline>>,
 }
 
 impl PipelinePack {
@@ -36,7 +36,7 @@ impl PipelinePack {
     pub fn create_layout(
         &mut self,
         builder_index: GenIndex,
-        key: ResKey,
+        key: ObjectKey,
     ) -> &Rc<wgpu::PipelineLayout> {
         let builder = self.layout_builders.get(builder_index).unwrap();
         let layout = builder.build(&self.gpu.device, key.clone());
@@ -51,7 +51,7 @@ impl PipelinePack {
     pub fn create_pipeline(
         &mut self,
         builder_index: GenIndex,
-        key: ResKey,
+        key: ObjectKey,
         surf_packs: &GenVecRc<SurfacePack>,
         surfaces: &GenVecRc<Surface>,
     ) -> &Rc<wgpu::RenderPipeline> {
@@ -120,7 +120,7 @@ impl PipelineBuilder {
     pub fn build(
         &self,
         device: &wgpu::Device,
-        key: ResKey,
+        key: ObjectKey,
         surf_packs: &GenVecRc<SurfacePack>,
         surfaces: &GenVecRc<Surface>,
     ) -> wgpu::RenderPipeline {
@@ -222,7 +222,7 @@ impl PipelineLayoutBuilder {
         std::mem::take(self);
     }
 
-    pub fn build(&self, device: &wgpu::Device, key: ResKey) -> wgpu::PipelineLayout {
+    pub fn build(&self, device: &wgpu::Device, key: ObjectKey) -> wgpu::PipelineLayout {
         let bind_group_layouts = self
             .bind_group_layouts
             .iter()

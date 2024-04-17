@@ -1,6 +1,6 @@
 use crate::ds::vec::OptVec;
 use ahash::AHashMap;
-use std::{borrow::Borrow, hash::Hash, rc::Rc};
+use std::{borrow::Borrow, collections::VecDeque, hash::Hash, ops::Deref, rc::Rc};
 
 const GEN_DUMMY: u64 = u64::MAX;
 const GEN_IGNORE: u64 = u64::MAX - 1;
@@ -164,7 +164,7 @@ impl<T> GenVecRc<T> {
     pub fn new() -> Self {
         Self {
             values: GenVec::new(),
-            refs: OptVec::new(0),
+            refs: OptVec::new(),
         }
     }
 
@@ -922,6 +922,61 @@ impl<'a, S: Borrow<str>> From<S> for LabelOrGenIndex<'a, S> {
 impl<'a, S: Borrow<str>> From<&'a GenIndex> for LabelOrGenIndex<'a, S> {
     fn from(value: &'a GenIndex) -> Self {
         Self::Index(value)
+    }
+}
+
+/// Whenever an item is popped, generation grows.
+/// This is useful when you're trying to detect number of popped items after you put something in.
+#[derive(Debug, Clone)]
+pub struct GenQueue<T> {
+    queue: VecDeque<T>,
+    gen: u64,
+}
+
+impl<T> GenQueue<T> {
+    pub const fn new() -> Self {
+        Self {
+            queue: VecDeque::new(),
+            gen: 0,
+        }
+    }
+
+    #[inline]
+    pub fn gen(&self) -> u64 {
+        self.gen
+    }
+
+    #[inline]
+    pub fn front_mut(&mut self) -> Option<&mut T> {
+        self.queue.front_mut()
+    }
+
+    #[inline]
+    pub fn back_mut(&mut self) -> Option<&mut T> {
+        self.queue.back_mut()
+    }
+
+    #[inline]
+    pub fn push_back(&mut self, value: T) {
+        self.queue.push_back(value);
+    }
+
+    /// Pops an item from the front of the queue and increases generation by one.
+    pub fn pop_front(&mut self) -> Option<T> {
+        let old = self.queue.pop_front();
+        if old.is_some() {
+            self.gen += 1;
+        }
+        old
+    }
+}
+
+impl<T> Deref for GenQueue<T> {
+    type Target = VecDeque<T>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.queue
     }
 }
 

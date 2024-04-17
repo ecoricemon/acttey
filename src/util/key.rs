@@ -5,9 +5,9 @@ use std::{
     thread_local,
 };
 
-/// Resource key.
+/// Id for disginguishing objects such as colors, meshes, or graphics pipelines.
 #[derive(Debug, Eq, Clone)]
-pub struct ResKey {
+pub struct ObjectKey {
     /// Unique ID.
     /// TODO: upper bits will be used for automatically generated sub-keys
     /// such as scene's pipelines.
@@ -17,7 +17,7 @@ pub struct ResKey {
     pub(crate) label: RcStr,
 }
 
-impl ResKey {
+impl ObjectKey {
     #[inline]
     pub const fn new(id: u64, label: RcStr) -> Self {
         Self { id, label }
@@ -36,34 +36,34 @@ impl ResKey {
     }
 }
 
-impl From<&ResKey> for ResKey {
+impl From<&ObjectKey> for ObjectKey {
     #[inline]
-    fn from(value: &ResKey) -> Self {
+    fn from(value: &ObjectKey) -> Self {
         value.clone()
     }
 }
 
-impl ToStr for ResKey {
+impl ToStr for ObjectKey {
     fn to_str(&self) -> Cow<str> {
         Cow::Borrowed(&self.label)
     }
 }
 
-impl Hash for ResKey {
+impl Hash for ObjectKey {
     #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.id.hash(state);
     }
 }
 
-impl PartialEq for ResKey {
+impl PartialEq for ObjectKey {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
     }
 }
 
-impl<T: Into<u64>> From<T> for ResKey {
+impl<T: Into<u64>> From<T> for ObjectKey {
     #[inline]
     fn from(value: T) -> Self {
         Self {
@@ -73,7 +73,7 @@ impl<T: Into<u64>> From<T> for ResKey {
     }
 }
 
-impl Default for ResKey {
+impl Default for ObjectKey {
     #[inline]
     fn default() -> Self {
         DUMMY_RC_STR.with(|label| Self::new(0_u64, label.clone()))
@@ -81,5 +81,5 @@ impl Default for ResKey {
 }
 
 thread_local! {
-    pub(crate) static DUMMY_RC_STR: RcStr = "".into();
+    pub(crate) static DUMMY_RC_STR: RcStr = RcStr::new("");
 }

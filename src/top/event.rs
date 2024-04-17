@@ -1,5 +1,4 @@
 use crate::worker::msg;
-use ahash::AHashMap;
 use std::collections::{
     vec_deque::{Drain, Iter},
     VecDeque,
@@ -11,7 +10,7 @@ pub enum Command {
 }
 
 pub enum Event {
-    Resized(msg::JsMsgCanvasResize),
+    Resized(msg::MsgEventCanvasResize),
     Mouse(u32, web_sys::MouseEvent),
     Keyboard(u32, web_sys::KeyboardEvent),
     Command(Command),
@@ -56,8 +55,7 @@ impl From<Closure<dyn Fn(web_sys::KeyboardEvent)>> for EventListener {
 }
 
 pub struct EventManager {
-    listeners: AHashMap<String, EventListener>,
-    resized: VecDeque<msg::JsMsgCanvasResize>,
+    resized: VecDeque<msg::MsgEventCanvasResize>,
     mouse: VecDeque<(u32, web_sys::MouseEvent)>,
     keyboard: VecDeque<(u32, web_sys::KeyboardEvent)>,
     command: VecDeque<Command>,
@@ -66,41 +64,11 @@ pub struct EventManager {
 impl EventManager {
     pub fn new() -> Self {
         Self {
-            listeners: AHashMap::new(),
             resized: VecDeque::with_capacity(1),
             mouse: VecDeque::with_capacity(16),
             keyboard: VecDeque::with_capacity(8),
             command: VecDeque::new(),
         }
-    }
-
-    pub fn contains_event_listener(&self, selectors: &str, type_: &str) -> bool {
-        self.listeners
-            .contains_key(&Self::listeners_key(selectors, type_))
-    }
-
-    #[inline(always)]
-    fn listeners_key(selectors: &str, type_: &str) -> String {
-        format!("{} {}", selectors, type_)
-    }
-
-    pub(crate) fn add_event_listener(
-        &mut self,
-        selectors: &str,
-        type_: &str,
-        listener: EventListener,
-    ) -> Option<EventListener> {
-        self.listeners
-            .insert(Self::listeners_key(selectors, type_), listener)
-    }
-
-    pub(crate) fn remove_event_listener(
-        &mut self,
-        selectors: &str,
-        type_: &str,
-    ) -> Option<EventListener> {
-        self.listeners
-            .remove(&Self::listeners_key(selectors, type_))
     }
 
     #[inline]
@@ -127,12 +95,12 @@ impl EventManager {
     }
 
     #[inline]
-    pub fn iter_resized(&self) -> Iter<msg::JsMsgCanvasResize> {
+    pub fn iter_resized(&self) -> Iter<msg::MsgEventCanvasResize> {
         self.resized.iter()
     }
 
     #[inline]
-    pub fn drain_resized(&mut self) -> Drain<msg::JsMsgCanvasResize> {
+    pub fn drain_resized(&mut self) -> Drain<msg::MsgEventCanvasResize> {
         self.resized.drain(..)
     }
 

@@ -1,10 +1,4 @@
-use std::{
-    borrow::Borrow,
-    collections::HashMap,
-    fmt::Debug,
-    hash::Hash,
-    mem::swap,
-};
+use std::{borrow::Borrow, collections::HashMap, fmt::Debug, hash::Hash, mem::swap};
 
 /// Vector-like hash map.
 /// Values are in an actual vector, so that they are close to each other in memory.

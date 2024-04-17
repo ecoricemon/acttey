@@ -8,6 +8,7 @@ use smallvec::SmallVec;
 use std::rc::Rc;
 use wgpu::util::DeviceExt;
 
+#[derive(Debug)]
 pub struct BufferPool {
     gpu: Rc<Gpu>,
     groups: SmallVec<[BufferGroup; 8]>,
@@ -146,6 +147,7 @@ impl BufferPool {
     }
 }
 
+#[derive(Debug)]
 pub struct BufferGroup {
     label: Option<String>,
     /// Common usage among buffers in this group.

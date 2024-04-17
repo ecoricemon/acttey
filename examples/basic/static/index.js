@@ -1,6 +1,6 @@
 if (navigator.gpu) {
   // Loads wasm built on WebGPU.
-  const { default: wbg_init, MyApp } = await import("../pkg_gpu/wasm-index.js");
+  const { default: wbg_init, MyApp } = await import("../pkg_mt/wasm-index.js");
   await wbg_init();
   const myApp = new MyApp();
 } else {

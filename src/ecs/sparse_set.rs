@@ -1,10 +1,8 @@
-use super::{
-    borrow_js::JsAtomic,
-    traits::{Getter, Together},
-};
+use super::{borrow_js::JsAtomic, entity::Together};
 use crate::ds::{
     borrow::{BorrowError, Borrowed, Holder},
     common::TypeInfo,
+    get::RawGetter,
     vec::{ChunkAnyVec, OptVec},
 };
 use std::{any::TypeId, cmp, collections::HashMap, mem, ptr::NonNull};
@@ -22,7 +20,7 @@ use std::{any::TypeId, cmp, collections::HashMap, mem, ptr::NonNull};
 pub struct SparseSet {
     sparse: OptVec<usize>,
     deref: Vec<usize>,
-    cols: Vec<Holder<ChunkAnyVec, Getter, Getter, JsAtomic>>,
+    cols: Vec<Holder<ChunkAnyVec, RawGetter, RawGetter, JsAtomic>>,
     map: HashMap<TypeId, usize, ahash::RandomState>,
 }
 
@@ -32,7 +30,7 @@ impl SparseSet {
 
     pub fn new() -> Self {
         Self {
-            sparse: OptVec::new(0),
+            sparse: OptVec::new(),
             deref: Vec::new(),
             cols: Vec::new(),
             map: HashMap::default(),
@@ -53,7 +51,7 @@ impl Together for SparseSet {
 
         // Adds column wapped with Holder.
         let value = ChunkAnyVec::new(tinfo, chunk_len);
-        let fn_imm = |col: &ChunkAnyVec| Getter {
+        let fn_imm = |col: &ChunkAnyVec| RawGetter {
             me: col as *const ChunkAnyVec as *mut u8,
             len: col.len(),
             fn_get: |me: *mut u8, index: usize| unsafe {
@@ -61,7 +59,7 @@ impl Together for SparseSet {
                 me.get_raw_unchecked(index)
             },
         };
-        let fn_mut = |col: &mut ChunkAnyVec| Getter {
+        let fn_mut = |col: &mut ChunkAnyVec| RawGetter {
             me: col as *mut ChunkAnyVec as *mut u8,
             len: col.len(),
             fn_get: |me: *mut u8, index: usize| unsafe {
@@ -86,7 +84,7 @@ impl Together for SparseSet {
 
         // Does re-mapping.
         for i in ci..self.cols.len() {
-            let ty = self.cols[i].get().type_id();
+            let ty = self.cols[i].get().unwrap().type_id();
             *self.map.get_mut(&ty).unwrap() = i;
         }
 
@@ -95,7 +93,9 @@ impl Together for SparseSet {
             mem::take(self);
         }
 
-        Some(*old.get().type_info())
+        let old = old.get().unwrap();
+        let tinfo = *old.type_info();
+        Some(tinfo)
     }
 
     fn new_from_this(&self) -> Box<dyn Together> {
@@ -105,7 +105,7 @@ impl Together for SparseSet {
             .iter()
             .map(|col| {
                 let (fn_imm, fn_mut) = (col.get_fn_imm(), col.get_fn_mut());
-                let col = col.get();
+                let col = col.get().unwrap();
                 let value = ChunkAnyVec::new(*col.type_info(), col.chunk_len());
                 Holder::new(value, fn_imm, fn_mut)
             })
@@ -116,7 +116,7 @@ impl Together for SparseSet {
 
         // Makes empty instance.
         let sset = Self {
-            sparse: OptVec::new(0),
+            sparse: OptVec::new(),
             deref: Vec::new(),
             cols,
             map,
@@ -134,9 +134,8 @@ impl Together for SparseSet {
         self.map.get(ty).cloned()
     }
 
-    #[inline]
     fn get_column_info(&self, ci: usize) -> Option<&TypeInfo> {
-        self.cols.get(ci).map(|v| v.get().type_info())
+        self.cols.get(ci).map(|v| v.get().unwrap().type_info())
     }
 
     #[inline]
@@ -147,7 +146,7 @@ impl Together for SparseSet {
     fn len(&self) -> usize {
         self.cols
             .first()
-            .map(|v| v.get().len())
+            .map(|v| v.get().unwrap().len())
             .unwrap_or_default()
     }
 
@@ -169,7 +168,7 @@ impl Together for SparseSet {
     /// Panics if you haven't added items to all columns.
     fn end_add_item(&mut self) -> usize {
         let len = self.deref.len() + 1;
-        assert!(self.cols.iter().all(|v| v.get().len() == len));
+        assert!(self.cols.iter().all(|v| v.get().unwrap().len() == len));
 
         let key = self.sparse.add(len - 1);
         self.deref.push(key);
@@ -206,7 +205,7 @@ impl Together for SparseSet {
 
         let index = *self.sparse.get(key)?;
         let col = self.cols.get(ci)?;
-        col.get().get_raw(index)
+        col.get().unwrap().get_raw(index)
     }
 
     /// # Panics
@@ -221,7 +220,7 @@ impl Together for SparseSet {
         col.get_raw(index)
     }
 
-    fn borrow_column(&self, ci: usize) -> Result<Borrowed<Getter, JsAtomic>, BorrowError> {
+    fn borrow_column(&self, ci: usize) -> Result<Borrowed<RawGetter, JsAtomic>, BorrowError> {
         if let Some(col) = self.cols.get(ci) {
             col.borrow()
         } else {
@@ -229,7 +228,10 @@ impl Together for SparseSet {
         }
     }
 
-    fn borrow_column_mut(&mut self, ci: usize) -> Result<Borrowed<Getter, JsAtomic>, BorrowError> {
+    fn borrow_column_mut(
+        &mut self,
+        ci: usize,
+    ) -> Result<Borrowed<RawGetter, JsAtomic>, BorrowError> {
         if let Some(col) = self.cols.get_mut(ci) {
             col.borrow_mut()
         } else {

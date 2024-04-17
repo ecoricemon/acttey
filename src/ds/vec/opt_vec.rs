@@ -1,96 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    hash::Hash,
-    ops,
-};
-
-/// This doesn't allow duplication and support looking up values in O(1) like hash set.
-/// Plus this guarantees inserted order like vector.
-/// Similar to [`GenVec`](crate::ds::generational::GenVec), but this doesn't have generation.
-/// This is based on [`OptVec`] so that it's also recommended to use NonZero series if it's possible.
-#[derive(Debug, Clone)]
-pub struct SetVec<T> {
-    /// Optional values.
-    values: OptVec<T>,
-
-    /// Inverse map.  
-    /// Vacant slots are not in here.
-    imap: HashMap<T, usize, ahash::RandomState>,
-}
-
-impl<T: Clone + Hash + PartialEq + Eq> SetVec<T> {
-    pub fn new() -> Self {
-        Self {
-            values: OptVec::new(0),
-            imap: HashMap::default(),
-        }
-    }
-
-    #[inline]
-    pub fn contains<Q>(&self, value: &Q) -> bool
-    where
-        T: std::borrow::Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
-    {
-        self.imap.contains_key(value)
-    }
-
-    #[inline]
-    pub fn get_index<Q>(&self, value: &Q) -> Option<usize>
-    where
-        T: std::borrow::Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
-    {
-        self.imap.get(value).cloned()
-    }
-
-    pub fn insert(&mut self, value: T) -> usize {
-        if let Some(index) = self.get_index(&value) {
-            index
-        } else {
-            let index = self.values.add(value.clone());
-            self.imap.insert(value, index);
-            index
-        }
-    }
-
-    /// # Panics
-    ///
-    /// Panics if `index` is out of bound.
-    pub fn take_by_index(&mut self, index: usize) -> Option<T> {
-        let old = self.values.take(index);
-        if old.is_some() {
-            // Safety: Infallible.
-            unsafe {
-                self.imap.remove(old.as_ref().unwrap_unchecked());
-            }
-        }
-        old
-    }
-
-    pub fn take_by_value<Q>(&mut self, value: &Q) -> Option<T>
-    where
-        T: std::borrow::Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
-    {
-        self.take_by_index(self.get_index(value)?)
-    }
-}
-
-impl<T: Clone + Hash + PartialEq + Eq> Default for SetVec<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// Do not implement DerefMut because we need to synchronize imap.
-impl<T: Clone + Hash + PartialEq + Eq> ops::Deref for SetVec<T> {
-    type Target = OptVec<T>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.values
-    }
-}
+use std::{collections::HashSet, ops};
 
 /// Vector with optional values.  
 /// If you don't want to change indices after insert or remove operations,
@@ -105,23 +13,13 @@ pub struct OptVec<T> {
 
     /// Vacant slot list.
     vacancies: HashSet<usize, ahash::RandomState>,
-
-    offset: usize,
 }
 
 impl<T> OptVec<T> {
-    /// Slots under `offset` will be filled with None.
-    pub fn new(offset: usize) -> Self {
-        // values with fixed vacant slots.
-        let mut values = Vec::new();
-        for _ in 0..offset {
-            values.push(None);
-        }
-
+    pub fn new() -> Self {
         Self {
-            values,
+            values: Vec::new(),
             vacancies: HashSet::default(),
-            offset,
         }
     }
 
@@ -144,7 +42,7 @@ impl<T> OptVec<T> {
         self.vacancies.len()
     }
 
-    /// Determins whether there's no slots at all.
+    /// Determines whether there's no slots at all.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
@@ -258,9 +156,7 @@ impl<T> OptVec<T> {
     /// Panics if `index` is out of bound.
     pub fn take(&mut self, index: usize) -> Option<T> {
         let old = self.values[index].take()?;
-        if index >= self.offset {
-            self.vacancies.insert(index);
-        }
+        self.vacancies.insert(index);
         Some(old)
     }
 
@@ -315,7 +211,7 @@ impl<T> OptVec<T> {
     /// It does nothing if `len` is equal to or grater than currenet length.
     /// Note that you can't truncate less than offset you set.
     pub fn truncate(&mut self, len: usize) {
-        for index in len.max(self.offset)..self.values.len() {
+        for index in len..self.values.len() {
             if self.values.pop().is_none() {
                 self.vacancies.remove(&index);
             }

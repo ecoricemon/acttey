@@ -28,5 +28,10 @@ export default defineConfig({
   },
   preview: {
     port: 8080,
+    // mt environment.
+    headers: {
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Embedder-Policy': 'require-corp'
+    }
   },
 });

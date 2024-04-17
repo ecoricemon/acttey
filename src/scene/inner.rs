@@ -22,17 +22,17 @@ use crate::{
         hierarchy::{Node, SceneHierarchy},
         SceneError,
     },
-    util::{key::ResKey, string::RcStr, AsMultiBytes, View},
+    util::{key::ObjectKey, string::RcStr, AsMultiBytes, View},
 };
 use ahash::{AHashMap, AHashSet};
 use std::{hash::Hash, rc::Rc};
 
 pub struct SceneManager {
     /// Scenes.
-    scenes: AHashMap<ResKey, Scene>,
+    scenes: AHashMap<ObjectKey, Scene>,
 
     /// Active scenes.
-    active: AHashSet<ResKey>,
+    active: AHashSet<ObjectKey>,
 }
 
 impl SceneManager {
@@ -45,7 +45,7 @@ impl SceneManager {
 
     pub fn get_scene<Q>(&self, key: &Q) -> Option<&Scene>
     where
-        ResKey: std::borrow::Borrow<Q>,
+        ObjectKey: std::borrow::Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.scenes.get(key)
@@ -53,20 +53,20 @@ impl SceneManager {
 
     pub fn get_scene_mut<Q>(&mut self, key: &Q) -> Option<&mut Scene>
     where
-        ResKey: std::borrow::Borrow<Q>,
+        ObjectKey: std::borrow::Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.scenes.get_mut(key)
     }
 
-    pub fn insert_scene(&mut self, key: ResKey, scene: Scene) -> Option<Scene> {
+    pub fn insert_scene(&mut self, key: ObjectKey, scene: Scene) -> Option<Scene> {
         self.scenes.insert(key, scene)
     }
 
     /// Tries to remove a scene, but it'll fail if the scene is in active state.
     pub fn remove_scene<Q>(&mut self, key: &Q) -> Option<Scene>
     where
-        ResKey: std::borrow::Borrow<Q>,
+        ObjectKey: std::borrow::Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         if !self.active.contains(key) {
@@ -79,7 +79,7 @@ impl SceneManager {
     /// # Panic
     ///
     /// Panics if it failed to find scene using the given `key`.
-    pub fn activate_scene(&mut self, key: ResKey) {
+    pub fn activate_scene(&mut self, key: ObjectKey) {
         assert!(self.scenes.contains_key(&key));
         self.active.insert(key);
     }
@@ -87,20 +87,18 @@ impl SceneManager {
     /// # Panic
     ///
     /// Panics if it failed to find scene using the given `key`.
-    pub fn deactivate_scene(&mut self, key: ResKey) {
+    pub fn deactivate_scene(&mut self, key: ObjectKey) {
         assert!(self.scenes.contains_key(&key));
         self.active.remove(&key);
     }
 
-    pub fn iter_active_scenes(&self) -> impl Iterator<Item = (&ResKey, &Scene)> {
+    pub fn iter_active_scenes(&self) -> impl Iterator<Item = (&ObjectKey, &Scene)> {
         self.scenes
             .iter()
             .filter(|(key, _)| self.active.contains(key))
     }
 
-    pub fn iter_active_scenes_mut(
-        &mut self,
-    ) -> impl Iterator<Item = (&ResKey, &mut Scene)> {
+    pub fn iter_active_scenes_mut(&mut self) -> impl Iterator<Item = (&ObjectKey, &mut Scene)> {
         self.scenes
             .iter_mut()
             .filter(|(key, _)| self.active.contains(key))
@@ -129,31 +127,31 @@ pub struct Scene {
     pub(crate) hierarchy: SceneHierarchy,
 
     /// Cameras in the scene.
-    pub(crate) cameras: AHashMap<ResKey, Camera>,
+    pub(crate) cameras: AHashMap<ObjectKey, Camera>,
 
     /// Camera buffers. They will be integrated at the end.
-    pub(crate) camera_bufs: AHashMap<ResKey, Rc<wgpu::Buffer>>,
+    pub(crate) camera_bufs: AHashMap<ObjectKey, Rc<wgpu::Buffer>>,
 
     /// Camera binds. They will be integrated at the end.
-    pub(crate) camera_binds: AHashMap<ResKey, Rc<wgpu::BindGroup>>,
+    pub(crate) camera_binds: AHashMap<ObjectKey, Rc<wgpu::BindGroup>>,
 
     /// Meshes in the scene.
     /// This is a subset of the meshes in [`MeshResource`].
-    pub(crate) meshes: AHashSet<ResKey>,
+    pub(crate) meshes: AHashSet<ObjectKey>,
 
-    pub(crate) mesh_map: AHashMap<ResKey, (ResKey, ResKey)>,
+    pub(crate) mesh_map: AHashMap<ObjectKey, (ObjectKey, ObjectKey)>,
 
     /// Owned geometries in the scene.
-    pub(crate) geos: AHashMap<ResKey, GeometryBufferView>,
+    pub(crate) geos: AHashMap<ObjectKey, GeometryBufferView>,
 
     /// Owned materials in the scene.
-    pub(crate) mats: AHashMap<ResKey, Rc<()>>,
+    pub(crate) mats: AHashMap<ObjectKey, Rc<()>>,
 
     /// Material buffers. They will be integrated at the end.
-    pub(crate) mat_bufs: AHashMap<ResKey, Rc<wgpu::Buffer>>,
+    pub(crate) mat_bufs: AHashMap<ObjectKey, Rc<wgpu::Buffer>>,
 
     /// Material binds. They will be integrated at the end.
-    pub(crate) mat_binds: AHashMap<ResKey, Rc<wgpu::BindGroup>>,
+    pub(crate) mat_binds: AHashMap<ObjectKey, Rc<wgpu::BindGroup>>,
 
     /// Instance buffer.
     pub(crate) inst_buf: Option<Rc<wgpu::Buffer>>,
@@ -168,7 +166,7 @@ pub struct Scene {
     pub(crate) geo_buf_size: Option<(u64, u64)>,
 
     /// Pipelines. One pipeline for now.
-    pub(crate) pipelines: AHashMap<ResKey, Rc<wgpu::RenderPipeline>>,
+    pub(crate) pipelines: AHashMap<ObjectKey, Rc<wgpu::RenderPipeline>>,
 
     pub(crate) pass_graph: Option<PassGraph>,
 
@@ -699,11 +697,11 @@ impl Default for Scene {
 decl_return_wrap!(NodeReturn, Scene, usize);
 
 impl<'a> NodeReturn<'a> {
-    pub fn with_camera(self, key: impl Into<ResKey>, camera: impl Into<Camera>) -> Self {
+    pub fn with_camera(self, key: impl Into<ObjectKey>, camera: impl Into<Camera>) -> Self {
         self._with_camera(key.into(), camera.into())
     }
 
-    fn _with_camera(self, key: ResKey, camera: Camera) -> Self {
+    fn _with_camera(self, key: ObjectKey, camera: Camera) -> Self {
         let Self {
             recv: scene,
             ret: node_index,
@@ -726,11 +724,11 @@ impl<'a> NodeReturn<'a> {
     }
 
     /// Sets mesh to the current node.
-    pub fn with_mesh(self, key: impl Into<ResKey>) -> Self {
+    pub fn with_mesh(self, key: impl Into<ObjectKey>) -> Self {
         self._with_mesh(key.into())
     }
 
-    fn _with_mesh(self, key: ResKey) -> Self {
+    fn _with_mesh(self, key: ObjectKey) -> Self {
         let Self {
             recv: scene,
             ret: node_index,

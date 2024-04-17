@@ -1,9 +1,12 @@
 #![allow(unused)]
 use acttey::{
     ds::common::TypeInfo,
-    ecs::{query::Identify, storage::EntityReg},
+    ecs::entity::EntityForm,
     prelude::*,
+    render::resource::RenderResource,
     tinfo,
+    top::event::EventManager,
+    util::string::{ArcStr, RcStr},
 };
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
@@ -50,15 +53,23 @@ impl Filter for TransformFilter {
     type None = ();
 }
 
-struct RotateSystem;
-impl System for RotateSystem {
+struct RotateRequest;
+impl Request for RotateRequest {
     type Read = ();
     type Write = (RotateFilter, TransformFilter);
     type ResRead = ();
     type ResWrite = ();
+    fn entity_write() -> impl IntoIterator<Item = acttey::ecs::entity::OwnedEntityKey> {
+        std::iter::empty()
+    }
+}
 
-    fn run(&mut self, param: SysParam<'_, Self>) {
-        let (rot_2d, obj_2d) = param.write;
+struct RotateSystem(i32);
+impl System for RotateSystem {
+    type Req = RotateRequest;
+
+    fn run(&mut self, resp: acttey::ecs::request::Response<Self::Req>) {
+        let (rot_2d, obj_2d) = resp.write;
         for (mut rots, mut objs) in rot_2d.zip(obj_2d) {
             let len = rots.len();
             for i in 0..len {
@@ -99,10 +110,13 @@ impl MyApp {
         let mut app = App::new();
 
         // Registers canvas and events.
-        app.register_canvas("#canvas0").unwrap();
+        let canvas_sel = RcStr::new("#canvas0");
+        app.register_canvas(canvas_sel).unwrap();
 
         // Calls state initializer.
         app.call_initializer(|state: &mut AppState| {
+            state.spawn_worker(Some(2));
+
             // Registers mesh and its geometry and material.
             state
                 .add_geometry(MyKey::Box, shapes::Box::new(0.3, 0.3, 0.3))
@@ -111,7 +125,8 @@ impl MyApp {
                 .add_mesh(MyKey::RedBox, MyKey::Box, MyKey::Red)
                 .add_mesh(MyKey::BlueBox, MyKey::Box, MyKey::Blue);
 
-            let mut ent_reg = EntityReg::new("MyEntity", None, None);
+            let ename = ArcStr::new("MyEntity");
+            let mut ent_reg = EntityForm::new(ename, None, None);
             ent_reg.add_component(tinfo!(components::Drawable));
             ent_reg.add_component(tinfo!(Rotate));
             let enti = state.register_entity(ent_reg);
@@ -153,12 +168,11 @@ impl MyApp {
             state.add_scene(MyKey::MyScene, scene).unwrap();
 
             // Registers some systems.
-            state
-                .add_system(systems::Resized::new())
-                .add_system(RotateSystem)
-                .add_system(systems::UpdateTransform::new())
-                .add_system(systems::Render::new())
-                .add_system(systems::ClearInput::new());
+            state.register_system(systems::Resized::new());
+            state.register_system(RotateSystem(0));
+            state.register_system(systems::UpdateTransform::new());
+            state.register_system(systems::Render::new());
+            state.register_system(systems::ClearInput::new());
         });
 
         Self(app)

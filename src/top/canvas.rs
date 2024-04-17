@@ -47,7 +47,7 @@ impl CanvasPack {
         .unwrap();
 
         // Adds dummy canvas.
-        pack.insert(dummy_selectors).unwrap();
+        pack.insert(RcStr::new(dummy_selectors)).unwrap();
 
         // Handle starts from 1.
         pack.cur_handle = 1;
@@ -202,6 +202,11 @@ impl Canvas {
     #[inline]
     pub fn handle(&self) -> u32 {
         self.handle
+    }
+
+    #[inline]
+    pub fn is_dummy(&self) -> bool {
+        self.handle == CanvasPack::HANDLE_DUMMY
     }
 
     pub fn transfer_control_to_offscreen(&self) -> Result<OffCanvas, AppError> {

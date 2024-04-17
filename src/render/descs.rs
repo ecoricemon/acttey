@@ -1,4 +1,4 @@
-use crate::util::key::ResKey;
+use crate::util::key::ObjectKey;
 use std::rc::Rc;
 
 /// A descriptor for binding buffers to a bind group.
@@ -8,11 +8,11 @@ use std::rc::Rc;
 pub struct BufferBindDesc<'a> {
     // Label will be inserted into a map as a key.
     /// *Required field*  
-    pub layout_key: ResKey,
+    pub layout_key: ObjectKey,
 
     // Label will be inserted into a map as a key.
     /// *Required field*  
-    pub group_key: ResKey,
+    pub group_key: ObjectKey,
 
     /// *Required field*  
     pub bufs: &'a [&'a Rc<wgpu::Buffer>],
@@ -80,8 +80,8 @@ impl<'a> BufferBindDesc<'a> {
 impl<'a> Default for BufferBindDesc<'a> {
     fn default() -> Self {
         Self {
-            layout_key: ResKey::default(),
-            group_key: ResKey::default(),
+            layout_key: ObjectKey::default(),
+            group_key: ObjectKey::default(),
             bufs: &[],
             item_sizes: &[],
             bind_type: wgpu::BufferBindingType::Uniform,

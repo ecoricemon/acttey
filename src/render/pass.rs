@@ -86,7 +86,7 @@ impl PassGraph {
 
         // Clears `visit_buf`, but we can reuse its capacity.
         visit_buf.clear();
-        visit_buf.resize(self.graph.len(), false);
+        visit_buf.resize(self.graph.len_buf(), false);
 
         // Makes sure `surf_pack_bufs` is as long as passes. Each pass uses its own buffer.
         surf_pack_bufs.resize_with(self.descs.len(), SurfacePackBuffer::default);
@@ -205,6 +205,7 @@ pub struct ComputePassDesc {}
 
 #[derive(Debug, Clone)]
 pub enum PassCmd {
+    None,
     SetBindGroup(SetBindGroupCmd),
     SetVertexBuffer(SetVertexBufferCmd),
     SetIndexBuffer(SetIndexBufferCmd),
@@ -218,9 +219,16 @@ impl_from_for_enum!(PassCmd, SetIndexBuffer, SetIndexBufferCmd);
 impl_from_for_enum!(PassCmd, SetPipeline, SetPipelineCmd);
 impl_from_for_enum!(PassCmd, DrawIndexed, DrawIndexedCmd);
 
+impl Default for PassCmd {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 impl PassCmd {
     pub fn execute<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
         match self {
+            Self::None => {}
             Self::SetBindGroup(cmd) => {
                 render_pass.set_bind_group(cmd.index, &cmd.bind_group, &[]);
             }

@@ -36,6 +36,20 @@ where
     }
 
     #[inline]
+    pub fn contains_group(&self, index: usize) -> bool {
+        self.groups.contains_index(index)
+    }
+
+    #[inline]
+    pub fn contains_group2<Q>(&self, key: &Q) -> bool
+    where
+        GK: std::borrow::Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.groups.contains_key(key)
+    }
+
+    #[inline]
     pub fn get_group(&self, index: usize) -> Option<(&GV, &Vec<usize>)> {
         self.groups.get(index).map(|(value, links)| (value, links))
     }
@@ -70,6 +84,29 @@ where
     #[inline]
     pub fn get_group_key(&self, index: usize) -> Option<&GK> {
         self.groups.get_key(index)
+    }
+
+    #[inline]
+    pub fn get_group_index<Q>(&self, key: &Q) -> Option<usize>
+    where
+        GK: std::borrow::Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.groups.get_index(key)
+    }
+
+    #[inline]
+    pub fn contains_item(&self, index: usize) -> bool {
+        self.items.contains_index(index)
+    }
+
+    #[inline]
+    pub fn contains_item2<Q>(&self, key: &Q) -> bool
+    where
+        IK: std::borrow::Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.items.contains_key(key)
     }
 
     #[inline]
@@ -250,8 +287,8 @@ impl<K: Hash + Eq + Clone, V, const IMAP: bool> IndexedMap<K, V, IMAP> {
     pub fn new() -> Self {
         Self {
             map: HashMap::default(),
-            imap: OptVec::new(0),
-            values: OptVec::new(0),
+            imap: OptVec::new(),
+            values: OptVec::new(),
         }
     }
 
@@ -309,7 +346,7 @@ impl<K: Hash + Eq + Clone, V, const IMAP: bool> IndexedMap<K, V, IMAP> {
         self.values.take(index)
     }
 
-    /// retrieves index corresponding to the `key`.
+    /// Retrieves index corresponding to the `key`.
     #[inline]
     pub fn get_index<Q>(&self, key: &Q) -> Option<usize>
     where

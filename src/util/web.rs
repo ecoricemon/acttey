@@ -85,24 +85,28 @@ pub fn create_element<T: JsCast>(local_name: &str) -> Option<T> {
     element.dyn_into().ok()
 }
 
-#[inline]
-pub fn hardware_concurrency_from(navigator: &Navigator) -> usize {
-    navigator.hardware_concurrency() as usize
-}
-
 /// Returns the number of logical processors available to run thread(Web worker) concurrently.
 /// It may be lower than the actual number of logical processors depending on browser.
 pub fn hardware_concurrency() -> usize {
-    hardware_concurrency_from(&navigator())
+    if let Some(window) = web_sys::window() {
+        let navigator = window.navigator();
+        navigator.hardware_concurrency() as usize
+    } else {
+        let global: web_sys::WorkerGlobalScope = js_sys::global().unchecked_into();
+        let navigator = global.navigator();
+        navigator.hardware_concurrency() as usize
+    }
 }
 
-pub fn is_webgpu_available_from(window: &Window) -> bool {
-    !navigator_from(window).gpu().is_undefined()
-}
+// TODO: Version issue?
+// pub fn is_webgpu_available_from(window: &Window) -> bool {
+//     !navigator_from(window).gpu().is_undefined()
+// }
 
-pub fn is_webgpu_available() -> bool {
-    is_webgpu_available_from(&window())
-}
+// TODO: Version issue?
+// pub fn is_webgpu_available() -> bool {
+//     is_webgpu_available_from(&window())
+// }
 
 pub fn cross_origin_isolated() -> bool {
     let prop = "crossOriginIsolated";
