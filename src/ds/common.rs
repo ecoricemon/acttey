@@ -121,22 +121,22 @@ impl<T: 'static + Clone> CloneDetector<T> {
 macro_rules! tinfo {
     ($ty:ty) => {{
         #[allow(unused)]
-        use $crate::ds::common::Uncloneable;
+        use $crate::ds::common::{AsTypeInfo, CloneDetector, Uncloneable};
 
-        if let Some(info) = $crate::ds::common::CloneDetector::<$ty>::type_info() {
+        if let Some(info) = CloneDetector::<$ty>::type_info() {
             info
         } else {
-            <$ty as $crate::ds::common::AsTypeInfo>::as_type_info()
+            <$ty as AsTypeInfo>::as_type_info()
         }
     }};
     ($ty:ty, $name:literal) => {{
         #[allow(unused)]
-        use $crate::ds::common::Uncloneable;
+        use $crate::ds::common::{AstypeInfo, CloneDetector, Uncloneable};
 
-        let mut info = if let Some(info) = $crate::ds::common::CloneDetector::<$ty>::type_info() {
+        let mut info = if let Some(info) = CloneDetector::<$ty>::type_info() {
             info
         } else {
-            <$ty as $crate::ds::common::AsTypeInfo>::as_type_info()
+            <$ty as AsTypeInfo>::as_type_info()
         };
         info.name = $name;
         info

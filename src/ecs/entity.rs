@@ -1,12 +1,9 @@
 use super::{borrow_js::JsAtomic, component::ComponentKey, sparse_set::SparseSet};
-use crate::{
-    ds::{
-        borrow::{BorrowError, Borrowed},
-        common::TypeInfo,
-        get::RawGetter,
-        map::{DescribeGroup, GroupMap},
-    },
-    util::string::ArcStr,
+use crate::ds::{
+    borrow::{BorrowError, Borrowed},
+    common::TypeInfo,
+    get::RawGetter,
+    map::{DescribeGroup, GroupMap},
 };
 use std::{
     any::TypeId,
@@ -15,7 +12,117 @@ use std::{
     ops::{Deref, DerefMut},
     ptr::NonNull,
     slice,
+    sync::Arc,
 };
+
+pub trait Entity {
+    fn add_to(&self, cont: &mut EntityContainer) -> usize;
+}
+
+#[macro_export]
+macro_rules! impl_entity {
+    (1) => {const _: () = {
+        use $crate::ecs::{
+            entity::{Entity, EntityContainer},
+            component::Component,
+        };
+        use std::{any::TypeId, ptr::NonNull};
+
+        // Implements `Entity` for A0.
+        impl<A0: Component> Entity for A0 {
+            fn add_to(&self, cont: &mut EntityContainer) -> usize {
+                debug_assert_eq!(
+                    1, cont.get_column_num(),
+                    "{} doesn't have 1 column",
+                    cont.name()
+                );
+                debug_assert_eq!(
+                    0, cont.get_column_index(&TypeId::of::<A0>()).unwrap(),
+                    "{} is not at index 0 in {}",
+                    std::any::type_name::<A0>(), cont.name()
+                );
+
+                cont.begin_add_item();
+                unsafe {
+                    let ptr = self as *const _ as *const u8;
+                    let ptr = NonNull::new_unchecked(ptr.cast_mut());
+                    cont.add_item(0, ptr);
+                }
+                cont.end_add_item()
+            }
+        }
+    };};
+    ($n:expr, $($i:expr),+) => {const _: () = {
+        use $crate::ecs::{
+            entity::{Entity, EntityContainer},
+            component::Component,
+        };
+        use std::{any::TypeId, ptr::NonNull};
+        use paste::paste;
+
+        // Implements `Entity` for (A0, A1, ...).
+        paste! {
+            impl<$([<A $i>]: Component),+> Entity for ( $([<A $i>]),+ ) {
+                fn add_to(&self, cont: &mut EntityContainer) -> usize {
+                    debug_assert_eq!(
+                        $n, cont.get_column_num(),
+                        "{} doesn't have 1 column",
+                        cont.name()
+                    );
+
+                    cont.begin_add_item();
+                    $(
+                        debug_assert_eq!(
+                            $i, cont.get_column_index(&TypeId::of::<[<A $i>]>()).unwrap(),
+                            "{} is not at index {} in {}",
+                            std::any::type_name::<[<A $i>]>(), $i, cont.name()
+                        );
+                        unsafe {
+                            let ptr = &self.[<$i>] as *const _ as *const u8;
+                            let ptr = NonNull::new_unchecked(ptr.cast_mut());
+                            cont.add_item($i, ptr);
+                        }
+                    )+
+                    cont.end_add_item()
+                }
+            }
+        }
+    };};
+}
+
+impl_entity!(1);
+impl_entity!(2, 0, 1);
+impl_entity!(3, 0, 1, 2);
+impl_entity!(4, 0, 1, 2, 3);
+impl_entity!(5, 0, 1, 2, 3, 4);
+impl_entity!(6, 0, 1, 2, 3, 4, 5);
+impl_entity!(7, 0, 1, 2, 3, 4, 5, 6);
+impl_entity!(8, 0, 1, 2, 3, 4, 5, 6, 7);
+
+/// A specific entity identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EntityId {
+    key: usize,
+    index: usize,
+}
+
+impl EntityId {
+    pub const fn new(key: usize, index: usize) -> Self {
+        Self { key, index }
+    }
+
+    pub const fn key(&self) -> EntityKey {
+        EntityKey::Index(self.key)
+    }
+
+    pub const fn key_inner(&self) -> usize {
+        self.key
+    }
+
+    pub const fn index(&self) -> usize {
+        self.index
+    }
+}
 
 /// Key for the map [`EntityDict`] in order to get value [`EntityContainer`].
 /// `EntityDict` provides some access ways shown below.
@@ -23,33 +130,22 @@ use std::{
 /// - Component keys: [`ComponentKey`]s of components that forms an entity.
 /// - Name: Unique name for the entity.
 /// - Type: If the entity is declared statically, it has its own type which is used as a key.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum EntityKey<'a> {
     /// Access by index is recommended in terms of performance.
     Index(usize),
 
     /// Component's keys that belong to entity can be used as a key to find [`EntityContainer`].
-    ComponentKeys(&'a [ComponentKey]),
+    ComponentKeys(Cow<'a, [ComponentKey]>),
 
     /// Unique name for the entity.
-    Name(&'a str),
+    Name(Cow<'a, str>),
 
     /// If the entity is defined statically.
     Type(EntityKeyType),
 }
 
 impl<'a> EntityKey<'a> {
-    pub fn to_owned(&self) -> OwnedEntityKey {
-        match self {
-            Self::Index(index) => OwnedEntityKey::Index(*index),
-            Self::ComponentKeys(keys) => {
-                OwnedEntityKey::ComponentKeys(Cow::Owned((*keys).to_owned()))
-            }
-            Self::Name(name) => OwnedEntityKey::Name(Cow::Owned((*name).to_owned())),
-            Self::Type(ty) => OwnedEntityKey::Type(*ty),
-        }
-    }
-
     pub fn index(&self) -> usize {
         if let Self::Index(index) = self {
             *index
@@ -93,14 +189,21 @@ impl<'a> From<usize> for EntityKey<'a> {
 impl<'a> From<&'a [ComponentKey]> for EntityKey<'a> {
     #[inline]
     fn from(value: &'a [ComponentKey]) -> Self {
-        Self::ComponentKeys(value)
+        Self::ComponentKeys(Cow::Borrowed(value))
     }
 }
 
 impl<'a> From<&'a str> for EntityKey<'a> {
     #[inline]
     fn from(value: &'a str) -> Self {
-        Self::Name(value)
+        Self::Name(Cow::Borrowed(value))
+    }
+}
+
+impl<'a> From<TypeId> for EntityKey<'a> {
+    #[inline]
+    fn from(value: TypeId) -> Self {
+        Self::Type(EntityKeyType::new(value))
     }
 }
 
@@ -124,7 +227,7 @@ pub enum EntityKeyKind {
     Index,
     /// Corresponds to [`EntityKey::ComponentKeys`].
     ComponentKeys,
-    /// Corresponds to [`EntityKey::e`].
+    /// Corresponds to [`EntityKey::name`].
     Name,
     /// Corresponds to [`EntityKey::Type`].
     Type,
@@ -141,17 +244,8 @@ impl<'a> From<&EntityKey<'a>> for EntityKeyKind {
     }
 }
 
-/// Owned [`EntityKey`].
-#[derive(Debug, Clone)]
-pub enum OwnedEntityKey {
-    Index(usize),
-    ComponentKeys(Cow<'static, [ComponentKey]>),
-    Name(Cow<'static, str>),
-    Type(EntityKeyType),
-}
-
 /// A piece of information about an entity such as entity index, name, and its components.
-#[derive(Debug)]
+#[derive(Debug, Eq)]
 pub struct EntityTag {
     /// Corresponds to [`EntityKey::Index`].
     index: usize,
@@ -165,14 +259,14 @@ pub struct EntityTag {
     /// Corresponds to [`EntityContainer::comp_names`].
     comp_names: NonNull<&'static str>,
 
-    /// The length of `comp_types` slice and `comp_names` slice.
+    /// Length of [`Self::comp_keys`] slice and [`Self::comp_names`] slice.
     comp_len: usize,
 }
 
 impl EntityTag {
     pub fn new(
         index: usize,
-        name: &ArcStr,
+        name: &Arc<str>,
         comp_keys: &[ComponentKey],
         comp_names: &[&'static str],
     ) -> Self {
@@ -184,7 +278,7 @@ impl EntityTag {
         let comp_len = comp_keys.len();
 
         // Safety: Infallible.
-        let name = unsafe { NonNull::new_unchecked(ArcStr::as_ptr(name).cast_mut()) };
+        let name = unsafe { NonNull::new_unchecked(Arc::as_ptr(name).cast_mut()) };
 
         Self {
             index,
@@ -219,6 +313,13 @@ impl EntityTag {
     }
 }
 
+impl PartialEq for EntityTag {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.index() == other.index()
+    }
+}
+
 /// Entity dictionary that you can find static information about entities and components
 /// such as names, types, and their relationships.
 /// Plus the dictionary has component data for each entity in [`EntityContainer`].
@@ -233,7 +334,7 @@ pub struct EntityDict {
 
     /// Name -> index of the [`EntityContainer`] in the [`Self::map`].
     /// Each `EntityContainer` has its corresponding index.
-    name_to_index: HashMap<ArcStr, usize, ahash::RandomState>,
+    name_to_index: HashMap<Arc<str>, usize, ahash::RandomState>,
 
     /// Type -> index of the [`EntityContainer`] in the [`Self::map`].
     /// This is optional, only statically declared entity has its type.
@@ -257,12 +358,14 @@ impl EntityDict {
             EntityKeyKind::ComponentKeys => {
                 // Safety: Infallible.
                 EntityKey::ComponentKeys(unsafe {
-                    self.data.get_group_key(index).unwrap_unchecked()
+                    Cow::Borrowed(self.data.get_group_key(index).unwrap_unchecked())
                 })
             }
             EntityKeyKind::Name => {
                 // Safety: Infallible.
-                EntityKey::Name(unsafe { self.data.get_group(index).unwrap_unchecked().0.name() })
+                EntityKey::Name(unsafe {
+                    Cow::Borrowed(self.data.get_group(index).unwrap_unchecked().0.name())
+                })
             }
             EntityKeyKind::Type => {
                 // Safety: Infallible.
@@ -302,9 +405,9 @@ impl EntityDict {
     /// - Panics if entity name conflicts.
     /// - Panics if the dictionary has had entity information already.
     #[inline]
-    pub fn register_entity(&mut self, reg: EntityForm) -> usize {
-        let name = ArcStr::clone(&reg.ent.name);
-        let ent_ty = *reg.ent.ty();
+    pub fn register_entity(&mut self, reg: EntityForm) -> EntityKey<'static> {
+        let name = Arc::clone(&reg.cont.name);
+        let ent_ty = *reg.cont.ty();
         let index = self.data.add_group(reg);
         assert!(
             !self.name_to_index.contains_key(&name),
@@ -318,7 +421,7 @@ impl EntityDict {
             self.type_to_index.insert(ty, index);
         }
 
-        index
+        EntityKey::Index(index)
     }
 
     /// Unregister entity and tries to unregister corresponding components as well.
@@ -348,8 +451,8 @@ impl EntityDict {
     fn get_entity_index(&self, ekey: EntityKey) -> Option<usize> {
         match ekey {
             EntityKey::Index(index) => self.data.contains_group(index).then_some(index),
-            EntityKey::ComponentKeys(ctys) => self.data.get_group_index(ctys),
-            EntityKey::Name(name) => self.name_to_index.get(name).cloned(),
+            EntityKey::ComponentKeys(keys) => self.data.get_group_index(&*keys),
+            EntityKey::Name(name) => self.name_to_index.get(&*name).cloned(),
             EntityKey::Type(ty) => self.type_to_index.get(&ty).cloned(),
         }
     }
@@ -363,43 +466,31 @@ impl Default for EntityDict {
 
 /// A registration form of an entity for [`EntityDict`].
 pub struct EntityForm {
-    ent: EntityContainer,
+    cont: EntityContainer,
     comps: Vec<(ComponentKey, TypeInfo)>,
 }
 
 impl EntityForm {
     /// You can pass your own empty component container `cont`, otherwise [`SparseSet`] is used.
     #[inline]
-    pub fn new(
-        name: impl Into<ArcStr>,
-        ty: Option<EntityKeyType>,
-        cont: Option<Box<dyn Together>>,
-    ) -> Self {
-        fn inner(
-            name: ArcStr,
-            ty: Option<EntityKeyType>,
-            cont: Option<Box<dyn Together>>,
-        ) -> EntityForm {
-            EntityForm {
-                ent: EntityContainer {
-                    name,
-                    ty,
-                    cont: cont.unwrap_or(Box::new(SparseSet::new())),
-                    comp_names: Vec::new(),
-                },
-                comps: Vec::new(),
-            }
+    pub fn new(name: Arc<str>, ty: Option<EntityKeyType>, cont: Option<Box<dyn Together>>) -> Self {
+        Self {
+            cont: EntityContainer {
+                name,
+                ty,
+                cont: cont.unwrap_or(Box::new(SparseSet::new())),
+                comp_names: Vec::new(),
+            },
+            comps: Vec::new(),
         }
-
-        inner(name.into(), ty, cont)
     }
 
     pub fn add_component(&mut self, tinfo: TypeInfo) {
-        if !self.ent.cont.contains_column(&tinfo.id) {
-            self.ent.cont.add_column(tinfo);
+        if !self.cont.cont.contains_column(&tinfo.id) {
+            self.cont.cont.add_column(tinfo);
         }
         self.comps.push((ComponentKey::new(tinfo.id), tinfo));
-        self.ent.comp_names.push(tinfo.name);
+        self.cont.comp_names.push(tinfo.name);
     }
 }
 
@@ -411,11 +502,11 @@ impl DescribeGroup<Vec<ComponentKey>, EntityContainer, ComponentKey, TypeInfo> f
         EntityContainer,
         Vec<(ComponentKey, TypeInfo)>,
     ) {
-        let Self { ent, comps } = self;
+        let Self { cont, comps } = self;
 
-        let comp_ids = comps.iter().map(|(ty, _)| *ty).collect::<Vec<_>>();
+        let ckeys = comps.iter().map(|(ty, _)| *ty).collect::<Vec<_>>();
 
-        (comp_ids, ent, comps)
+        (ckeys, cont, comps)
     }
 }
 
@@ -425,7 +516,7 @@ impl DescribeGroup<Vec<ComponentKey>, EntityContainer, ComponentKey, TypeInfo> f
 pub struct EntityContainer {
     /// Unique name of the entity, which can be used as a key to find `EntityContainer` itself.
     /// See [`EntityKey::Name`].
-    name: ArcStr,
+    name: Arc<str>,
 
     /// Optional type of the entity.
     /// Statically declared entities have this property.
@@ -440,7 +531,7 @@ pub struct EntityContainer {
 
 impl EntityContainer {
     #[inline]
-    pub fn name(&self) -> &ArcStr {
+    pub fn name(&self) -> &Arc<str> {
         &self.name
     }
 
@@ -496,7 +587,7 @@ pub trait Together: std::fmt::Debug {
     fn len(&self) -> usize;
 
     fn begin_add_item(&mut self);
-    unsafe fn add_item(&mut self, ci: usize, ptr: *const u8);
+    unsafe fn add_item(&mut self, ci: usize, ptr: NonNull<u8>);
     fn end_add_item(&mut self) -> usize;
     fn remove_item(&mut self, ri: usize) -> bool;
 

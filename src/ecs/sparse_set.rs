@@ -158,7 +158,7 @@ impl Together for SparseSet {
     ///
     /// Panics if other threads borrowed any column.
     #[inline]
-    unsafe fn add_item(&mut self, ci: usize, ptr: *const u8) {
+    unsafe fn add_item(&mut self, ci: usize, ptr: NonNull<u8>) {
         let mut col = self.cols[ci].get_mut().unwrap();
         col.push_raw(ptr);
     }

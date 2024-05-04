@@ -1,38 +1,57 @@
 use crate::{
-    ds::{
-        buf::VarChunkBuffer,
-        graph::DirectedGraph,
-        set_list::SetValueList,
-        vec::OptVec,
-    },
+    ds::{buf::VarChunkBuffer, graph::DirectedGraph},
+    ecs::entity::EntityId,
     primitive::matrix::Matrix4f,
-    util::{key::ObjectKey, slice::update_slice_by, Index2, View},
+    util::{key::ObjectKey, View},
 };
-use std::{mem::size_of, num::NonZeroUsize};
+use std::{hash::Hash, mem, ops::Range};
 
 /// Represents scene's node transformation tree structure.  
 #[derive(Debug, Clone)]
 pub struct SceneHierarchy {
-    /// Scene's hierarchy is represented as a tree.
-    tree: DirectedGraph<Node>,
+    /// Node tree.
+    nodes: DirectedGraph<Node>,
 
-    /// Global transformation matrices per mesh node.
-    mesh_tfs: VarChunkBuffer<ObjectKey, Matrix4f>,
+    /// Seperated local transformation matrix of the [`Node`].
+    /// This field shares the same index with the [`Self::nodes`].
+    //
+    // NOTE: Users can manipulate local transformation matrix manually.
+    // So the matrix is seperated from `Node` to be shared across threads.
+    locals: Vec<Matrix4f>,
 
-    /// Global transformation matrices per non-mesh node.
-    non_mesh_tfs: OptVec<Matrix4f>,
+    /// Global transformation matrix of the [`Node`].
+    /// [`Node::tf_idx`] points to a specific item in this field.
+    globals: GlobalTransform,
 
-    /// likely updated so that not valid nodes.
+    /// Not validated node.
     invalid_nodes: Vec<usize>,
+
+    /// Indices of nodes that have changed their transformation matrices.
+    /// Indices can be duplicate.
+    dirties: Vec<usize>,
 }
 
 impl SceneHierarchy {
     pub fn new() -> Self {
+        // Creates local transformation matrices with default root node's matrix.
+        let locals = vec![Matrix4f::identity()];
+
+        // Creates global transformation matrices.
+        let mut globals = GlobalTransform::new();
+
+        // Creates node tree.
+        let mut nodes = DirectedGraph::new();
+
+        // Root node has global identity transformation matrix, even if it's actually not used.
+        let root: &mut Node = nodes.get_root_mut();
+        root.tf_idx = globals.insert(None, Matrix4f::identity());
+
         Self {
-            tree: DirectedGraph::new(),
-            mesh_tfs: VarChunkBuffer::with_capacity(64),
-            non_mesh_tfs: OptVec::new(),
+            nodes,
+            locals,
+            globals,
             invalid_nodes: Vec::new(),
+            dirties: Vec::new(),
         }
     }
 
@@ -41,51 +60,80 @@ impl SceneHierarchy {
     /// This function returns index of the node, and you can access the node using the index.
     /// The index will never change after insertion or deletion in front of the node.
     pub fn add_node(&mut self, parent: usize) -> usize {
-        let index = self.tree.insert_node(Node::default());
-        self.tree.add_edge(parent, index);
+        // Adds node.
+        let index = self.nodes.insert_node(Node::default());
+
+        // Adds transformation matrix for the node.
+        if self.locals.len() < (index + 1) {
+            self.locals.resize(index + 1, Matrix4f::identity());
+        }
+
+        // Connects the node to the parent.
+        self.nodes.add_edge(parent, index);
+
+        // Added node must be validated later.
         self.invalid_nodes.push(index);
+
         index
     }
 
     /// Retrieves the node.
     #[inline]
     pub fn get_node(&self, index: usize) -> Option<&Node> {
-        self.tree.get_node(index)
+        self.nodes.get_node(index)
     }
 
     /// Retrieves the node.
-    #[inline]
     pub fn get_node_mut(&mut self, index: usize) -> Option<&mut Node> {
-        // Can be updated outside.
         self.invalid_nodes.push(index);
-        self.tree.get_node_mut(index)
+        self.nodes.get_node_mut(index)
+    }
+
+    pub fn get_local_mut(&mut self, index: usize) -> Option<&mut Matrix4f> {
+        if self.nodes.is_valid(index) {
+            // Safety: Checked the validity.
+            unsafe { Some(self.get_local_unchecked_mut(index)) }
+        } else {
+            None
+        }
+    }
+
+    pub unsafe fn get_local_unchecked_mut(&mut self, index: usize) -> &mut Matrix4f {
+        let node = self.nodes.get_node_unchecked_mut(index);
+        node.dirty_transform();
+        self.dirties.push(index);
+        self.locals.get_unchecked_mut(index)
     }
 
     /// Retrieves iterator traversing all index-node pairs.
     #[inline]
-    pub fn iter_nodes(&self) -> impl Iterator<Item = (usize, &Node)> {
-        self.tree.iter_nodes()
+    pub fn iter_node(&self) -> impl Iterator<Item = (usize, &Node)> {
+        self.nodes.iter_node()
     }
 
     /// Retrieves transforrm matrix buffer view for instancing.
     #[inline]
     pub fn get_transform_buffer_view(&self) -> View {
-        View::new(0, self.mesh_tfs.len(), size_of::<Matrix4f>())
+        View::new(
+            0,
+            self.globals.mesh_buffer_len(),
+            mem::size_of::<Matrix4f>(),
+        )
     }
 
     #[inline]
     pub fn get_transform_buffer_as_bytes(&self) -> &[u8] {
-        (&self.mesh_tfs).into()
+        self.globals.mesh_buffer_bytes()
     }
 
     /// Retrieves a particular range of buffer corresponding to the `key`.
     #[inline]
-    pub fn get_transform_buffer_range<Q>(&self, key: &Q) -> Option<std::ops::Range<usize>>
+    pub fn get_transform_buffer_range<Q>(&self, key: &Q) -> Option<Range<usize>>
     where
         ObjectKey: std::borrow::Borrow<Q>,
-        Q: std::hash::Hash + Eq + ?Sized,
+        Q: Hash + Eq + ?Sized,
     {
-        self.mesh_tfs.get_chunk_window2(key).map(|win| win.range())
+        self.globals.mesh_buffer_range(key)
     }
 
     /// Validates nodes that may be updated.
@@ -95,81 +143,55 @@ impl SceneHierarchy {
         }
     }
 
-    // TODO: Currently, traverse all nodes to determine what node needs to be updated.
-    // Can we skip unmodified nodes?
     /// Updates node's transformation matrices.
     pub fn update_global_transform(&mut self) {
-        // Validates nodes first.
-        if !self.invalid_nodes.is_empty() {
-            self.validate();
-        }
-
-        let (nodes, outbounds, _) = self.tree.destructure();
-
-        fn update(
-            v: usize,
-            p: usize,
-            nodes: &mut OptVec<Node>,
-            edges: &Vec<SetValueList<NonZeroUsize>>,
-            mesh_tfs: &mut VarChunkBuffer<ObjectKey, Matrix4f>,
-            non_mesh_tfs: &mut OptVec<Matrix4f>,
+        unsafe fn update(
+            this: &mut SceneHierarchy,
+            node_idx: usize,
+            parent_idx: usize,
             mut need_update: bool,
         ) {
-            // Safety: v points to occupied node.
-            let node = unsafe { nodes.get_unchecked_mut(v) };
+            let node = this.nodes.get_node_unchecked(node_idx);
             need_update |= node.dirty.contains(NodeDirty::TRANSFORM);
             if need_update {
-                update_slice_by(nodes.as_slice_mut(), v, p, |node, parent| {
-                    // Safety: v points to occupied node, but parent is None if p is zero.
-                    let node = unsafe { node.as_mut().unwrap_unchecked() };
+                // TODO: improve
+                if parent_idx > 0 {
+                    let parent_mat = *this
+                        .globals
+                        .get(&this.nodes.get_node_unchecked(parent_idx).tf_idx);
+                    let global_mat = this
+                        .globals
+                        .get_mut(&this.nodes.get_node_unchecked(node_idx).tf_idx);
+                    let local_mat = this.locals.get_unchecked(node_idx);
+                    *global_mat = &parent_mat * local_mat;
+                } else {
+                    let global_mat = this
+                        .globals
+                        .get_mut(&this.nodes.get_node_unchecked(node_idx).tf_idx);
+                    let local_mat = this.locals.get_unchecked(node_idx);
+                    *global_mat = *local_mat;
+                }
 
-                    // Updates global matrix using local matrices.
-                    if let Some(parent) = parent {
-                        node.tf = &parent.tf * &node.tf;
-                    }
-
-                    // Writes to the buffer.
-                    let target = if node.gtf_index.is_single() {
-                        unsafe { non_mesh_tfs.get_unchecked_mut(node.gtf_index.first) }
-                    } else {
-                        mesh_tfs.get_item_mut(node.gtf_index.second, node.gtf_index.first)
-                    };
-                    *target = node.tf;
-
-                    // Clears dirty flag.
-                    node.dirty.remove(NodeDirty::TRANSFORM);
-                });
-            }
-
-            for w in edges[v].iter() {
-                update(
-                    w.get(),
-                    v,
-                    nodes,
-                    edges,
-                    mesh_tfs,
-                    non_mesh_tfs,
-                    need_update,
-                );
+                let node = this.nodes.get_node_unchecked_mut(node_idx);
+                node.dirty.remove(NodeDirty::TRANSFORM);
             }
         }
 
-        for v in outbounds[0].iter() {
-            update(
-                v.get(),
-                0,
-                nodes,
-                outbounds,
-                &mut self.mesh_tfs,
-                &mut self.non_mesh_tfs,
-                false,
-            );
+        while let Some(node_idx) = self.dirties.pop() {
+            // Safety: node_idx is valid because we got it from the dirty records.
+            // Plus, the node must have only one parent, although it's a child of default root node.
+            unsafe {
+                let parent = self.nodes.get_inbound_unchecked(node_idx);
+                debug_assert_eq!(1, parent.len());
+                let parent_idx = parent.iter().next().unwrap_unchecked();
+                update(self, node_idx, *parent_idx, false);
+            }
         }
     }
 
     /// Validates transform matrices by newly creating or moving them.
-    fn validate_tf(&mut self, i: usize) {
-        if let Some(node) = self.tree.get_node_mut(i) {
+    fn validate_tf(&mut self, node_idx: usize) {
+        if let Some(node) = self.nodes.get_node_mut(node_idx) {
             // Checks if this node should be validated.
             const CHECK: NodeDirty = NodeDirty::CREATED.union(NodeDirty::MESH);
             if !node.dirty.intersects(CHECK) {
@@ -177,31 +199,31 @@ impl SceneHierarchy {
             }
             node.dirty.remove(CHECK);
 
-            match (node.gtf_index.get(), node.get_mesh_key()) {
-                // Case 1. New node w/o mesh.
-                ((None, None), None) => {
-                    let ii = self.non_mesh_tfs.add(Matrix4f::default());
-                    node.gtf_index.into_single(ii);
+            match (
+                node.tf_idx.is_mesh_index(),
+                node.tf_idx.is_non_mesh_index(),
+                node.get_mesh_key(),
+            ) {
+                // New node w/ or w/o mesh.
+                (false, false, mesh_key) => {
+                    let mesh_key = mesh_key.cloned();
+                    node.tf_idx = self.globals.insert(mesh_key, Matrix4f::identity());
                 }
-                // Case 2. New node w/ mesh.
-                ((None, None), Some(key)) => {
-                    let ci = self.mesh_tfs.insert_new(key.clone(), Matrix4f::default());
-                    let ii = self.mesh_tfs.chunk_len(ci) - 1;
-                    node.gtf_index.into_pair(ii, ci);
-                }
-                // Case 3. w/o mesh -> w/ mesh. (mesh has attached)
-                ((Some(_ii), None), Some(_key)) => {
+                // w/o mesh -> w/ mesh. (mesh has attached)
+                (false, true, _mesh_key) => {
                     todo!()
                 }
-                // Case 4. w/ mesh -> w/o mesh. (mesh has detached)
-                ((Some(_ii), Some(_ci)), None) => {
+                // w/ mesh -> w/o mesh. (mesh has detached)
+                (true, false, None) => {
                     todo!()
                 }
-                // Case 5. w/ mesh -> w/ mesh. (mesh has changed)
-                ((Some(_ii), Some(_ci)), Some(_key)) => {
+                // w/ mesh -> w/ mesh. (mesh has changed)
+                (true, false, Some(_mesh_key)) => {
                     todo!()
                 }
-                _ => {}
+                (true, true, _) => {
+                    unreachable!()
+                }
             }
         }
     }
@@ -214,26 +236,115 @@ impl Default for SceneHierarchy {
 }
 
 #[derive(Debug, Clone)]
-pub struct Node {
-    // Dev note.
-    // `tf` is a copy of components::Drawable::transform::tf.
-    // The reasons why I've decieded to allow duplication are
-    // - ECS system should be able to access local transformation because users may manipulate it directly.
-    //   -> Accessing scene mutably is not good because it prevents running systems simultaneously.
-    //   -> So that local transfromation belongs to ECS components, not to scene.
-    // - Acquisition of individual local transformation from ECS storage is not cheap for now.
-    //   -> The process requires a couple of indirect access for finding the item.
-    //   -> It's intended to accesss whole items at once.
-    // - We should update global transformations at once according to hierarchy.
-    //   -> Because node's global transformation depends on either its local transformation and ancestor's global transformations.
-    // - As a result, I think duplication is the most cheap way.
-    /// Local transformation first, but during updating, becomes global transformation.
-    tf: Matrix4f,
+pub(super) struct GlobalTransform {
+    /// Global transformation matrices.
+    /// mats[0] contains matrices for mesh nodes only.
+    /// On the other hand, mats[1] contains non-mesh node matrices.
+    mats: [VarChunkBuffer<ObjectKey, Matrix4f>; 2],
+}
 
-    /// Index to Global transformation matrix.
-    /// First one is index in matrix array.
-    /// Second one is index of the matrix array for mesh when it's used.
-    gtf_index: Index2,
+impl GlobalTransform {
+    const MESH_BUF_IDX: usize = 0;
+    const NON_MESH_BUF_IDX: usize = 1;
+
+    pub(super) fn new() -> Self {
+        Self {
+            mats: [VarChunkBuffer::new(), VarChunkBuffer::new()],
+        }
+    }
+
+    #[inline]
+    pub(super) fn mesh_buffer_len(&self) -> usize {
+        self.mats[Self::MESH_BUF_IDX].len()
+    }
+
+    #[inline]
+    pub(super) fn mesh_buffer_bytes(&self) -> &[u8] {
+        (&self.mats[Self::MESH_BUF_IDX]).into()
+    }
+
+    #[inline]
+    pub(super) fn mesh_buffer_range<Q>(&self, key: &Q) -> Option<Range<usize>>
+    where
+        ObjectKey: std::borrow::Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.mats[Self::MESH_BUF_IDX]
+            .get_chunk_window2(key)
+            .map(|win| win.range())
+    }
+
+    pub(super) fn insert(
+        &mut self,
+        mesh_key: Option<ObjectKey>,
+        mat: Matrix4f,
+    ) -> GlobalTransformIndex {
+        let (buf_idx, mesh_key) = if let Some(mesh_key) = mesh_key {
+            (Self::MESH_BUF_IDX, mesh_key)
+        } else {
+            (Self::NON_MESH_BUF_IDX, ObjectKey::default())
+        };
+        let chunk_idx = self.mats[buf_idx].insert_new(mesh_key, mat);
+        let item_idx = self.mats[buf_idx].chunk_len(chunk_idx) - 1;
+        GlobalTransformIndex {
+            buf_idx,
+            chunk_idx,
+            item_idx,
+        }
+    }
+
+    #[inline]
+    pub(super) fn get(&self, index: &GlobalTransformIndex) -> &Matrix4f {
+        self.mats[index.buf_idx].get_item(index.chunk_idx, index.item_idx)
+    }
+
+    #[inline]
+    pub(super) fn get_mut(&mut self, index: &GlobalTransformIndex) -> &mut Matrix4f {
+        self.mats[index.buf_idx].get_item_mut(index.chunk_idx, index.item_idx)
+    }
+}
+
+impl Default for GlobalTransform {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct GlobalTransformIndex {
+    pub(super) buf_idx: usize,
+    pub(super) chunk_idx: usize,
+    pub(super) item_idx: usize,
+}
+
+impl GlobalTransformIndex {
+    const DUMMY_IDX: usize = usize::MAX;
+
+    pub(super) const fn dummy() -> Self {
+        Self {
+            buf_idx: Self::DUMMY_IDX,
+            chunk_idx: 0,
+            item_idx: 0,
+        }
+    }
+
+    pub(super) const fn is_dummy(&self) -> bool {
+        self.buf_idx == Self::DUMMY_IDX
+    }
+
+    pub(super) const fn is_mesh_index(&self) -> bool {
+        self.buf_idx == GlobalTransform::MESH_BUF_IDX
+    }
+
+    pub(super) const fn is_non_mesh_index(&self) -> bool {
+        self.buf_idx == GlobalTransform::NON_MESH_BUF_IDX
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Node {
+    /// Index to the global transformation matrix.
+    tf_idx: GlobalTransformIndex,
 
     /// Optional camera key.
     camera: Option<ObjectKey>,
@@ -242,27 +353,13 @@ pub struct Node {
     mesh: Option<ObjectKey>,
 
     /// Optional mapping with ECS's entity.
-    entity: Option<(usize, usize)>,
+    entity: Option<EntityId>,
 
     /// Dirty flag.
     dirty: NodeDirty,
 }
 
 impl Node {
-    /// Updates transformation matrix, and then marks dirty on it.
-    #[inline]
-    pub fn set_transform(&mut self, tf: Matrix4f) {
-        self.tf = tf;
-        self.dirty |= NodeDirty::TRANSFORM;
-    }
-
-    /// Returns mutable reference of transformation matrix and marks dirty on it.
-    #[inline]
-    pub fn get_transform_mut(&mut self) -> &mut Matrix4f {
-        self.dirty |= NodeDirty::TRANSFORM;
-        &mut self.tf
-    }
-
     /// Sets camera key.
     #[inline]
     pub fn set_camera(&mut self, camera: ObjectKey) {
@@ -291,14 +388,19 @@ impl Node {
 
     /// Sets mapping with ECS's entity.
     #[inline]
-    pub fn set_entity(&mut self, enti: usize, eid: usize) {
-        self.entity = Some((enti, eid));
+    pub fn set_entity(&mut self, eid: EntityId) {
+        self.entity = Some(eid);
         self.dirty |= NodeDirty::ENTITY;
+    }
+
+    #[inline]
+    pub fn dirty_transform(&mut self) {
+        self.dirty |= NodeDirty::TRANSFORM;
     }
 
     /// Gets mapped ECS's entity key and its id.
     #[inline]
-    pub fn get_mapped_entity(&self) -> Option<(usize, usize)> {
+    pub fn get_mapped_entity(&self) -> Option<EntityId> {
         self.entity
     }
 }
@@ -306,8 +408,7 @@ impl Node {
 impl Default for Node {
     fn default() -> Self {
         Self {
-            tf: Matrix4f::default(),
-            gtf_index: Index2::uninit(),
+            tf_idx: GlobalTransformIndex::dummy(),
             camera: None,
             mesh: None,
             entity: None,

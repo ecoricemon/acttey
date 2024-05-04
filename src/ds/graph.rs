@@ -1,7 +1,7 @@
 use super::set_list::SetValueList;
 use crate::ds::vec::OptVec;
-use ahash::AHashSet;
 use std::{
+    collections::HashSet,
     num::NonZeroUsize,
     ops::{Index, IndexMut},
 };
@@ -21,7 +21,7 @@ pub struct DirectedGraph<T> {
 
     /// Incoming edges of each node.
     /// This field doesn't preserve inserted order.  
-    inbounds: Vec<AHashSet<usize>>,
+    inbounds: Vec<HashSet<usize, ahash::RandomState>>,
 }
 
 impl<T: Default> DirectedGraph<T> {
@@ -33,7 +33,7 @@ impl<T: Default> DirectedGraph<T> {
         Self {
             nodes,
             outbounds: vec![Self::new_outbound()], // For default root
-            inbounds: vec![AHashSet::new()],       // For default root
+            inbounds: vec![HashSet::default()],    // For default root
         }
     }
 }
@@ -58,14 +58,15 @@ impl<T> DirectedGraph<T> {
     ) -> (
         &mut OptVec<T>,
         &Vec<SetValueList<NonZeroUsize>>,
-        &Vec<AHashSet<usize>>,
+        &Vec<HashSet<usize, ahash::RandomState>>,
     ) {
         (&mut self.nodes, &self.outbounds, &self.inbounds)
     }
 
-    // Dev note. Don't implement len(). It's confusing because we put in default node.
     /// Retrieves the length of node buffer,
     /// which is default root node + # of vacant slots + # of occupied slots.
+    //
+    // NOTE: Don't implement len(). It's confusing because we put in default node.
     #[inline]
     pub fn len_buf(&self) -> usize {
         self.nodes.len()
@@ -82,15 +83,27 @@ impl<T> DirectedGraph<T> {
         self.len_occupied() == 0
     }
 
+    /// Determines `index` is in bounds and the slot is Some,
+    /// which means there's a value in the slot.
+    #[inline]
+    pub fn is_valid(&self, index: usize) -> bool {
+        self.nodes.is_valid(index)
+    }
+
     #[inline]
     pub fn get_node(&self, index: usize) -> Option<&T> {
         self.nodes.get(index)
     }
 
+    #[inline]
+    pub fn get_root_mut(&mut self) -> &mut T {
+        // Safety: There's default root node at the first position.
+        unsafe { self.nodes.get_unchecked_mut(0) }
+    }
+
     /// # Safety
     ///
-    /// Undefine behavior if `index` is out of bound or
-    /// the slot is vacant.
+    /// Undefine behavior if `index` is out of bound or the slot is vacant.
     #[inline]
     pub unsafe fn get_node_unchecked(&self, index: usize) -> &T {
         self.nodes.get_unchecked(index)
@@ -105,18 +118,46 @@ impl<T> DirectedGraph<T> {
 
     /// # Safety
     ///
-    /// Undefine behavior if `index` is out of bound or
-    /// the slot is vacant.
+    /// Undefine behavior if `index` is out of bound or the slot is vacant.
     #[inline]
     pub unsafe fn get_node_unchecked_mut(&mut self, index: usize) -> &mut T {
         self.nodes.get_unchecked_mut(index)
+    }
+
+    #[inline]
+    pub fn get_outbound(&self, index: usize) -> Option<&SetValueList<NonZeroUsize>> {
+        self.outbounds.get(index)
+    }
+
+    /// # Safety
+    ///
+    /// Undefine behavior if `index` is out of bound or the slot is vacant.
+    #[inline]
+    pub unsafe fn get_outbound_unchecked(&self, index: usize) -> &SetValueList<NonZeroUsize> {
+        self.outbounds.get_unchecked(index)
+    }
+
+    #[inline]
+    pub fn get_inbound(&self, index: usize) -> Option<&HashSet<usize, ahash::RandomState>> {
+        self.inbounds.get(index)
+    }
+
+    /// # Safety
+    ///
+    /// Undefine behavior if `index` is out of bound or the slot is vacant.
+    #[inline]
+    pub unsafe fn get_inbound_unchecked(
+        &self,
+        index: usize,
+    ) -> &HashSet<usize, ahash::RandomState> {
+        self.inbounds.get_unchecked(index)
     }
 
     pub fn insert_node(&mut self, value: T) -> usize {
         let index = self.nodes.add(value);
         if index == self.nodes.len() - 1 {
             self.outbounds.push(Self::new_outbound());
-            self.inbounds.push(AHashSet::new());
+            self.inbounds.push(HashSet::default());
         }
         self.connect_root(index);
         index
@@ -161,15 +202,15 @@ impl<T> DirectedGraph<T> {
         self.inbounds[index].clear();
     }
 
-    pub fn iter_nodes(&self) -> impl Iterator<Item = (usize, &T)> {
+    pub fn iter_node(&self) -> impl Iterator<Item = (usize, &T)> {
         self.nodes.iter_occupied()
     }
 
-    pub fn iter_outbounds(&self, index: usize) -> impl Iterator<Item = usize> + Clone + '_ {
+    pub fn iter_outbound(&self, index: usize) -> impl Iterator<Item = usize> + Clone + '_ {
         self.outbounds[index].iter().map(|to| to.get())
     }
 
-    pub fn iter_inbounds(&self, index: usize) -> impl Iterator<Item = usize> + Clone + '_ {
+    pub fn iter_inbound(&self, index: usize) -> impl Iterator<Item = usize> + Clone + '_ {
         self.inbounds[index].iter().cloned()
     }
 

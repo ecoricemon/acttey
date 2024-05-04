@@ -1,18 +1,26 @@
 use crate::{
     decl_return_wrap,
-    ds::generational::{GenIndexRc, GenVecRc},
+    ds::{
+        generational::{GenIndexRc, GenVecRc},
+        get::GetterMut,
+    },
+    ecs::{entity::EntityId, predefined::components},
     primitive::{
         camera::Camera,
         mesh::{Geometry, MeshResource},
     },
     render::{
-        buffer::{to_padded_num, write_to_mapped_buffer, BufferView, GeometryBufferView},
-        canvas::{Surface, SurfacePack, SurfacePackBuffer},
+        buffer::{
+            to_padded_num, write_to_mapped_buffer, BufferView, GeometryBufferView, SizeOrData,
+        },
+        canvas::{CanvasHandle, Surface, SurfacePack, SurfacePackBuffer},
         context::Gpu,
+        descs,
         pass::{
             DrawIndexedCmd, PassDesc, PassGraph, RenderPassDesc, SetBindGroupCmd,
             SetIndexBufferCmd, SetPipelineCmd, SetVertexBufferCmd,
         },
+        pipeline::{PipelineBuilder, PipelineLayoutBuilder},
         shaders::{
             helper::{BindableResource, ShaderHelper},
             Shader,
@@ -22,24 +30,29 @@ use crate::{
         hierarchy::{Node, SceneHierarchy},
         SceneError,
     },
-    util::{key::ObjectKey, string::RcStr, AsMultiBytes, View},
+    ty,
+    util::{key::ObjectKey, AsBytes, AsMultiBytes, View},
 };
-use ahash::{AHashMap, AHashSet};
-use std::{hash::Hash, rc::Rc};
+use std::{
+    collections::{HashMap, HashSet},
+    hash::Hash,
+    rc::Rc,
+    sync::Arc,
+};
 
 pub struct SceneManager {
     /// Scenes.
-    scenes: AHashMap<ObjectKey, Scene>,
+    scenes: HashMap<ObjectKey, Scene, ahash::RandomState>,
 
     /// Active scenes.
-    active: AHashSet<ObjectKey>,
+    active: HashSet<ObjectKey, ahash::RandomState>,
 }
 
 impl SceneManager {
     pub fn new() -> Self {
         Self {
-            scenes: AHashMap::new(),
-            active: AHashSet::new(),
+            scenes: HashMap::default(),
+            active: HashSet::default(),
         }
     }
 
@@ -92,16 +105,197 @@ impl SceneManager {
         self.active.remove(&key);
     }
 
-    pub fn iter_active_scenes(&self) -> impl Iterator<Item = (&ObjectKey, &Scene)> {
+    pub fn iter_active_scene(&self) -> impl Iterator<Item = (&ObjectKey, &Scene)> {
         self.scenes
             .iter()
             .filter(|(key, _)| self.active.contains(key))
     }
 
-    pub fn iter_active_scenes_mut(&mut self) -> impl Iterator<Item = (&ObjectKey, &mut Scene)> {
+    pub fn iter_active_scene_mut(&mut self) -> impl Iterator<Item = (&ObjectKey, &mut Scene)> {
         self.scenes
             .iter_mut()
             .filter(|(key, _)| self.active.contains(key))
+    }
+
+    pub fn temp_adopt(
+        key: ObjectKey,
+        mut scene: Scene,
+        sched: &mut crate::ecs::schedule::Scheduler,
+        render: &mut crate::render::resource::RenderResource,
+        meshes: &mut crate::primitive::mesh::MeshResource,
+        scene_mgr: &mut Self,
+    ) -> Result<(), SceneError> {
+        scene.set_gpu(Rc::clone(&render.gpu));
+
+        // Makes mapping between scene's nodes and ECS's entities.
+        for (i, node) in scene.hierarchy.iter_node() {
+            if let Some(eid) = node.get_mapped_entity() {
+                // TODO: Use filter, This is duplicate implementation.
+                // Using system may be a good choice.
+                let cont = sched.entities.get_entity_container_mut(eid.key()).unwrap();
+                let coli = cont.get_column_index(&ty!(components::SceneNode)).unwrap();
+                let mut borrowed = cont.borrow_column_mut(coli).unwrap();
+                let mut getter: GetterMut<'_, components::SceneNode> = (&mut *borrowed).into();
+                let value = getter.get(eid.index()).unwrap();
+                value.scene_key = key.id();
+                value.node_index = i;
+            }
+        }
+
+        // Makes geometry to be interleaved and sets it to the scene.
+        meshes.make_mesh_geometry_interleaved(scene.meshes.iter());
+        scene.fill_geometry_and_material(meshes)?;
+
+        // Creates a surface pack and sets it to the scene.
+        let sels = scene.canvases.iter().map(|sel| sel.as_str());
+        let index = render.add_surface_pack_from(sels);
+        scene.set_surface_pack_index(index);
+
+        // Creates shader builder, builds, and sets it to the scene.
+        let builder = scene.create_shader_builder(meshes, &render.surf_packs, &render.surfaces);
+        let builder_index = render.add_shader_builder(builder);
+        let shader = render.build_shader(builder_index, &key);
+        scene.set_shader(Rc::clone(shader));
+
+        // Calculates size for geometry buffers on consideration of alignment.
+        let (vert_size, index_size) = scene.calc_geometry_buffer_size(meshes);
+
+        // Requests geometry buffers and sets them to the scene.
+        let vert_buf = render.add_vertex_buffer(SizeOrData::Size(vert_size, true))?;
+        let index_buf = render.add_ro_index_buffer(SizeOrData::Size(index_size, true))?;
+        scene.set_geometry_buffer(meshes, vert_buf, index_buf);
+
+        // Instance buffer.
+        let inst_buf_view = scene.get_transform_buffer_view();
+        let inst_buf_size = inst_buf_view.size() as u64;
+        let inst_buf = render.add_vertex_buffer(SizeOrData::Size(inst_buf_size, false))?;
+        scene.set_instance_buffer(Rc::clone(&inst_buf));
+
+        // Requests camera buffers and sets them to the scene.
+        let Scene {
+            cameras,
+            camera_bufs,
+            camera_binds,
+            ..
+        } = &mut scene;
+        for (camera_key, camera) in cameras.iter() {
+            let cam_bytes = camera.as_bytes();
+            let uni_buf = render.add_uniform_buffer(SizeOrData::Data(cam_bytes))?;
+            let desc = descs::BufferBindDesc {
+                layout_key: camera_key.clone(),
+                group_key: camera_key.clone(),
+                bufs: &[&uni_buf],
+                item_sizes: &[cam_bytes.len() as u64],
+                ..Default::default()
+            };
+            render.add_default_buffer_bind(desc);
+            let bind_group = render.get_bind_group(camera_key).unwrap();
+            camera_binds.insert(camera_key.clone(), Rc::clone(bind_group));
+            camera_bufs.insert(camera_key.clone(), uni_buf);
+        }
+
+        // Requests material buffers and sets them to the scene.
+        let Scene {
+            mats,
+            mat_bufs,
+            mat_binds,
+            ..
+        } = &mut scene;
+        for (mat_key, _) in mats.iter() {
+            let mat = meshes.get_material(mat_key).unwrap();
+            let mat_bytes = mat.as_bytes();
+            let uni_buf = render.add_ro_uniform_buffer(SizeOrData::Data(mat_bytes))?;
+            let desc = descs::BufferBindDesc {
+                layout_key: mat_key.clone(),
+                group_key: mat_key.clone(),
+                bufs: &[&uni_buf],
+                item_sizes: &[mat_bytes.len() as u64],
+                ..Default::default()
+            };
+            render.add_default_buffer_bind(desc);
+            let bind_group = render.get_bind_group(mat_key).unwrap();
+            mat_binds.insert(mat_key.clone(), Rc::clone(bind_group));
+            mat_bufs.insert(mat_key.clone(), uni_buf);
+        }
+
+        // Creates pipeline layout.
+        let mut builder = PipelineLayoutBuilder::new();
+        let Scene { cameras, mats, .. } = &mut scene;
+        if let Some(camera_key) = cameras.keys().next() {
+            let bind_layout = render.get_bind_group_layout(camera_key).unwrap();
+            builder.bind_group_layouts.push(Rc::clone(bind_layout));
+        }
+        if let Some(mat_key) = mats.keys().next() {
+            let bind_layout = render.get_bind_group_layout(mat_key).unwrap();
+            builder.bind_group_layouts.push(Rc::clone(bind_layout));
+        }
+        let plb_index = render.add_pipeline_layout_builder(builder);
+        let layout = render.build_pipeline_layout(plb_index, key.clone());
+
+        // Creates pipeline.
+        let mut builder = PipelineBuilder::new();
+        builder.set_layout(Rc::clone(layout));
+        let shader = scene.shader.as_ref().unwrap();
+        if shader.has_vertex_stage() {
+            builder.set_vertex_shader(Rc::clone(shader));
+        }
+        if shader.has_fragment_stage() {
+            builder.set_fragment_shader(Rc::clone(shader));
+        }
+        if let Some(geo_key) = scene.geos.keys().next() {
+            let geo = meshes.get_geometry(geo_key).unwrap();
+            // vertex buffer
+            let view = BufferView::new_from_geometry(geo.as_interleaved().unwrap());
+            builder.vert_buf_view.push(view);
+            // instance buffer
+            let mut view = BufferView::new(
+                inst_buf_view.get_item_size(),
+                inst_buf_view.len,
+                inst_buf_view.offset,
+            );
+            view.set_buffer(inst_buf);
+            view.set_vertex_step_mode(wgpu::VertexStepMode::Instance);
+            // TODO: Hard coded
+            view.set_vertex_attributes(&[
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 0,
+                    shader_location: 2,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 16,
+                    shader_location: 3,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 32,
+                    shader_location: 4,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x4,
+                    offset: 48,
+                    shader_location: 5,
+                },
+            ]);
+            builder.vert_buf_view.push(view);
+        }
+        builder.set_surface_pack_index(scene.surf_pack_index.clone());
+        let pb_index = render.add_pipeline_builder(builder);
+        let pipeline = render.build_pipeline(pb_index, key.clone());
+        scene.pipelines.insert(key.clone(), Rc::clone(pipeline));
+
+        // Removes temporary builders.
+        render.remove_pipeline_layout_builder(plb_index);
+        render.remove_pipeline_builder(pb_index);
+
+        // PassGraph.
+        scene.build_pass_graph(Arc::clone(&key.label()));
+
+        // Adds the scene.
+        scene_mgr.insert_scene(key.clone(), scene);
+        scene_mgr.activate_scene(key);
+        Ok(())
     }
 }
 
@@ -121,37 +315,37 @@ impl Default for SceneManager {
 #[derive(Debug, Clone)]
 pub struct Scene {
     /// Canvas selectors.
-    pub(crate) canvases: Vec<u32>,
+    pub(crate) canvases: Vec<String>,
 
     /// Explains node relationships.
     pub(crate) hierarchy: SceneHierarchy,
 
     /// Cameras in the scene.
-    pub(crate) cameras: AHashMap<ObjectKey, Camera>,
+    pub(crate) cameras: HashMap<ObjectKey, Camera, ahash::RandomState>,
 
     /// Camera buffers. They will be integrated at the end.
-    pub(crate) camera_bufs: AHashMap<ObjectKey, Rc<wgpu::Buffer>>,
+    pub(crate) camera_bufs: HashMap<ObjectKey, Rc<wgpu::Buffer>, ahash::RandomState>,
 
     /// Camera binds. They will be integrated at the end.
-    pub(crate) camera_binds: AHashMap<ObjectKey, Rc<wgpu::BindGroup>>,
+    pub(crate) camera_binds: HashMap<ObjectKey, Rc<wgpu::BindGroup>, ahash::RandomState>,
 
     /// Meshes in the scene.
     /// This is a subset of the meshes in [`MeshResource`].
-    pub(crate) meshes: AHashSet<ObjectKey>,
+    pub(crate) meshes: HashSet<ObjectKey, ahash::RandomState>,
 
-    pub(crate) mesh_map: AHashMap<ObjectKey, (ObjectKey, ObjectKey)>,
+    pub(crate) mesh_map: HashMap<ObjectKey, (ObjectKey, ObjectKey), ahash::RandomState>,
 
     /// Owned geometries in the scene.
-    pub(crate) geos: AHashMap<ObjectKey, GeometryBufferView>,
+    pub(crate) geos: HashMap<ObjectKey, GeometryBufferView, ahash::RandomState>,
 
     /// Owned materials in the scene.
-    pub(crate) mats: AHashMap<ObjectKey, Rc<()>>,
+    pub(crate) mats: HashMap<ObjectKey, Rc<()>, ahash::RandomState>,
 
     /// Material buffers. They will be integrated at the end.
-    pub(crate) mat_bufs: AHashMap<ObjectKey, Rc<wgpu::Buffer>>,
+    pub(crate) mat_bufs: HashMap<ObjectKey, Rc<wgpu::Buffer>, ahash::RandomState>,
 
     /// Material binds. They will be integrated at the end.
-    pub(crate) mat_binds: AHashMap<ObjectKey, Rc<wgpu::BindGroup>>,
+    pub(crate) mat_binds: HashMap<ObjectKey, Rc<wgpu::BindGroup>, ahash::RandomState>,
 
     /// Instance buffer.
     pub(crate) inst_buf: Option<Rc<wgpu::Buffer>>,
@@ -166,7 +360,7 @@ pub struct Scene {
     pub(crate) geo_buf_size: Option<(u64, u64)>,
 
     /// Pipelines. One pipeline for now.
-    pub(crate) pipelines: AHashMap<ObjectKey, Rc<wgpu::RenderPipeline>>,
+    pub(crate) pipelines: HashMap<ObjectKey, Rc<wgpu::RenderPipeline>, ahash::RandomState>,
 
     pub(crate) pass_graph: Option<PassGraph>,
 
@@ -178,20 +372,20 @@ impl Scene {
         Self {
             hierarchy: SceneHierarchy::new(),
             canvases: Vec::new(),
-            cameras: AHashMap::new(),
-            camera_bufs: AHashMap::new(),
-            camera_binds: AHashMap::new(),
-            meshes: AHashSet::new(),
-            mesh_map: AHashMap::new(),
-            geos: AHashMap::new(),
-            mats: AHashMap::new(),
-            mat_bufs: AHashMap::new(),
-            mat_binds: AHashMap::new(),
+            cameras: HashMap::default(),
+            camera_bufs: HashMap::default(),
+            camera_binds: HashMap::default(),
+            meshes: HashSet::default(),
+            mesh_map: HashMap::default(),
+            geos: HashMap::default(),
+            mats: HashMap::default(),
+            mat_bufs: HashMap::default(),
+            mat_binds: HashMap::default(),
             inst_buf: None,
             surf_pack_index: GenIndexRc::dummy(),
             shader: None,
             geo_buf_size: None,
-            pipelines: AHashMap::new(),
+            pipelines: HashMap::default(),
             pass_graph: None,
             gpu: None,
         }
@@ -203,8 +397,8 @@ impl Scene {
     }
 
     #[inline]
-    pub fn add_canvas(&mut self, handle: u32) -> &mut Self {
-        self.canvases.push(handle);
+    pub fn add_canvas(&mut self, selectors: &str) -> &mut Self {
+        self.canvases.push(selectors.to_owned());
         self
     }
 
@@ -486,7 +680,7 @@ impl Scene {
         geo_buf_size
     }
 
-    /// Validates and determines transforrm matrix buffer view for instancing.
+    /// Validates and determines transformation matrix buffer view for instancing.
     #[inline]
     pub fn get_transform_buffer_view(&mut self) -> View {
         self.hierarchy.validate();
@@ -564,10 +758,9 @@ impl Scene {
 
     // TODO: Improve me and sync with shader.
     /// Builds pass graph and returns old value.
-    pub fn build_pass_graph(&mut self, label: impl Into<RcStr>) -> Option<PassGraph> {
+    pub fn build_pass_graph(&mut self, label: Arc<str>) -> Option<PassGraph> {
         const INVALID: usize = usize::MAX;
-        let label = label.into();
-        let mut pass_graph = PassGraph::new(&label, self.gpu.as_ref().unwrap());
+        let mut pass_graph = PassGraph::new(Arc::clone(&label), self.gpu.as_ref().unwrap());
 
         // Uses only one camera for now.
         let cam_cmd = if let Some(cam) = self.camera_binds.values().next() {
@@ -614,7 +807,7 @@ impl Scene {
         };
 
         // Material binds
-        let mut mat_cmds = AHashMap::new();
+        let mut mat_cmds = HashMap::new();
         for (mat_key, mat_bind) in self.mat_binds.iter() {
             let cmd = SetBindGroupCmd::new(1, Rc::clone(mat_bind));
             let mat_cmd = pass_graph.insert_command(cmd);
@@ -751,7 +944,7 @@ impl<'a> NodeReturn<'a> {
     }
 
     #[inline]
-    pub fn with_entity(self, enti: usize, eid: usize) -> Self {
+    pub fn with_entity(self, eid: EntityId) -> Self {
         let Self {
             recv: scene,
             ret: node_index,
@@ -762,7 +955,7 @@ impl<'a> NodeReturn<'a> {
             .hierarchy
             .get_node_mut(node_index)
             .unwrap()
-            .set_entity(enti, eid);
+            .set_entity(eid);
 
         Self {
             recv: scene,

@@ -1,6 +1,6 @@
 use super::{
     borrow_js::JsAtomic,
-    entity::OwnedEntityKey,
+    entity::EntityKey,
     filter::Filtered,
     query::{
         Query, QueryInfo, QueryKey, QueryMut, ResQuery, ResQueryInfo, ResQueryKey, ResQueryMut,
@@ -9,7 +9,7 @@ use super::{
 };
 use crate::ds::borrow::Borrowed;
 use std::{
-    any::{type_name, TypeId},
+    any::{self, TypeId},
     ptr::NonNull,
     sync::Arc,
 };
@@ -37,7 +37,7 @@ pub trait Request: 'static {
 
     /// If you want to insert or remove entity, you have to make a request for it.
     /// Otherwise, ignore this method.
-    fn entity_write() -> impl IntoIterator<Item = OwnedEntityKey> {
+    fn entity_write() -> impl IntoIterator<Item = EntityKey<'static>> {
         std::iter::empty()
     }
 
@@ -54,7 +54,7 @@ pub trait Request: 'static {
             Arc::clone(info)
         } else {
             let info = Arc::new(RequestInfo {
-                name: type_name::<Self>(),
+                name: any::type_name::<Self>(),
                 read: (
                     <Self::Read as Query>::key(),
                     <Self::Read as Query>::info(info_stor),
@@ -80,6 +80,45 @@ pub trait Request: 'static {
             info
         }
     }
+}
+
+/// Blanket implementation of [`Request`] for tuples of queries.
+impl<R, W, RR, RW> Request for (R, W, RR, RW)
+where
+    R: Query,
+    W: QueryMut,
+    RR: ResQuery,
+    RW: ResQueryMut,
+{
+    type Read = R;
+    type Write = W;
+    type ResRead = RR;
+    type ResWrite = RW;
+}
+
+/// A macro for declaration of an empty structure and implementation [`Request`] for the structure.
+#[macro_export]
+macro_rules! impl_request {
+    (
+        $vis:vis $id:ident
+        $(, Read=( $($read:ty),+ ))?
+        $(, Write=( $($write:ty),+ ))?
+        $(, ResRead=( $($res_read:ty),+ ))?
+        $(, ResWrite=( $($res_write:ty),+ ))?
+    ) => {
+        #[derive(Debug)]
+        $vis struct $id;
+        impl $crate::ecs::request::Request for $id {
+            #[allow(unused_parens)]
+            type Read = ( $( $($read),+ )? );
+            #[allow(unused_parens)]
+            type Write = ( $( $($write),+ )? );
+            #[allow(unused_parens)]
+            type ResRead = ( $( $($res_read),+ )? );
+            #[allow(unused_parens)]
+            type ResWrite = ( $( $($res_write),+ )? );
+        }
+    };
 }
 
 pub trait StoreRequestInfo: StoreQueryInfo {
@@ -109,7 +148,7 @@ pub struct RequestInfo {
     write: (QueryKey, Arc<QueryInfo>),
     res_read: (ResQueryKey, ResQueryInfo),
     res_write: (ResQueryKey, ResQueryInfo),
-    ent_write: Box<[OwnedEntityKey]>,
+    ent_write: Box<[EntityKey<'static>]>,
 }
 
 impl RequestInfo {
@@ -139,16 +178,13 @@ impl RequestInfo {
     }
 
     #[inline]
-    pub fn ent_write(&self) -> &[OwnedEntityKey] {
+    pub fn ent_write(&self) -> &[EntityKey] {
         &self.ent_write
     }
 }
 
-/// An implementation of [`Request`] that requests nothing.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct EmptyRequest;
-
-impl Request for EmptyRequest {
+/// Empty request.
+impl Request for () {
     type Read = ();
     type Write = ();
     type ResRead = ();
@@ -219,12 +255,12 @@ pub struct Response<'a, R: Request> {
 }
 
 impl<'a, R: Request> Response<'a, R> {
-    pub fn new(buf: &'a RequestBuffer) -> Self {
+    pub fn new(buf: &'a mut RequestBuffer) -> Self {
         Self {
             read: <R::Read as Query>::convert(&buf.read),
-            write: <R::Write as QueryMut>::convert(&buf.write),
+            write: <R::Write as QueryMut>::convert(&mut buf.write),
             res_read: <R::ResRead as ResQuery>::convert(&buf.res_read),
-            res_write: <R::ResWrite as ResQueryMut>::convert(&buf.res_write),
+            res_write: <R::ResWrite as ResQueryMut>::convert(&mut buf.res_write),
             ent_write: (), /* TODO */
         }
     }

@@ -1,18 +1,24 @@
 use super::{
     filter::{FilterInfo, FilterKey, StoreFilterInfo},
-    query::{QueryInfo, QueryKey, StoreQueryInfo},
-    request::{
-        EmptyRequest, Request, RequestBuffer, RequestInfo, RequestKey, Response, StoreRequestInfo,
+    query::{
+        Query, QueryInfo, QueryKey, QueryMut, Read, ResQuery, ResQueryMut, ResRead, ResWrite,
+        StoreQueryInfo, Write,
     },
+    request::{Request, RequestBuffer, RequestInfo, RequestKey, Response, StoreRequestInfo},
 };
 use crate::{
-    ds::set_list::{ListPos, SetList},
+    ds::{
+        set_list::{ListPos, SetList},
+        vec::vec_pool::SimpleVecPool,
+    },
     worker::{msg::ChMsg, Channel, WorkerId},
 };
 use std::{
-    any::{type_name, TypeId},
+    any::{self, TypeId},
     collections::HashMap,
     fmt::{Debug, Display},
+    marker::PhantomData,
+    num::NonZeroU32,
     ops::AddAssign,
     ptr::NonNull,
     sync::{
@@ -36,23 +42,11 @@ pub struct SystemPack {
     /// Currently activated systems.
     active: SetList<SystemKey, SystemData>,
 
+    /// Active system's lifetime.
+    lifetime: SystemLifetime,
+
     /// A system position to be run next time, which is an index of [`Self::active`].
     run_pos: usize,
-    // /// Dynamically inserted system to be run.
-    // /// Inserted systems will be run at this time, and unified into [`Self::order`] next time.
-    // add_cur: Vec<(usize, usize)>, // (after, index)
-
-    // /// Dynamically inserted system to be run except running at this time.
-    // /// But these will be unified into [`Self::order`] like [`Self::add_cur`] next time.
-    // add_next: Vec<(usize, usize)>,
-
-    // /// Waiting system data which will be appended at the end of use of [`Self::systems`].
-    // /// So that system addresses won't change during their use.
-    // wait_add: Vec<(SystemKey, SystemData)>,
-
-    // /// Waiting system data which will be removed at the end of use of [`Self::systems`].
-    // /// So that system addresses won't change during their use.
-    // wait_rm: Vec<SystemKey>,
 }
 
 impl SystemPack {
@@ -61,7 +55,7 @@ impl SystemPack {
         S: StoreRequestInfo,
     {
         // `SetList` requires default head node, just makes empty system and puts it in.
-        let mut head_node = EmptySystem.into_data(info_stor);
+        let mut head_node = ().into_data(info_stor);
         head_node.id = SystemId::new(0);
 
         Self {
@@ -69,12 +63,18 @@ impl SystemPack {
             cur_id: SystemId::new(1),
             inactive: HashMap::default(),
             active: SetList::new(head_node),
+            lifetime: SystemLifetime::new(),
             run_pos: 0,
         }
     }
 
     #[inline]
     pub fn contains(&self, skey: &SystemKey) -> bool {
+        self.contains_active(skey) || self.contains_inactive(skey)
+    }
+
+    #[inline]
+    pub fn contains_active(&self, skey: &SystemKey) -> bool {
         self.active.contains_key(skey)
     }
 
@@ -112,45 +112,71 @@ impl SystemPack {
         }
     }
 
+    /// Unregisters system if and only if the system is inactive.
     pub fn unregister_system(&mut self, skey: &SystemKey) -> Option<SystemData> {
         // Restricts operations during running for now.
         // Do we need a deferred operation?
         assert_eq!(0, self.run_pos);
 
-        let old = self.inactive.remove(skey);
-        if old.is_some() {
-            old
-        } else {
-            self.active.remove(skey)
-        }
+        self.inactive.remove(skey)
     }
 
     /// Returns true if the system was successfully activated.
-    pub fn activate_system(&mut self, skey: &SystemKey, after: &SystemKey) -> bool {
+    pub fn activate_system(
+        &mut self,
+        target: &SystemKey,
+        after: &SystemKey,
+        live: NonZeroU32,
+    ) -> bool {
         // Restricts operations during running for now.
         // Do we need a deferred operation?
         assert_eq!(0, self.run_pos);
 
-        if !self.active.contains_key(after) {
-            return false;
+        if self.active.contains_key(after) {
+            if let Some((target, sdata)) = self.inactive.remove_entry(target) {
+                if self.active.insert(target, sdata, after) {
+                    self.lifetime.register(target, live);
+                    return true;
+                }
+            }
         }
-
-        if let Some((skey, sdata)) = self.inactive.remove_entry(skey) {
-            self.active.insert(skey, sdata, after)
-        } else {
-            false
-        }
+        false
     }
 
-    pub fn activate_system_as_first(&mut self, skey: &SystemKey) -> bool {
+    pub fn activate_system_as_first(&mut self, target: &SystemKey, live: NonZeroU32) -> bool {
         // Restricts operations during running for now.
         // Do we need a deferred operation?
         assert_eq!(0, self.run_pos);
 
-        if let Some((skey, sdata)) = self.inactive.remove_entry(skey) {
-            self.active.push_front(skey, sdata)
-        } else {
-            false
+        if let Some((target, sdata)) = self.inactive.remove_entry(target) {
+            if self.active.push_front(target, sdata) {
+                self.lifetime.register(target, live);
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn activate_system_as_last(&mut self, target: &SystemKey, live: NonZeroU32) -> bool {
+        // Restricts operations during running for now.
+        // Do we need a deferred operation?
+        assert_eq!(0, self.run_pos);
+
+        if let Some((target, sdata)) = self.inactive.remove_entry(target) {
+            if self.active.push_back(target, sdata) {
+                self.lifetime.register(target, live);
+                return true;
+            }
+        }
+        false
+    }
+
+    pub(crate) fn tick(&mut self) {
+        if let Some(dead_systems) = self.lifetime.tick() {
+            while let Some(skey) = dead_systems.pop() {
+                let sdata = self.active.remove(&skey).unwrap();
+                self.inactive.insert(skey, sdata);
+            }
         }
     }
 
@@ -160,13 +186,58 @@ impl SystemPack {
     }
 
     #[inline]
-    pub(crate) unsafe fn iter_next_mut(&mut self, cur: ListPos) -> Option<(ListPos, &mut SystemData)> {
+    pub(crate) unsafe fn iter_next_mut(
+        &mut self,
+        cur: ListPos,
+    ) -> Option<(ListPos, &mut SystemData)> {
         self.active.get_next_unchecked_mut(cur)
     }
 
     #[inline]
     pub(crate) fn iter_begin(&self) -> ListPos {
         self.active.get_first_position()
+    }
+}
+
+#[derive(Debug)]
+struct SystemLifetime {
+    /// Monotonically increasing counter.
+    tick: u32,
+
+    /// `tick` -> `pool` index.
+    lives: HashMap<u32, usize, ahash::RandomState>,
+
+    /// Vector contains [`SystemKey`]s to be dead at a specific tick.
+    pool: SimpleVecPool<SystemKey>,
+}
+
+impl SystemLifetime {
+    fn new() -> Self {
+        Self {
+            tick: 0,
+            lives: HashMap::default(),
+            pool: SimpleVecPool::new(),
+        }
+    }
+
+    fn register(&mut self, skey: SystemKey, live: NonZeroU32) {
+        let end = self.tick.saturating_add(live.get());
+        let index = if let Some(index) = self.lives.get(&end) {
+            *index
+        } else {
+            let index = self.pool.request();
+            self.lives.insert(end, index);
+            index
+        };
+        let vec = self.pool.get(index);
+        vec.push(skey);
+    }
+
+    fn tick(&mut self) -> Option<&mut Vec<SystemKey>> {
+        self.tick += 1;
+        self.lives
+            .remove(&self.tick)
+            .map(|index| self.pool.get_release(index))
     }
 }
 
@@ -185,7 +256,7 @@ pub trait System: 'static + Sized {
     {
         SystemData {
             id: SystemId::dummy(), // id will be overwritten.
-            name: type_name::<Self>(),
+            name: any::type_name::<Self>(),
             invokable: Box::new(self),
             req: Box::new((
                 <Self::Req as Request>::key(),
@@ -307,24 +378,22 @@ impl Debug for SystemData {
     }
 }
 
-/// An implementation of [`System`] that does nothing.
-pub(crate) struct EmptySystem;
-
-impl System for EmptySystem {
-    type Req = EmptyRequest;
+/// Empty system.
+impl System for () {
+    type Req = ();
     fn run(&mut self, _resp: Response<Self::Req>) {}
 }
 
 /// Object safe trait for the [`System`].
 pub trait Invokable {
-    fn invoke(&mut self, buf: &RequestBuffer);
+    fn invoke(&mut self, buf: &mut RequestBuffer);
     fn skey(&self) -> SystemKey;
     fn rkey(&self) -> RequestKey;
 }
 
 impl<S: System> Invokable for S {
     #[inline]
-    fn invoke(&mut self, buf: &RequestBuffer) {
+    fn invoke(&mut self, buf: &mut RequestBuffer) {
         let resp = Response::new(buf);
         self.run(resp);
     }
@@ -454,4 +523,183 @@ impl StoreFilterInfo for SharedInfo {
     fn remove(&mut self, key: &FilterKey) -> Option<Arc<FilterInfo>> {
         self.finfo.remove(key)
     }
+}
+
+/// This structure helps a function implements [`System`].
+/// Because we can't use blanket impl for the `System`, due to confliction to other impls,
+/// We put this helper between function and `System`.
+/// That means a function can become `FnSystem` which implements `System`.
+pub struct FnSystem<Req, F> {
+    run: F,
+    _marker: PhantomData<Req>,
+}
+
+/// Placeholder for the [`FnSystem`]'s generic parameter.
+/// This helps us avoid impl confliction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Ph;
+
+#[rustfmt::skip]
+mod impl_for_fn_system {
+    use super::*;
+
+    macro_rules! _impl {
+        (
+            $req_with_placeholder:ty,
+            $req_with_tuple:ty
+            $(, r=$r:ident)?
+            $(, w=$w:ident)?
+            $(, rr=$rr:ident)?
+            $(, rw=$rw:ident)?
+        ) => {
+            impl<F $(, $r)? $(, $w)? $(, $rr)? $(, $rw)?> From<F>
+                for FnSystem<$req_with_placeholder, F>
+            where
+                F: FnMut(
+                    $(Read<$r>,)?
+                    $(Write<$w>,)?
+                    $(ResRead<$rr>,)?
+                    $(ResWrite<$rw>,)?
+                ),
+                $($r: Query,)?
+                $($w: QueryMut,)?
+                $($rr: ResQuery,)?
+                $($rw: ResQueryMut,)?
+            {
+                #[inline]
+                fn from(value: F) -> Self {
+                    Self {
+                        run: value,
+                        _marker: PhantomData,
+                    }
+                }
+            }
+
+            impl<F $(, $r)? $(, $w)? $(, $rr)? $(, $rw)?> From<F>
+                for StructOrFnSystem<(), $req_with_placeholder, F>
+            where
+                F: FnMut(
+                    $(Read<$r>,)?
+                    $(Write<$w>,)?
+                    $(ResRead<$rr>,)?
+                    $(ResWrite<$rw>,)?
+                ),
+                $($r: Query,)?
+                $($w: QueryMut,)?
+                $($rr: ResQuery,)?
+                $($rw: ResQueryMut,)?
+            {
+                #[inline]
+                fn from(value: F) -> Self {
+                    Self::Fn(value.into())
+                }
+            }
+
+            impl<F $(, $r)? $(, $w)? $(, $rr)? $(, $rw)?> System
+                for FnSystem<$req_with_placeholder, F>
+            where
+                F: FnMut(
+                    $(Read<$r>,)?
+                    $(Write<$w>,)?
+                    $(ResRead<$rr>,)?
+                    $(ResWrite<$rw>,)?
+                ) + 'static,
+                $($r: Query,)?
+                $($w: QueryMut,)?
+                $($rr: ResQuery,)?
+                $($rw: ResQueryMut,)?
+            {
+                type Req = $req_with_tuple;
+
+                #[inline]
+                fn run(&mut self, resp: Response<Self::Req>) {
+                    (self.run)(
+                        $(Read::<$r>(resp.read),)?
+                        $(Write::<$w>(resp.write),)?
+                        $(ResRead::<$rr>(resp.res_read),)?
+                        $(ResWrite::<$rw>(resp.res_write),)?
+                    )
+                }
+            }
+
+            impl<F $(, $r)? $(, $w)? $(, $rr)? $(, $rw)?> AsFnSystemKey<$req_with_placeholder>
+                for F
+            where
+                F: FnMut(
+                    $(Read<$r>,)?
+                    $(Write<$w>,)?
+                    $(ResRead<$rr>,)?
+                    $(ResWrite<$rw>,)?
+                ) + 'static,
+                $($r: Query,)?
+                $($w: QueryMut,)?
+                $($rr: ResQuery,)?
+                $($rw: ResQueryMut,)?
+            {
+                #[inline]
+                fn key(self) -> SystemKey {
+                    let sys: FnSystem<_, _> = self.into();
+                    sys.skey()
+                }
+            }
+        };
+    }
+
+    // NOTE: read-only is disabled for now.
+
+    // _impl!((Ph, Ph, Ph, Ph), ((), (), (), ()));
+    _impl!((Ph, Ph, Ph, RW), ((), (), (), RW), rw=RW);
+    // _impl!((Ph, Ph, RR, Ph), ((), (), RR, ()), rr=RR);
+    _impl!((Ph, Ph, RR, RW), ((), (), RR, RW), rr=RR, rw=RW);
+
+    _impl!((Ph, W, Ph, Ph),  ((), W, (), ()),  w=W);
+    _impl!((Ph, W, Ph, RW),  ((), W, (), RW),  w=W, rw=RW);
+    _impl!((Ph, W, RR, Ph),  ((), W, RR, ()),  w=W, rr=RR);
+    _impl!((Ph, W, RR, RW),  ((), W, RR, RW),  w=W, rr=RR, rw=RW);
+
+    // _impl!((R, Ph, Ph, Ph),  (R, (), (), ()),  r=R);
+    _impl!((R, Ph, Ph, RW),  (R, (), (), RW),  r=R, rw=RW);
+    // _impl!((R, Ph, RR, Ph),  (R, (), RR, ()),  r=R, rr=RR);
+    _impl!((R, Ph, RR, RW),  (R, (), RR, RW),  r=R, rr=RR, rw=RW);
+
+    _impl!((R, W, Ph, Ph),   (R, W, (), ()),   r=R, w=W);
+    _impl!((R, W, Ph, RW),   (R, W, (), RW),   r=R, w=W, rw=RW);
+    _impl!((R, W, RR, Ph),   (R, W, RR, ()),   r=R, w=W, rr=RR);
+    _impl!((R, W, RR, RW),   (R, W, RR, RW),   r=R, w=W, rr=RR, rw=RW);
+}
+
+/// Dummy implementation of the [`System`].
+/// This is used for [`StructOrFnSystem`] because it needs default generics for [`FnSystem`].
+impl System for FnSystem<(), fn()> {
+    type Req = ();
+    fn run(&mut self, _resp: Response<Self::Req>) {
+        unreachable!();
+    }
+}
+
+pub enum StructOrFnSystem<S, Req, F> {
+    Struct(S),
+    Fn(FnSystem<Req, F>),
+}
+
+impl<S: System> From<S> for StructOrFnSystem<S, (), fn()> {
+    #[inline]
+    fn from(value: S) -> Self {
+        Self::Struct(value)
+    }
+}
+
+impl<Req, F> From<FnSystem<Req, F>> for StructOrFnSystem<(), Req, F> {
+    #[inline]
+    fn from(value: FnSystem<Req, F>) -> Self {
+        Self::Fn(value)
+    }
+}
+
+/// Functions that implements [`FnSystem`] can generate [`SystemKey`] from it.
+/// However, that requires call to [`From::from`] to become `FnSystem` from a function.
+/// This trait makes you avoid to write boilerplate code like above.
+/// You can get a `SystemKey` from a function directly using this trait.
+pub trait AsFnSystemKey<M> {
+    fn key(self) -> SystemKey;
 }

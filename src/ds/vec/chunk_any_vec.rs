@@ -181,7 +181,7 @@ impl ChunkAnyVec {
     /// # Safety
     ///
     /// `ptr` must point to valid data type.
-    pub unsafe fn push_raw(&mut self, ptr: *const u8) {
+    pub unsafe fn push_raw(&mut self, ptr: NonNull<u8>) {
         self.reserve(1);
 
         let (ci, _) = self.index_2d(self.len());
@@ -192,11 +192,14 @@ impl ChunkAnyVec {
     }
 
     #[inline]
-    pub fn push<T: 'static>(&mut self, value: T) {
+    pub fn push<T: 'static>(&mut self, mut value: T) {
         debug_assert!(self.is_type_of(&TypeId::of::<T>()));
 
         // Safety:: Infallible.
-        unsafe { self.push_raw(&value as *const T as *const u8) }
+        unsafe {
+            let ptr = NonNull::new_unchecked(&mut value as *mut T as *mut u8);
+            self.push_raw(ptr);
+        }
         mem::forget(value);
     }
 
@@ -205,7 +208,7 @@ impl ChunkAnyVec {
     /// - `index` must be in bound.
     /// - `ptr` must point to valid data type.
     #[inline]
-    pub unsafe fn update_unchecked(&mut self, index: usize, ptr: *const u8) {
+    pub unsafe fn update_unchecked(&mut self, index: usize, ptr: NonNull<u8>) {
         let (ci, ii) = self.index_2d(index);
         self.chunks[ci].update_unchecked(ii, ptr);
     }

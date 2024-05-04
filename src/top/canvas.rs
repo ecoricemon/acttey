@@ -1,9 +1,14 @@
-use super::AppError;
+use super::{
+    event::{EventType, EVENT_TYPE_NUM},
+    AppError,
+};
 use crate::{
-    render::canvas::OffCanvas,
-    util::{string::RcStr, web},
+    ds::vec::OptVec,
+    render::canvas::{CanvasHandle, OffCanvas},
+    util::web,
 };
 use std::{
+    any::Any,
     collections::HashMap,
     hash::{Hash, Hasher},
     ops::Deref,
@@ -14,30 +19,33 @@ use wasm_bindgen::prelude::*;
 #[derive(Debug)]
 pub struct CanvasPack {
     /// Handle to canvas.
-    handle_to_canvas: HashMap<u32, Rc<Canvas>>,
+    handle_to_canvas: HashMap<CanvasHandle, Rc<Canvas>, ahash::RandomState>,
 
     /// Selectors to handle.
-    selectors_to_handle: HashMap<RcStr, u32>,
+    selectors_to_handle: HashMap<String, CanvasHandle, ahash::RandomState>,
 
     /// Monotonically increasing handle number.
-    cur_handle: u32,
+    cur_handle: CanvasHandle,
+
+    /// Each canvas has integer handle and that is used as an index of this field.
+    proxies: OptVec<[Option<Box<dyn Any>>; EVENT_TYPE_NUM]>,
 }
 
 impl CanvasPack {
-    const HANDLE_DUMMY: u32 = u32::MAX - 1;
+    pub const DUMMY_SELECTORS: &'static str = "#acttey-dummy-canvas";
 
     pub fn new() -> Self {
         let mut pack = Self {
-            handle_to_canvas: HashMap::new(),
-            selectors_to_handle: HashMap::new(),
-            cur_handle: Self::HANDLE_DUMMY,
+            handle_to_canvas: HashMap::default(),
+            selectors_to_handle: HashMap::default(),
+            cur_handle: CanvasHandle::dummy_handle(),
+            proxies: OptVec::new(),
         };
 
         // Creates dummy canvas to make compatible wgpu::Adapter.
         // TODO: dummy canvas is used for generating surface compatible wgpu adapter.
         // is it really working as expected?
         let dummy_id = "acttey-dummy-canvas";
-        let dummy_selectors = "#acttey-dummy-canvas";
         let dummy_canvas: web_sys::HtmlCanvasElement =
             web::create_element("canvas").expect_throw(crate::errmsg::WEBSYS_ADD_ELEMENT);
         web::set_attributes(
@@ -47,43 +55,43 @@ impl CanvasPack {
         .unwrap();
 
         // Adds dummy canvas.
-        pack.insert(RcStr::new(dummy_selectors)).unwrap();
+        pack.insert(Self::DUMMY_SELECTORS).unwrap();
 
         // Handle starts from 1.
-        pack.cur_handle = 1;
+        pack.cur_handle = CanvasHandle::window_handle() + 1;
 
         pack
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (u32, &Rc<Canvas>)> {
+    pub fn iter(&self) -> impl Iterator<Item = (CanvasHandle, &Rc<Canvas>)> {
         self.handle_to_canvas
             .iter()
             .map(|(handle, canvas)| (*handle, canvas))
     }
 
-    pub fn handles(&self) -> impl Iterator<Item = u32> + '_ {
+    #[inline]
+    pub fn handles(&self) -> impl Iterator<Item = CanvasHandle> + '_ {
         self.handle_to_canvas.keys().cloned()
     }
 
+    #[inline]
     pub fn values(&self) -> impl Iterator<Item = &Rc<Canvas>> {
         self.handle_to_canvas.values()
     }
 
     /// Adds the canvas selected by the given `selectors`.
-    pub fn insert(&mut self, selectors: impl Into<RcStr>) -> Result<Rc<Canvas>, AppError> {
-        fn _insert(pack: &mut CanvasPack, selectors: RcStr) -> Result<Rc<Canvas>, AppError> {
-            let canvas = Rc::new(Canvas::new(selectors.as_ref(), pack.cur_handle)?);
-            if let Some(orphan_handle) = pack.selectors_to_handle.insert(selectors, pack.cur_handle)
-            {
-                pack.handle_to_canvas.remove(&orphan_handle);
-            }
-            pack.handle_to_canvas
-                .insert(pack.cur_handle, Rc::clone(&canvas));
-            pack.cur_handle += 1;
-            Ok(canvas)
+    pub fn insert(&mut self, selectors: &str) -> Result<Rc<Canvas>, AppError> {
+        let canvas = Rc::new(Canvas::new(selectors.as_ref(), self.cur_handle)?);
+        if let Some(orphan_handle) = self
+            .selectors_to_handle
+            .insert(selectors.to_owned(), self.cur_handle)
+        {
+            self.handle_to_canvas.remove(&orphan_handle);
         }
-
-        _insert(self, selectors.into())
+        self.handle_to_canvas
+            .insert(self.cur_handle, Rc::clone(&canvas));
+        self.cur_handle += 1;
+        Ok(canvas)
     }
 
     pub fn get_by_selectors(&self, selectors: &str) -> Option<&Rc<Canvas>> {
@@ -94,20 +102,23 @@ impl CanvasPack {
         }
     }
 
-    pub fn get_by_handle(&self, handle: &u32) -> Option<&Rc<Canvas>> {
+    #[inline]
+    pub fn get_by_handle(&self, handle: &CanvasHandle) -> Option<&Rc<Canvas>> {
         self.handle_to_canvas.get(handle)
     }
 
+    #[inline]
     pub fn get_dummy(&self) -> &Rc<Canvas> {
-        self.get_by_handle(&Self::HANDLE_DUMMY).unwrap()
+        self.get_by_handle(&CanvasHandle::dummy_handle()).unwrap()
     }
 
-    pub fn selectors_to_handle(&self, selectors: &str) -> Option<u32> {
+    #[inline]
+    pub fn selectors_to_handle(&self, selectors: &str) -> Option<CanvasHandle> {
         self.selectors_to_handle.get(selectors).cloned()
     }
 
     /// Time complexity: O(n)
-    pub fn handle_to_selectors(&self, handle: u32) -> Option<&str> {
+    pub fn handle_to_selectors(&self, handle: CanvasHandle) -> Option<&str> {
         self.selectors_to_handle
             .iter()
             .find_map(|(selectors, &this_handle)| {
@@ -115,11 +126,13 @@ impl CanvasPack {
             })
     }
 
+    #[inline]
     pub fn contains_selectors(&self, selectors: &str) -> bool {
         self.get_by_selectors(selectors).is_some()
     }
 
-    pub fn contains_handle(&self, handle: &u32) -> bool {
+    #[inline]
+    pub fn contains_handle(&self, handle: &CanvasHandle) -> bool {
         self.get_by_handle(handle).is_some()
     }
 
@@ -129,7 +142,7 @@ impl CanvasPack {
             .handle_to_canvas
             .iter()
             .filter_map(|(&handle, canvas)| {
-                (handle != Self::HANDLE_DUMMY && Rc::strong_count(canvas) == 1).then_some(handle)
+                (!handle.is_dummy_handle() && Rc::strong_count(canvas) == 1).then_some(handle)
             })
             .collect::<Vec<_>>();
         let removed = unused.len();
@@ -137,6 +150,20 @@ impl CanvasPack {
             self.handle_to_canvas.remove(&handle);
         }
         removed
+    }
+
+    pub fn register_proxy(&mut self, handle: CanvasHandle, event: EventType, proxy: Box<dyn Any>) {
+        let idx = handle.into_inner() as usize;
+        let ev_idx = event as isize as usize;
+        if self.proxies.len() <= idx {
+            let mut value = [None, None, None, None];
+            value[ev_idx] = Some(proxy);
+            self.proxies.extend_set(idx, value);
+        } else {
+            // Safety: `idx` has been checked.
+            let value = unsafe { self.proxies.get_unchecked_mut(idx) };
+            value[ev_idx] = Some(proxy);
+        }
     }
 }
 
@@ -153,22 +180,23 @@ pub struct Canvas {
 
     // ref: https://docs.rs/raw-window-handle/0.5.0/raw_window_handle/struct.WebWindowHandle.html
     /// Integer handle. This is automatically inserted as an element attribute.
-    handle: u32,
+    handle: CanvasHandle,
 }
 
 impl Canvas {
     /// # Panics
     ///
     /// Panics `handle` is zero, which is reserved for window itself.
-    pub fn new(selectors: &str, handle: u32) -> Result<Self, AppError> {
+    pub fn new(selectors: &str, handle: CanvasHandle) -> Result<Self, AppError> {
         assert!(handle > 0);
 
         // In the past, we've inerted `data-raw-handle` to the element for wgpu Surface.
         // But now, we insert `data-acttey-handle` for our identifying.
         let element = Self::get_canvas_element(selectors)?;
-        if web::has_attribute(&element, "data-handle") {
+        if web::has_attribute(&element, "data-acttey-handle") {
             return Err(AppError::DoubleCanvasCreation(selectors.to_owned()));
         }
+
         web::set_attributes(
             &element,
             [("data-acttey-handle", handle.to_string().as_str())].into_iter(),
@@ -200,13 +228,18 @@ impl Canvas {
     }
 
     #[inline]
-    pub fn handle(&self) -> u32 {
+    pub fn handle(&self) -> CanvasHandle {
         self.handle
     }
 
     #[inline]
     pub fn is_dummy(&self) -> bool {
-        self.handle == CanvasPack::HANDLE_DUMMY
+        self.handle.is_dummy_handle()
+    }
+
+    #[inline]
+    pub fn is_window(&self) -> bool {
+        self.handle.is_window_handle()
     }
 
     pub fn transfer_control_to_offscreen(&self) -> Result<OffCanvas, AppError> {

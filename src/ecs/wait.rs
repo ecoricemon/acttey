@@ -1,9 +1,9 @@
 use super::{component::ComponentKey, resource::ResourceKey};
 use crate::{
     ds::{generational::GenQueue, vec::OptVec},
-    util::string::ArcStr,
+    top::canvas::CanvasPack,
 };
-use std::{fmt::Debug, ops::Deref};
+use std::{fmt::Debug, ops::Deref, sync::Arc};
 
 /// A structure containing [`WaitQueue`]s for each component, resource, and entity.
 /// Their indices are the same with the ones from the data containers.
@@ -29,10 +29,10 @@ impl WaitQueuePack {
             .iter_occupied()
             .flat_map(|(_, cols)| cols.iter_occupied())
             .all(|(_, col)| col.is_empty())
-            &&
-        self.res_queues
-            .iter_occupied()
-            .all(|(_, col)| col.is_empty())
+            && self
+                .res_queues
+                .iter_occupied()
+                .all(|(_, col)| col.is_empty())
     }
 
     /// Makes wait queues for an entity.
@@ -40,28 +40,17 @@ impl WaitQueuePack {
     /// Also, it makes inner queues for components of the entity as much as `ncol`.
     /// If there was a queue at the position, it will be dropped first.
     pub fn init_entity_queue(&mut self, enti: usize, ncol: usize) {
-        // Makes sure that this `ent_queues` has vacant slot at `enti`.
-        while self.ent_queues.len() < (enti + 1) {
-            self.ent_queues.push(None);
-        }
-        self.ent_queues.take(enti);
-
         // Prepares wait queues for columns.
         let mut cols = OptVec::new();
         for _ in 0..ncol {
             cols.push(Some(WaitQueue::new()));
         }
-
-        self.ent_queues.set(enti, Some(cols));
+        self.ent_queues.extend_set(enti, cols);
     }
 
+    #[inline]
     pub fn init_resource_queue(&mut self, index: usize) {
-        // Makes sure that this `res_queues` has vacant slot at `index`.
-        while self.res_queues.len() < (index + 1) {
-            self.res_queues.push(None);
-        }
-        self.res_queues.take(index);
-        self.res_queues.set(index, Some(WaitQueue::new()));
+        self.res_queues.extend_set(index, WaitQueue::new());
     }
 
     pub(super) fn enqueue(&mut self, wait: &mut WaitRequest) -> bool {
@@ -301,7 +290,7 @@ impl Deref for WaitQueue {
 pub enum WaitNotifyType {
     Comp(ComponentKey),
     Res(ResourceKey),
-    Ent(ArcStr),
+    Ent(Arc<str>),
 }
 
 /// Read or write

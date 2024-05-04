@@ -1,7 +1,10 @@
 use super::WorkerId;
-use crate::ecs::{
-    request::{RequestBuffer, RequestKey},
-    system::Invokable,
+use crate::{
+    ecs::{
+        request::{RequestBuffer, RequestKey},
+        system::Invokable,
+    },
+    render::canvas::CanvasHandle,
 };
 use std::{fmt::Debug, mem, ptr::NonNull, thread::Thread};
 use wasm_bindgen::{JsCast, JsValue};
@@ -48,8 +51,8 @@ impl MsgEventHeader {
     pub const MOUSE_MOVE_INNER: u64 = Self::MOUSE | 1;
     pub const MOUSE_MOVE: Self = Self(Self::MOUSE_MOVE_INNER);
 
-    pub const MOUSE_CLICK_INNER: u64 = Self::MOUSE_MOVE_INNER + 1;
-    pub const MOUSE_CLICK: Self = Self(Self::MOUSE_CLICK_INNER);
+    pub const CLICK_INNER: u64 = Self::MOUSE_MOVE_INNER + 1;
+    pub const CLICK: Self = Self(Self::CLICK_INNER);
 
     #[inline]
     pub fn into_js_value(self) -> JsValue {
@@ -80,7 +83,6 @@ impl MsgEventInit {
     /// Returns minimum length of [`js_sys::Array`] for this message.
     #[inline]
     const fn message_array_len() -> u32 {
-        // 3
         MsgEventCanvas::message_array_len()
     }
 
@@ -108,7 +110,9 @@ impl MsgEventInit {
 #[derive(Debug, Clone)]
 pub struct MsgEventCanvas {
     pub element: web_sys::OffscreenCanvas,
-    pub handle: u32,
+    pub handle: CanvasHandle,
+    pub selectors: String,
+    pub scale: f64,
 }
 
 impl MsgEventCanvas {
@@ -117,8 +121,9 @@ impl MsgEventCanvas {
     /// Returns minimum length of [`js_sys::Array`] for this message.
     #[inline]
     const fn message_array_len() -> u32 {
-        // 3
-        HEADER_LEN as u32 + 2
+        // 5
+        const NUM_OF_FIELDS: u32 = 4;
+        HEADER_LEN as u32 + NUM_OF_FIELDS
     }
 
     pub fn post_to(self, worker: &web_sys::Worker) {
@@ -135,7 +140,12 @@ impl MsgEventCanvas {
 
     fn write_body(self, buf: &js_sys::Array) -> js_sys::Array {
         buf.set(1, JsValue::from(self.element.clone()));
-        buf.set(2, JsValue::from_f64(f64::from_bits(self.handle as u64)));
+        buf.set(
+            2,
+            JsValue::from_f64(f64::from_bits(self.handle.into_inner() as u64)),
+        );
+        buf.set(3, JsValue::from_str(&self.selectors));
+        buf.set(4, JsValue::from_f64(self.scale));
         let tr = js_sys::Array::new_with_length(1);
         tr.set(0, JsValue::from(self.element));
         tr
@@ -151,7 +161,9 @@ impl MsgEventCanvas {
     fn _read_body(buf: &js_sys::Array) -> Self {
         Self {
             element: buf.get(1).unchecked_into(),
-            handle: buf.get(2).unchecked_into_f64().to_bits() as u32,
+            handle: CanvasHandle::new(buf.get(2).unchecked_into_f64().to_bits() as u32),
+            selectors: buf.get(3).as_string().unwrap(),
+            scale: buf.get(4).unchecked_into_f64(),
         }
     }
 }
@@ -309,7 +321,7 @@ impl MsgEventWindowScale {
 /// Message for sending current canvas size according to window resize event.
 #[derive(Debug, Clone, Copy)]
 pub struct MsgEventCanvasResize {
-    pub handle: u32,
+    pub handle: CanvasHandle,
     pub width: i16,
     pub height: i16,
 }
@@ -382,7 +394,8 @@ impl MsgEventCanvasResize {
 /// Message for other mouse messages.
 /// Field types may shrink compared to types in [`web_sys::MouseEvent`].
 #[derive(Debug, Clone, Copy)]
-struct MsgEventMouse {
+pub struct MsgEventMouse {
+    pub handle: CanvasHandle,
     pub button: i8,
     pub client_x: i16,
     pub client_y: i16,
@@ -442,7 +455,7 @@ impl MsgEventMouse {
 /// Message for seding mouse move event to main worker.
 /// This structure is a wrapper of common mouse message [`MsgEventMouse`].
 #[derive(Debug, Clone, Copy)]
-pub struct MsgEventMouseMove(MsgEventMouse);
+pub struct MsgEventMouseMove(pub MsgEventMouse);
 
 impl MsgEventMouseMove {
     const HEADER: MsgEventHeader = MsgEventHeader::MOUSE_MOVE;
@@ -493,10 +506,10 @@ impl MsgEventMouseMove {
 /// Message for sending mouse click event to main worker.
 /// This structure is a wrapper of common mouse message [`MsgEventMouse`].
 #[derive(Debug, Clone, Copy)]
-pub struct MsgEventMouseClick(MsgEventMouse);
+pub struct MsgEventClick(pub MsgEventMouse);
 
-impl MsgEventMouseClick {
-    const HEADER: MsgEventHeader = MsgEventHeader::MOUSE_CLICK;
+impl MsgEventClick {
+    const HEADER: MsgEventHeader = MsgEventHeader::CLICK;
 
     pub fn create_buffer() -> js_sys::Array {
         let buf = js_sys::Array::new_with_length(Self::message_array_len());

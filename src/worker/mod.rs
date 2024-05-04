@@ -8,9 +8,9 @@ use std::{
     ops::AddAssign,
     pin::Pin,
     sync::{
+        atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, RecvError, SendError, Sender, TryRecvError},
         Arc,
-        atomic::{AtomicBool, Ordering},
     },
     thread::{self, Thread},
 };
@@ -200,9 +200,10 @@ impl Worker {
         self.callback = callback;
     }
 
-    // Dev note. RAII doen't look good because schedule() becomes to need additional buffer.
     /// Wakes this worker up and enters channel message loop.
     /// Don't forget to call [`Self::close`].
+    //
+    // NOTE: RAII doen't look good because schedule() becomes to need additional buffer.
     pub fn open(&self) {
         let ch_ptr = self.ch.as_ref().get_ref() as *const Channel;
         self.handle_js.post_message(&JsValue::from(ch_ptr)).unwrap();

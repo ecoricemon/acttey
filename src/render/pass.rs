@@ -9,9 +9,8 @@ use crate::{
         canvas::{Surface, SurfacePack, SurfacePackBuffer},
         Gpu, RenderError,
     },
-    util::string::RcStr,
 };
-use std::{num::NonZeroU64, ops::Range, rc::Rc};
+use std::{num::NonZeroU64, ops::Range, rc::Rc, sync::Arc};
 
 /// Directed acyclic graph representing pass command dependency.
 /// Direction here means `From` command *requires* `To` command to be executed beforehand.
@@ -21,7 +20,7 @@ pub struct PassGraph {
 
     /// Common label.
     /// Pass label is formatted like `label_0`.
-    label: RcStr,
+    label: Arc<str>,
 
     /// Pass descriptors, which determines types of passes.
     /// Passes are executed in this order.
@@ -35,10 +34,10 @@ pub struct PassGraph {
 }
 
 impl PassGraph {
-    pub fn new(label: impl Into<RcStr>, gpu: &Rc<Gpu>) -> Self {
+    pub fn new(label: Arc<str>, gpu: &Rc<Gpu>) -> Self {
         Self {
             gpu: Rc::clone(gpu),
-            label: label.into(),
+            label,
             descs: Vec::new(),
             graph: DirectedGraph::new(),
             dirty: false,
@@ -143,7 +142,7 @@ impl PassGraph {
     ) {
         if !visit[index] {
             visit[index] = true;
-            for dep_index in self.graph.iter_outbounds(index) {
+            for dep_index in self.graph.iter_outbound(index) {
                 self.execute_node(render_pass, dep_index, visit);
             }
             self.graph[index].execute(render_pass);
@@ -175,7 +174,7 @@ impl_from_for_enum!(PassDesc, Compute, ComputePassDesc);
 #[derive(Debug, Clone)]
 pub struct RenderPassDesc {
     /// Pass label.
-    label: RcStr,
+    label: Arc<str>,
 
     /// Optional index pointing to [`SurfacePack`] for generating color attachments.
     sp_index: Option<GenIndexRc>,
@@ -187,9 +186,9 @@ pub struct RenderPassDesc {
 }
 
 impl RenderPassDesc {
-    pub fn new(label: impl Into<RcStr>, surface_pack_index: Option<GenIndexRc>) -> Self {
+    pub const fn new(label: Arc<str>, surface_pack_index: Option<GenIndexRc>) -> Self {
         Self {
-            label: label.into(),
+            label,
             sp_index: surface_pack_index,
             nodes: Vec::new(),
         }

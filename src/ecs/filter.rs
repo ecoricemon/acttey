@@ -15,6 +15,30 @@ use std::{
     sync::Arc,
 };
 
+#[macro_export]
+macro_rules! impl_filter {
+    (
+        $vis:vis $id:ident
+        $(, Target=( $($target:ty),+ ))?
+        $(, All=( $($all:ty),+ ))?
+        $(, Any=( $($any:ty),+ ))?
+        $(, None=( $($none:ty),+ ))?
+    ) => {
+        #[derive(Debug)]
+        $vis struct $id;
+        impl $crate::ecs::filter::Filter for $id {
+            #[allow(unused_parens)]
+            type Target = ( $( $($target),+ )? );
+            #[allow(unused_parens)]
+            type All = ( $( $($all),+ )? );
+            #[allow(unused_parens)]
+            type Any = ( $( $($any),+ )? );
+            #[allow(unused_parens)]
+            type None = ( $( $($none),+ )? );
+        }
+    };
+}
+
 /// A filter to select slices of `Component`.
 /// You should fill out this form of filter.
 ///
@@ -157,7 +181,7 @@ pub trait Identify {
 #[macro_export]
 macro_rules! impl_identify {
     (0) => {const _: () = {
-        use $crate::acttey::ecs::filter::Identify;
+        use $crate::ecs::filter::Identify;
         use std::any::TypeId;
 
         impl Identify for () {
@@ -170,7 +194,7 @@ macro_rules! impl_identify {
         }
     };};
     (1, $id:ident) => {const _: () = {
-        use $crate::acttey::ecs::{component::Component, filter::Identify};
+        use $crate::ecs::{component::Component, filter::Identify};
         use std::any::TypeId;
 
         impl<$id: Component> Identify for $id {
@@ -183,7 +207,7 @@ macro_rules! impl_identify {
         }
     };};
     ($n:expr, $($id:ident),+) => {const _: () = {
-        use $crate::acttey::ecs::{component::Component, filter::Identify};
+        use $crate::ecs::{component::Component, filter::Identify};
         use std::any::TypeId;
 
         impl<$($id: Component),+> Identify for ( $($id),+ ) {
@@ -260,6 +284,11 @@ impl Filtered {
     #[inline]
     pub fn query_res(&self) -> &Vec<Borrowed<RawGetter, JsAtomic>> {
         &self.query_res
+    }
+
+    #[inline]
+    pub fn query_res_mut(&mut self) -> &mut Vec<Borrowed<RawGetter, JsAtomic>> {
+        &mut self.query_res
     }
 
     /// Retrieve an iterator that traverses over entity and column index pair.
@@ -345,6 +374,13 @@ impl<'a, T> Iterator for FilteredIter<'a, T> {
     }
 }
 
+impl<'a, T> ExactSizeIterator for FilteredIter<'a, T> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.len - self.cur
+    }
+}
+
 impl<'a, T> Drop for FilteredIter<'a, T> {
     fn drop(&mut self) {
         for i in 0..self.len {
@@ -378,10 +414,10 @@ pub struct FilteredIterMut<'a, T> {
 
 impl<'a, T> FilteredIterMut<'a, T> {
     #[inline]
-    pub fn new(getters: &[Borrowed<RawGetter, JsAtomic>], etags: &[EntityTag]) -> Self {
+    pub fn new(getters: &mut [Borrowed<RawGetter, JsAtomic>], etags: &[EntityTag]) -> Self {
         debug_assert_eq!(getters.len(), etags.len());
 
-        let ptr_getter = unsafe { NonNull::new_unchecked(getters.as_ptr().cast_mut()) };
+        let ptr_getter = unsafe { NonNull::new_unchecked(getters.as_mut_ptr()) };
         let ptr_etag = unsafe { NonNull::new_unchecked(etags.as_ptr().cast_mut()) };
         let len = getters.len();
 
@@ -423,6 +459,13 @@ impl<'a, T> Iterator for FilteredIterMut<'a, T> {
         } else {
             None
         }
+    }
+}
+
+impl<'a, T> ExactSizeIterator for FilteredIterMut<'a, T> {
+    #[inline]
+    fn len(&self) -> usize {
+        self.len - self.cur
     }
 }
 

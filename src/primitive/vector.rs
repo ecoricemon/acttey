@@ -1,5 +1,10 @@
 use std::ops::Deref;
 
+// TODO: Enough small number?
+const F32_EPS: f32 = 1e-6;
+const U8_EPS: u8 = 1;
+const U16_EPS: u16 = 1;
+
 pub trait Number {
     type Output;
     fn zero() -> Self::Output;
@@ -9,6 +14,7 @@ pub trait Number {
     fn _acos(self) -> Self::Output;
     fn from_f32(v: f32) -> Self::Output;
     fn from_f64(v: f64) -> Self::Output;
+    fn eps() -> Self::Output;
 }
 
 impl Number for u8 {
@@ -47,6 +53,11 @@ impl Number for u8 {
     #[inline]
     fn from_f64(v: f64) -> Self::Output {
         v as Self::Output
+    }
+
+    #[inline]
+    fn eps() -> Self::Output {
+        U8_EPS
     }
 }
 
@@ -87,6 +98,11 @@ impl Number for u16 {
     fn from_f64(v: f64) -> Self::Output {
         v as Self::Output
     }
+
+    #[inline]
+    fn eps() -> Self::Output {
+        U16_EPS
+    }
 }
 
 impl Number for f32 {
@@ -125,6 +141,64 @@ impl Number for f32 {
     #[inline]
     fn from_f64(v: f64) -> Self::Output {
         v as Self::Output
+    }
+
+    #[inline]
+    fn eps() -> Self::Output {
+        F32_EPS
+    }
+}
+
+/// A shallow wrapper of [`Vector`].
+#[derive(Debug, PartialEq, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(transparent)]
+pub struct UnitVector<T, const D: usize>(Vector<T, D>);
+
+impl UnitVector<f32, 3> {
+    pub fn new(v: Vector<f32, 3>) -> Self {
+        assert!(v.is_unit());
+        unsafe { Self::new_unchecked(v) }
+    }
+
+    pub const unsafe fn new_unchecked(v: Vector<f32, 3>) -> Self {
+        Self(v)
+    }
+
+    pub const fn into_inner(self) -> Vector<f32, 3> {
+        self.0
+    }
+}
+
+impl Deref for UnitVector<f32, 3> {
+    type Target = Vector<f32, 3>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl UnitVector<f32, 4> {
+    pub fn new(v: Vector<f32, 4>) -> Self {
+        assert!(v.is_unit());
+        unsafe { Self::new_unchecked(v) }
+    }
+
+    pub const unsafe fn new_unchecked(v: Vector<f32, 4>) -> Self {
+        Self(v)
+    }
+
+    pub const fn into_inner(self) -> Vector<f32, 4> {
+        self.0
+    }
+}
+
+impl Deref for UnitVector<f32, 4> {
+    type Target = Vector<f32, 4>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
@@ -185,13 +259,13 @@ macro_rules! impl_vector {
 
             /// Creates a vector with zeros.
             #[inline]
-            pub fn zero() -> Self {
+            pub fn zeros() -> Self {
                 T::zero().into()
             }
 
             /// Creates a vector with ones.
             #[inline]
-            pub fn one() -> Self {
+            pub fn ones() -> Self {
                 T::one().into()
             }
 
@@ -289,6 +363,11 @@ macro_rules! impl_vector {
             }
 
             #[inline]
+            pub fn is_unit(&self) -> bool {
+                self.norm_l2() < T::eps()
+            }
+
+            #[inline]
             pub fn normalize(&mut self) {
                 let norm = self.norm_l2();
                 match norm != T::zero() {
@@ -345,7 +424,7 @@ macro_rules! impl_vector {
             #[inline]
             pub fn random(max: f64, range: std::ops::Range<usize>) -> Self {
                 let gen = || T::from_f64(js_sys::Math::random() * max);
-                let mut v = Self::zero();
+                let mut v = Self::zeros();
                 range.for_each(|i| v.0[i] = gen());
                 v
             }
@@ -501,11 +580,13 @@ impl From<Vector<u8, 3>> for Vector<f32, 4> {
 /// Inner vector is used to represent quaternion, which's x, y, and z are used for
 /// quaternion's vector part, known as i, j, and k, and w is used for the scalar part.
 #[derive(Debug, Clone)]
-pub struct Quaternion(Vector<f32, 4>);
+pub struct Quaternion(UnitVector<f32, 4>);
 
 impl Quaternion {
     pub const fn unit() -> Self {
-        Self(Vector::<f32, 4>::new(0.0, 0.0, 0.0, 1.0))
+        let v = Vector::<f32, 4>::new(0.0, 0.0, 0.0, 1.0);
+        // Safety: Infallible.
+        unsafe { Self(UnitVector::<f32, 4>::new_unchecked(v)) }
     }
 
     /// Creates quaternion from 4D unit vector.
@@ -514,8 +595,7 @@ impl Quaternion {
     /// # Panics
     ///
     /// In debug mode only, panics if the vector is not a unit vector.
-    pub fn new(v: Vector<f32, 4>) -> Self {
-        debug_assert!(is_unit_vector4(&v));
+    pub fn new(v: UnitVector<f32, 4>) -> Self {
         Self(v)
     }
 
@@ -524,56 +604,47 @@ impl Quaternion {
     /// # Panics
     ///
     /// In debug mode only, panics if the vector is not a unit vector.
-    pub fn from_axis(mut axis: Vector<f32, 3>, angle: f32) -> Self {
-        debug_assert!(is_unit_vector3(&axis));
+    pub fn from_axis(axis: UnitVector<f32, 3>, angle: f32) -> Self {
+        let mut axis = axis.into_inner();
         let (sin, cos) = (angle * 0.5).sin_cos();
         axis *= sin;
-        Self(Vector::<f32, 4>::new(axis.x(), axis.y(), axis.z(), cos))
+        let v = Vector::<f32, 4>::new(axis.x(), axis.y(), axis.z(), cos);
+        // Safety: v is unit vector.
+        unsafe { Self(UnitVector::<f32, 4>::new_unchecked(v)) }
     }
 
     /// Creates quaternion from rotation `angle` radians around x-axis.
     pub fn from_rotation_x(angle: f32) -> Self {
         let (sin, cos) = (angle * 0.5).sin_cos();
-        Self(Vector::<f32, 4>::new(sin, 0.0, 0.0, cos))
+        let v = Vector::<f32, 4>::new(sin, 0.0, 0.0, cos);
+        // Safety: v is unit vector.
+        unsafe { Self(UnitVector::<f32, 4>::new_unchecked(v)) }
     }
 
     /// Creates quaternion from rotation `angle` radians around y-axis.
     pub fn from_rotation_y(angle: f32) -> Self {
         let (sin, cos) = (angle * 0.5).sin_cos();
-        Self(Vector::<f32, 4>::new(0.0, sin, 0.0, cos))
+        let v = Vector::<f32, 4>::new(0.0, sin, 0.0, cos);
+        // Safety: v is unit vector.
+        unsafe { Self(UnitVector::<f32, 4>::new_unchecked(v)) }
     }
 
     /// Creates quaternion from rotation `angle` radians around z-axis.
     pub fn from_rotation_z(angle: f32) -> Self {
         let (sin, cos) = (angle * 0.5).sin_cos();
-        Self(Vector::<f32, 4>::new(0.0, 0.0, sin, cos))
+        let v = Vector::<f32, 4>::new(0.0, 0.0, sin, cos);
+        // Safety: v is unit vector.
+        unsafe { Self(UnitVector::<f32, 4>::new_unchecked(v)) }
     }
 }
 
 impl Deref for Quaternion {
-    type Target = Vector<f32, 4>;
+    type Target = UnitVector<f32, 4>;
 
     #[inline]
     fn deref(&self) -> &Self::Target {
         &self.0
     }
-}
-
-// Utility function
-pub fn is_unit_vector3(v: &Vector<f32, 3>) -> bool {
-    // TODO: What is proper value?
-    const EPS_HIGH: f32 = 1e-6;
-    const EPS_LOW: f32 = -EPS_HIGH;
-    let norm = v.norm_l2();
-    EPS_LOW < norm && norm < EPS_HIGH
-}
-
-pub fn is_unit_vector4(v: &Vector<f32, 4>) -> bool {
-    // TODO: What is proper value?
-    const EPS_HIGH: f32 = 1e-6;
-    const EPS_LOW: f32 = -EPS_HIGH;
-    let norm = v.norm_l2();
-    EPS_LOW < norm && norm < EPS_HIGH
 }
 
 #[cfg(test)]

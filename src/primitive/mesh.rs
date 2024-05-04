@@ -6,9 +6,9 @@ use crate::{
     primitive::{constant::colors, vector::Vector, Color},
     util::{key::ObjectKey, AsMultiBytes},
 };
-use ahash::AHashMap;
 use std::{
     borrow::Borrow,
+    collections::HashMap,
     hash::Hash,
     mem::{discriminant, size_of, Discriminant},
     rc::Rc,
@@ -65,7 +65,7 @@ pub struct MeshResource {
     /// Materials.
     mats: MonoSparseSet<ObjectKey, RcValue<Material>>,
     /// Mesh name to geometry and material.
-    meshes: AHashMap<ObjectKey, (ObjectKey, ObjectKey)>,
+    meshes: HashMap<ObjectKey, (ObjectKey, ObjectKey), ahash::RandomState>,
 }
 
 impl MeshResource {
@@ -73,7 +73,7 @@ impl MeshResource {
         Self {
             geos: MonoSparseSet::new(),
             mats: MonoSparseSet::new(),
-            meshes: AHashMap::new(),
+            meshes: HashMap::default(),
         }
     }
 
@@ -109,43 +109,49 @@ impl MeshResource {
     #[inline]
     pub fn add_geometry(
         &mut self,
-        key: ObjectKey,
-        geo: impl Into<Geometry>,
+        key: impl Into<ObjectKey>,
+        geo: impl Into<SeparateGeometry>,
     ) -> Option<RcValue<Geometry>> {
-        self._add_geometry(key, geo.into())
-    }
+        fn inner(
+            this: &mut MeshResource,
+            key: ObjectKey,
+            geo: SeparateGeometry,
+        ) -> Option<RcValue<Geometry>> {
+            let geo = Geometry::from(geo);
+            this.geos.insert(key, RcValue::new(geo))
+        }
 
-    /// A function with concrete types, not generic, for [`Self::add_geometry`].
-    /// It can help us to ruduce binary size caused by generic bloating.
-    fn _add_geometry(&mut self, key: ObjectKey, geo: Geometry) -> Option<RcValue<Geometry>> {
-        self.geos.insert(key, RcValue::new(geo))
+        inner(self, key.into(), geo.into())
     }
 
     /// Adds a new material and returns optional old material.
     #[inline]
     pub fn add_material(
         &mut self,
-        key: ObjectKey,
+        key: impl Into<ObjectKey>,
         mat: impl Into<Material>,
     ) -> Option<RcValue<Material>> {
-        self._add_material(key, mat.into())
-    }
+        fn inner(
+            this: &mut MeshResource,
+            key: ObjectKey,
+            mat: Material,
+        ) -> Option<RcValue<Material>> {
+            this.mats.insert(key, RcValue::new(mat))
+        }
 
-    /// A function with concrete types, not generic, for [`Self::add_material`].
-    /// It can help us to ruduce binary size caused by generic bloating.
-    fn _add_material(&mut self, key: ObjectKey, mat: Material) -> Option<RcValue<Material>> {
-        self.mats.insert(key, RcValue::new(mat))
+        inner(self, key.into(), mat.into())
     }
 
     /// Adds a new mesh.
     #[inline]
     pub fn add_mesh(
         &mut self,
-        mesh_key: ObjectKey,
-        geo_key: ObjectKey,
-        mat_key: ObjectKey,
+        mesh_key: impl Into<ObjectKey>,
+        geo_key: impl Into<ObjectKey>,
+        mat_key: impl Into<ObjectKey>,
     ) -> Option<(ObjectKey, ObjectKey)> {
-        self.meshes.insert(mesh_key, (geo_key, mat_key))
+        self.meshes
+            .insert(mesh_key.into(), (geo_key.into(), mat_key.into()))
     }
 
     #[inline]

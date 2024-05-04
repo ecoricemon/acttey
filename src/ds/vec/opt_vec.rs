@@ -1,4 +1,4 @@
-use std::{collections::HashSet, ops};
+use std::{collections::HashSet, mem, ops};
 
 /// Vector with optional values.  
 /// If you don't want to change indices after insert or remove operations,
@@ -68,6 +68,13 @@ impl<T> OptVec<T> {
         self.values[index].is_some()
     }
 
+    /// Determines `index` is in bounds and the slot is Some,
+    /// which means there's a value in the slot.
+    #[inline]
+    pub fn is_valid(&self, index: usize) -> bool {
+        self.values.get(index).is_some()
+    }
+
     #[inline]
     pub fn as_slice(&self) -> &[Option<T>] {
         &self.values
@@ -103,8 +110,7 @@ impl<T> OptVec<T> {
 
     /// # Safety
     ///
-    /// Undefine behavior if `index` is out of bound or
-    /// the slot is vacant.
+    /// Undefine behavior if `index` is out of bound or the slot is vacant.
     pub unsafe fn get_unchecked_mut(&mut self, index: usize) -> &mut T {
         self.values
             .get_unchecked_mut(index)
@@ -123,7 +129,7 @@ impl<T> OptVec<T> {
         } else {
             self.vacancies.insert(index);
         }
-        std::mem::replace(&mut self.values[index], value)
+        mem::replace(&mut self.values[index], value)
     }
 
     /// Adds the value to a vacant slot if it's possible or put it at the end of vector.
@@ -223,6 +229,15 @@ impl<T> OptVec<T> {
     pub fn shrink_to_fit(&mut self) {
         self.values.shrink_to_fit();
         self.vacancies.shrink_to_fit();
+    }
+
+    /// Sets the `value` at the `index`.
+    /// If the vector is shorter than index + 1, then other slots will be filled with None.
+    pub fn extend_set(&mut self, index: usize, value: T) -> Option<T> {
+        while self.len() < (index + 1) {
+            self.push(None);
+        }
+        self.set(index, Some(value))
     }
 }
 

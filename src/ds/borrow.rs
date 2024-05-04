@@ -204,7 +204,7 @@ impl<V, BI, BM, A: Atomic<i32>> Drop for Holder<V, BI, BM, A> {
         // Borrowed is dropped with Release ordering and it's synchronized with this Acquire.
         // Therefore, this thread can observe modification happend before when Borrowed is dropped.
         //
-        // Dev note. Can we test whether it fails or not if we used Relaxed here?
+        // NOTE: Can we test whether it fails or not if we used Relaxed here?
         let cnt = self.atomic_cnt.load(Acquire);
         if cnt != 0 {
             // Holder may be dropped while some threads are using Borrowed.

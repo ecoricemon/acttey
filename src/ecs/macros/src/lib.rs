@@ -2,8 +2,9 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
     parse::{Parse, ParseStream},
+    parse_macro_input,
     punctuated::Punctuated,
-    parse_macro_input, DeriveInput, Ident, LitInt, Result, Token,
+    DeriveInput, Ident, LitInt, Result, Token,
 };
 
 // TODO: Getting proper path programmatically, not hard codining

@@ -1,6 +1,11 @@
 use crate::ds::vec::OptVec;
-use ahash::AHashMap;
-use std::{borrow::Borrow, collections::VecDeque, hash::Hash, ops::Deref, rc::Rc};
+use std::{
+    borrow::Borrow,
+    collections::{HashMap, VecDeque},
+    hash::Hash,
+    ops::Deref,
+    rc::Rc,
+};
 
 const GEN_DUMMY: u64 = u64::MAX;
 const GEN_IGNORE: u64 = u64::MAX - 1;
@@ -11,13 +16,13 @@ const GEN_IGNORE: u64 = u64::MAX - 1;
 /// Therefore, you can notice that the value has been changed.
 #[derive(Debug)]
 pub struct GenMap<K, V> {
-    items: AHashMap<K, (V, u64)>,
+    items: HashMap<K, (V, u64), ahash::RandomState>,
 }
 
 impl<K: Eq + Hash + Clone, V> GenMap<K, V> {
     pub fn new() -> Self {
         Self {
-            items: AHashMap::new(),
+            items: HashMap::default(),
         }
     }
 
@@ -140,7 +145,7 @@ impl<K: Eq + Hash + Clone, V> GenMap<K, V> {
 impl<K, V> Default for GenMap<K, V> {
     fn default() -> Self {
         Self {
-            items: AHashMap::new(),
+            items: HashMap::default(),
         }
     }
 }

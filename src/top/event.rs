@@ -3,135 +3,117 @@ use std::collections::{
     vec_deque::{Drain, Iter},
     VecDeque,
 };
-use wasm_bindgen::prelude::*;
 
-pub enum Command {
-    RemoveSystem(u32),
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Event type that users can register.
+pub enum EventType {
+    /// JS "scale" event.
+    Scale = 0,
+    /// JS "mousemove" event.
+    MouseMove,
+    /// JS "click" event.
+    Click,
+    /// JS "resize" event.
+    Resize,
+}
+
+/// Number of variants in the [`EventType`].
+pub(super) const EVENT_TYPE_NUM: usize = 4;
+
+/// This helps us not to make mistake when we made a change to the `EventType`.
+const _: () = {
+    // Checks out if there's a brand new variant in the `EventType`.
+    match EventType::Scale {
+        EventType::Scale => { /* Is this the first varitant? See assert below */ }
+        EventType::MouseMove => {}
+        EventType::Click => {}
+        EventType::Resize => { /* Is this the last variant? See assert below */ }
+    }
+
+    // Variants in the `EventType` is used as indices.
+    // So that the first one should be 0.
+    assert!(EventType::Scale as isize == 0);
+
+    // The number of variants must be equal to the last one + 1.
+    assert!(EventType::Resize as isize + 1 == EVENT_TYPE_NUM as isize);
+};
+
+impl From<EventType> for &'static str {
+    fn from(value: EventType) -> Self {
+        match value {
+            EventType::Scale => "scale",
+            EventType::Resize => "resize",
+            EventType::MouseMove => "mousemove",
+            EventType::Click => "click",
+        }
+    }
 }
 
 pub enum Event {
     Resized(msg::MsgEventCanvasResize),
-    Mouse(u32, web_sys::MouseEvent),
-    Keyboard(u32, web_sys::KeyboardEvent),
-    Command(Command),
-}
-
-impl From<(u32, web_sys::MouseEvent)> for Event {
-    #[inline(always)]
-    fn from(value: (u32, web_sys::MouseEvent)) -> Self {
-        Self::Mouse(value.0, value.1)
-    }
-}
-
-impl From<(u32, web_sys::KeyboardEvent)> for Event {
-    #[inline(always)]
-    fn from(value: (u32, web_sys::KeyboardEvent)) -> Self {
-        Self::Keyboard(value.0, value.1)
-    }
-}
-
-pub(crate) enum EventListener {
-    NoArg(Closure<dyn Fn()>),
-    Mouse(Closure<dyn Fn(web_sys::MouseEvent)>),
-    Keyboard(Closure<dyn Fn(web_sys::KeyboardEvent)>),
-}
-
-impl From<Closure<dyn Fn()>> for EventListener {
-    fn from(value: Closure<dyn Fn()>) -> Self {
-        EventListener::NoArg(value)
-    }
-}
-
-impl From<Closure<dyn Fn(web_sys::MouseEvent)>> for EventListener {
-    fn from(value: Closure<dyn Fn(web_sys::MouseEvent)>) -> Self {
-        EventListener::Mouse(value)
-    }
-}
-
-impl From<Closure<dyn Fn(web_sys::KeyboardEvent)>> for EventListener {
-    fn from(value: Closure<dyn Fn(web_sys::KeyboardEvent)>) -> Self {
-        EventListener::Keyboard(value)
-    }
+    MouseMove(msg::MsgEventMouseMove),
+    Click(msg::MsgEventClick),
 }
 
 pub struct EventManager {
-    resized: VecDeque<msg::MsgEventCanvasResize>,
-    mouse: VecDeque<(u32, web_sys::MouseEvent)>,
-    keyboard: VecDeque<(u32, web_sys::KeyboardEvent)>,
-    command: VecDeque<Command>,
+    resize: VecDeque<msg::MsgEventCanvasResize>,
+    mouse_move: VecDeque<msg::MsgEventMouseMove>,
+    click: VecDeque<msg::MsgEventClick>,
 }
 
 impl EventManager {
     pub fn new() -> Self {
         Self {
-            resized: VecDeque::with_capacity(1),
-            mouse: VecDeque::with_capacity(16),
-            keyboard: VecDeque::with_capacity(8),
-            command: VecDeque::new(),
+            resize: VecDeque::with_capacity(1),
+            mouse_move: VecDeque::with_capacity(16),
+            click: VecDeque::with_capacity(8),
         }
     }
 
     #[inline]
     pub(crate) fn push(&mut self, event: Event) {
         match event {
-            Event::Resized(msg) => self.resized.push_back(msg),
-            Event::Mouse(handle, event) => self.mouse.push_back((handle, event)),
-            Event::Keyboard(handle, event) => self.keyboard.push_back((handle, event)),
-            Event::Command(command) => self.command.push_back(command),
+            Event::Resized(msg) => self.resize.push_back(msg),
+            Event::MouseMove(msg) => self.mouse_move.push_back(msg),
+            Event::Click(msg) => self.click.push_back(msg),
         }
     }
 
     #[inline]
     pub fn clear(&mut self) {
-        self.resized.clear();
-        self.mouse.clear();
-        self.keyboard.clear();
-        // User should process command, so that not clear in here.
+        self.resize.clear();
+        self.mouse_move.clear();
+        self.click.clear();
     }
 
     #[inline]
-    pub fn is_command_empty(&self) -> bool {
-        self.command.is_empty()
+    pub fn iter_resize(&self) -> Iter<msg::MsgEventCanvasResize> {
+        self.resize.iter()
     }
 
     #[inline]
-    pub fn iter_resized(&self) -> Iter<msg::MsgEventCanvasResize> {
-        self.resized.iter()
+    pub fn drain_resize(&mut self) -> Drain<msg::MsgEventCanvasResize> {
+        self.resize.drain(..)
     }
 
     #[inline]
-    pub fn drain_resized(&mut self) -> Drain<msg::MsgEventCanvasResize> {
-        self.resized.drain(..)
+    pub fn iter_mouse_move_event(&self) -> Iter<msg::MsgEventMouseMove> {
+        self.mouse_move.iter()
     }
 
     #[inline]
-    pub fn iter_mouse_events(&self) -> Iter<(u32, web_sys::MouseEvent)> {
-        self.mouse.iter()
+    pub fn drain_mouse_move_event(&mut self) -> Drain<msg::MsgEventMouseMove> {
+        self.mouse_move.drain(..)
     }
 
     #[inline]
-    pub fn drain_mouse_events(&mut self) -> Drain<(u32, web_sys::MouseEvent)> {
-        self.mouse.drain(..)
+    pub fn iter_click_event(&self) -> Iter<msg::MsgEventClick> {
+        self.click.iter()
     }
 
     #[inline]
-    pub fn iter_keyboard_events(&self) -> Iter<(u32, web_sys::KeyboardEvent)> {
-        self.keyboard.iter()
-    }
-
-    #[inline]
-    pub fn drain_keyboard_events(&mut self) -> Drain<(u32, web_sys::KeyboardEvent)> {
-        self.keyboard.drain(..)
-    }
-
-    #[inline]
-    pub fn iter_commands(&self) -> Iter<Command> {
-        self.command.iter()
-    }
-
-    #[inline]
-    pub fn drain_commands(&mut self) -> Drain<Command> {
-        self.command.drain(..)
+    pub fn drain_click_event(&mut self) -> Drain<msg::MsgEventClick> {
+        self.click.drain(..)
     }
 }
 

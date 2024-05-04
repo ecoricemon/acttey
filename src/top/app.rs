@@ -1,55 +1,42 @@
 use super::{
-    canvas::CanvasPack,
-    event::{Event, EventManager},
+    canvas::{Canvas, CanvasPack},
+    event::{Event, EventManager, EventType},
     r#loop::Loop,
     AppError,
 };
 use crate::{
-    decl_return_wrap,
-    ds::{get::GetterMut, refs::RCell},
+    ds::refs::RCell,
     ecs::{
-        component::Component,
-        entity::{EntityForm, EntityKey},
-        predefined::components,
+        entity::{Entity, EntityForm, EntityId, EntityKey},
         resource::Resource,
         schedule::Scheduler,
-        system::{Client, Invokable, System, SystemKey},
+        system::{Client, System, SystemKey},
     },
-    primitive::mesh::{Geometry, Material, MeshResource, SeparateGeometry},
+    primitive::mesh::{Material, MeshResource, SeparateGeometry},
     render::{
-        buffer::{BufferView, SizeOrData},
-        canvas::OffCanvas,
-        descs,
-        pipeline::{PipelineBuilder, PipelineLayoutBuilder},
+        canvas::{CanvasHandle, OffCanvas},
         resource::RenderResource,
     },
     scene::{
         inner::{Scene, SceneManager},
         SceneError,
     },
-    ty,
-    util::{
-        key::ObjectKey,
-        string::{self, RcStr},
-        web, AsBytes,
-    },
+    util::{key::ObjectKey, string, web},
     worker::{
         msg::{self, ChMsg},
         Channel, MainChannel, MainWorker, Worker, WorkerId,
     },
 };
-use std::{any::Any, cell::RefCell, mem, num::NonZeroU32, ptr::NonNull, rc::Rc, thread};
+use std::{cell::RefCell, mem, num::NonZeroU32, ptr::NonNull, rc::Rc, thread};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 pub struct App {
     main: Rc<MainWorker>,
     canvases: RCell<CanvasPack>,
-    proxies: Vec<Box<dyn Any>>,
 }
 
 impl App {
-    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         set_panic_hook();
 
@@ -62,38 +49,55 @@ impl App {
 
         // Sends INIT message with dummy canvas to the main worker.
         let canvas = canvases.get_dummy();
+        let selectors = CanvasPack::DUMMY_SELECTORS.to_owned();
         let offcanvas = canvas.transfer_control_to_offscreen().unwrap();
         let (element, handle) = offcanvas.destructure();
-        msg::MsgEventInit(msg::MsgEventCanvas { element, handle }).post_to(main.handle_js());
+        msg::MsgEventInit(msg::MsgEventCanvas {
+            element,
+            handle,
+            selectors,
+            scale: 0.0,
+        })
+        .post_to(main.handle_js());
 
-        let mut app = Self {
-            main,
-            canvases: RCell::new(canvases),
-            proxies: Vec::new(),
-        };
-
-        // Registers default event proxies.
-        app.register_scale_message_proxy();
-        app.register_resize_message_proxy();
-
-        // Detects scale change.
+        // Detects scale change for the WINDOW_SCALE message.
         detect_scale_change();
 
-        app
+        Self {
+            main,
+            canvases: RCell::new(canvases),
+        }
     }
 
-    pub fn register_canvas(&mut self, selectors: impl Into<RcStr>) -> Result<&mut Self, AppError> {
-        // Adds canvas.
-        let mut canvases = self.canvases.borrow_mut();
-        let canvas = canvases.insert(selectors)?;
-        let offcanvas = canvas.transfer_control_to_offscreen()?;
+    pub fn register_canvas(
+        &mut self,
+        selectors: &str,
+        events: &[EventType],
+    ) -> Result<(), AppError> {
+        if !selectors.is_empty() {
+            // Adds canvas.
+            let canvas = self.canvases.borrow_mut().insert(selectors)?;
+            let scale = canvas.width() as f64 / canvas.client_width() as f64;
+            let offcanvas = canvas.transfer_control_to_offscreen()?;
 
-        // Transfers offscreen canvas to the main worker.
-        let (element, handle) = offcanvas.destructure();
-        msg::MsgEventCanvas { element, handle }.post_to(self.main.handle_js());
+            // Transfers offscreen canvas to the main worker.
+            let (element, handle) = offcanvas.destructure();
+            let selectors = selectors.to_owned();
+            msg::MsgEventCanvas {
+                element,
+                handle,
+                selectors,
+                scale,
+            }
+            .post_to(self.main.handle_js());
+        }
 
-        drop(canvases);
-        Ok(self)
+        // Registers events.
+        for event in events.iter().cloned() {
+            self.register_event_proxy(selectors, event);
+        }
+
+        Ok(())
     }
 
     pub fn call_initializer(&self, f: fn(&mut AppState)) {
@@ -109,45 +113,146 @@ impl App {
         msg::MsgEventRun.post_to(self.main.handle_js());
     }
 
-    /// Registers WINDOW_SCALE message proxy.
-    fn register_scale_message_proxy(&mut self) {
-        let main = Rc::clone(&self.main);
-        let buf = msg::MsgEventWindowScale::create_buffer();
-        let proxy =
+    fn register_event_proxy(&mut self, selectors: &str, event: EventType) {
+        fn create_mouse_move_event_proxy(
+            main: Rc<MainWorker>,
+            handle: CanvasHandle,
+        ) -> Closure<dyn Fn(web_sys::MouseEvent)> {
+            let buf = msg::MsgEventMouseMove::create_buffer();
+            Closure::<dyn Fn(web_sys::MouseEvent)>::new(move |event: web_sys::MouseEvent| {
+                let msg = msg::MsgEventMouseMove(msg::MsgEventMouse {
+                    handle,
+                    button: event.button() as _,
+                    client_x: event.client_x() as _,
+                    client_y: event.client_y() as _,
+                    movement_x: event.movement_x() as _,
+                    movement_y: event.movement_y() as _,
+                    offset_x: event.offset_x() as _,
+                    offset_y: event.offset_y() as _,
+                });
+                msg.write_body(&buf);
+                main.post_message(&buf).unwrap();
+            })
+        }
+
+        fn create_click_event_proxy(
+            main: Rc<MainWorker>,
+            handle: CanvasHandle,
+        ) -> Closure<dyn Fn(web_sys::MouseEvent)> {
+            let buf = msg::MsgEventClick::create_buffer();
+            Closure::<dyn Fn(web_sys::MouseEvent)>::new(move |event: web_sys::MouseEvent| {
+                let msg = msg::MsgEventClick(msg::MsgEventMouse {
+                    handle,
+                    button: event.button() as _,
+                    client_x: event.client_x() as _,
+                    client_y: event.client_y() as _,
+                    movement_x: event.movement_x() as _,
+                    movement_y: event.movement_y() as _,
+                    offset_x: event.offset_x() as _,
+                    offset_y: event.offset_y() as _,
+                });
+                msg.write_body(&buf);
+                main.post_message(&buf).unwrap();
+            })
+        }
+
+        fn create_scale_event_proxy(main: Rc<MainWorker>) -> Closure<dyn Fn(web_sys::CustomEvent)> {
+            let buf = msg::MsgEventWindowScale::create_buffer();
             Closure::<dyn Fn(web_sys::CustomEvent)>::new(move |event: web_sys::CustomEvent| {
                 let msg = msg::MsgEventWindowScale {
                     scale: event.detail().as_f64().unwrap(),
                 };
                 msg.write_body(&buf);
                 main.post_message(&buf).unwrap();
-            });
-        web::window()
-            .add_event_listener_with_callback("scale", proxy.as_ref().unchecked_ref())
-            .unwrap();
-        self.proxies.push(Box::new(proxy));
-    }
+            })
+        }
 
-    /// Registers CANVAS_RESIZE message proxy.
-    fn register_resize_message_proxy(&mut self) {
-        let main = Rc::clone(&self.main);
-        let canvases = RCell::clone(&self.canvases);
-        let buf = msg::MsgEventCanvasResize::create_buffer();
-        let proxy = Closure::<dyn Fn()>::new(move || {
-            let canvases = canvases.borrow();
-            for canvas in canvases.values().filter(|canvas| !canvas.is_dummy()) {
-                let msg = msg::MsgEventCanvasResize {
-                    handle: canvas.handle(),
-                    width: canvas.client_width() as _,
-                    height: canvas.client_height() as _,
-                };
-                msg.write_body(&buf);
-                main.post_message(&buf).unwrap();
+        fn create_resize_event_proxy<'a>(
+            main: Rc<MainWorker>,
+            canvases: RCell<CanvasPack>,
+        ) -> Closure<dyn Fn()> {
+            let buf = msg::MsgEventCanvasResize::create_buffer();
+            Closure::<dyn Fn()>::new(move || {
+                let canvases = canvases.borrow();
+                for canvas in canvases
+                    .values()
+                    .filter(|canvas| !canvas.is_dummy() && !canvas.is_window())
+                {
+                    let msg = msg::MsgEventCanvasResize {
+                        handle: canvas.handle(),
+                        width: canvas.client_width() as _,
+                        height: canvas.client_height() as _,
+                    };
+                    msg.write_body(&buf);
+                    main.post_message(&buf).unwrap();
+                }
+            })
+        }
+
+        fn add_event_listener(
+            handle: CanvasHandle,
+            canvas: &Rc<Canvas>,
+            event: &str,
+            listener: &js_sys::Function,
+        ) {
+            if handle > 0 {
+                canvas
+                    .add_event_listener_with_callback(event, listener)
+                    .unwrap();
+            } else {
+                web::window()
+                    .add_event_listener_with_callback(event, listener)
+                    .unwrap();
             }
-        });
-        web::window()
-            .add_event_listener_with_callback("resize", proxy.as_ref().unchecked_ref())
-            .unwrap();
-        self.proxies.push(Box::new(proxy));
+        }
+
+        let main = Rc::clone(&self.main);
+        let mut canvas_pack = self.canvases.borrow_mut();
+        let (canvas, handle) = if !selectors.is_empty() {
+            let canvas = canvas_pack.get_by_selectors(selectors).unwrap();
+            let handle = canvas.handle();
+            (canvas, handle)
+        } else {
+            let canvas = canvas_pack.get_dummy();
+            let handle = CanvasHandle::window_handle();
+            (canvas, handle)
+        };
+
+        match event {
+            EventType::Scale if handle.is_window_handle() => {
+                let proxy = create_scale_event_proxy(main);
+                add_event_listener(handle, canvas, event.into(), proxy.as_ref().unchecked_ref());
+                canvas_pack.register_proxy(handle, event, Box::new(proxy));
+            }
+            EventType::MouseMove => {
+                let proxy = create_mouse_move_event_proxy(main, handle);
+                add_event_listener(handle, canvas, event.into(), proxy.as_ref().unchecked_ref());
+                canvas_pack.register_proxy(handle, event, Box::new(proxy));
+            }
+            EventType::Click => {
+                let proxy = create_click_event_proxy(main, handle);
+                add_event_listener(handle, canvas, event.into(), proxy.as_ref().unchecked_ref());
+                canvas_pack.register_proxy(handle, event, Box::new(proxy));
+            }
+            EventType::Resize if handle.is_window_handle() => {
+                let canvases = RCell::clone(&self.canvases);
+                let proxy = create_resize_event_proxy(main, canvases);
+                add_event_listener(handle, canvas, event.into(), proxy.as_ref().unchecked_ref());
+                canvas_pack.register_proxy(handle, event, Box::new(proxy));
+            }
+            _ => {
+                panic!(
+                    "target found by {} isn't appropriate for the {:?} event",
+                    selectors, event
+                );
+            }
+        };
+    }
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -189,7 +294,7 @@ pub async fn main_onmessage_init(event: web_sys::MessageEvent) {
             // Initializes `APP_STATE`.
             let msg = msg::MsgEventInit::read_body(&buf);
             let offcanvas = OffCanvas::new(msg.0.element, msg.0.handle);
-            let state = AppState::new(offcanvas).await;
+            let state = AppState::new(offcanvas, msg.0.selectors).await;
             APP_STATE.set(state);
 
             // APP_STATE is settled now, so we can know fixed resource address.
@@ -220,7 +325,7 @@ pub fn main_onmessage(event: web_sys::MessageEvent, _id: u32) {
 
             let msg = msg::MsgEventCanvas::read_body(&buf);
             APP_STATE.with_borrow_mut(move |state| {
-                state.register_offcanvas(msg.element, msg.handle);
+                state.register_offcanvas(msg.element, msg.handle, msg.selectors, msg.scale);
             });
         }
         msg::MsgEventHeader::WINDOW_SCALE_INNER => {
@@ -237,6 +342,22 @@ pub fn main_onmessage(event: web_sys::MessageEvent, _id: u32) {
             let msg = msg::MsgEventCanvasResize::read_body(&buf);
             APP_STATE.with_borrow_mut(|state| {
                 state.ev_mgr.push(Event::Resized(msg));
+            });
+        }
+        msg::MsgEventHeader::MOUSE_MOVE_INNER => {
+            crate::log!("[D] main_onmessage(): worker received MOUSE_MOVE msg.");
+
+            let msg = msg::MsgEventMouseMove::read_body(&buf);
+            APP_STATE.with_borrow_mut(|state| {
+                state.ev_mgr.push(Event::MouseMove(msg));
+            });
+        }
+        msg::MsgEventHeader::CLICK_INNER => {
+            crate::log!("[D] main_onmessage(): worker received CLICK msg.");
+
+            let msg = msg::MsgEventClick::read_body(&buf);
+            APP_STATE.with_borrow_mut(|state| {
+                state.ev_mgr.push(Event::Click(msg));
             });
         }
         msg::MsgEventHeader::FN_INNER => {
@@ -343,9 +464,6 @@ pub struct AppState {
     /// System scheduler.
     sched: Scheduler,
 
-    /// TODO: merge to the scheduler.
-    super_systems: Vec<Box<dyn Invokable>>,
-
     /// A resource managing all render resources.
     render: RenderResource,
 
@@ -372,11 +490,10 @@ pub struct AppState {
 }
 
 impl AppState {
-    async fn new(offcanvas: OffCanvas) -> Self {
+    async fn new(offcanvas: OffCanvas, selectors: String) -> Self {
         Self {
             sched: Scheduler::new(),
-            super_systems: Vec::new(),
-            render: RenderResource::new(offcanvas).await.unwrap(),
+            render: RenderResource::new(offcanvas, selectors).await.unwrap(),
             meshes: MeshResource::new(),
             scene_mgr: SceneManager::new(),
             ev_mgr: EventManager::new(),
@@ -409,17 +526,34 @@ impl AppState {
             .register_default_resource(self.scene_mgr.rkey(), ptr);
 
         // Registers `ev_mgr` resource.
+        // Safety: Infallible.
         let ptr: NonNull<u8> = unsafe { NonNull::new_unchecked(addr_of_mut!(self.ev_mgr) as _) };
         self.sched
             .register_default_resource(self.ev_mgr.rkey(), ptr);
 
-        // TODO: other resources
+        // Registers `sched` resource.
+        // Safety: Infallible.
+        let ptr: NonNull<u8> = unsafe { NonNull::new_unchecked(addr_of_mut!(self.sched) as _) };
+        self.sched.register_default_resource(self.sched.rkey(), ptr);
+
+        // Registers `meshes` resource.
+        // Safety: Infallible.
+        let ptr: NonNull<u8> = unsafe { NonNull::new_unchecked(addr_of_mut!(self.meshes) as _) };
+        self.sched
+            .register_default_resource(self.meshes.rkey(), ptr);
     }
 
-    fn register_offcanvas(&mut self, element: web_sys::OffscreenCanvas, handle: u32) {
+    fn register_offcanvas(
+        &mut self,
+        element: web_sys::OffscreenCanvas,
+        handle: CanvasHandle,
+        selectors: String,
+        scale: f64,
+    ) {
         self.render
-            .add_canvas(OffCanvas::new(element, handle))
+            .add_canvas(OffCanvas::new(element, handle), selectors)
             .with_default_surface();
+        self.render.scale = scale;
     }
 
     fn update_scale_factor(&mut self, scale: f64) {
@@ -427,7 +561,7 @@ impl AppState {
     }
 
     pub fn spawn_worker(&mut self, num: Option<usize>) {
-        debug_assert!(self.workers.is_empty());
+        assert!(self.workers.is_empty());
 
         // Spawns sub workers.
         let num = num.unwrap_or(web::hardware_concurrency() - 1);
@@ -446,37 +580,13 @@ impl AppState {
     }
 
     #[inline]
-    pub fn add_geometry(
-        &mut self,
-        key: impl Into<ObjectKey>,
-        geo: impl Into<SeparateGeometry>,
-    ) -> GeometryReturn {
-        fn inner(this: &mut AppState, key: ObjectKey, geo: SeparateGeometry) -> GeometryReturn {
-            this.meshes.add_geometry(key.clone(), Geometry::from(geo));
-            GeometryReturn {
-                recv: this,
-                ret: key,
-            }
-        }
-
-        inner(self, key.into(), geo.into())
+    pub fn add_geometry(&mut self, key: impl Into<ObjectKey>, geo: impl Into<SeparateGeometry>) {
+        self.meshes.add_geometry(key, geo);
     }
 
     #[inline]
-    pub fn add_material(
-        &mut self,
-        key: impl Into<ObjectKey>,
-        mat: impl Into<Material>,
-    ) -> MaterialReturn {
-        fn inner(this: &mut AppState, key: ObjectKey, mat: Material) -> MaterialReturn {
-            this.meshes.add_material(key.clone(), mat);
-            MaterialReturn {
-                recv: this,
-                ret: key,
-            }
-        }
-
-        inner(self, key.into(), mat.into())
+    pub fn add_material(&mut self, key: impl Into<ObjectKey>, mat: impl Into<Material>) {
+        self.meshes.add_material(key, mat);
     }
 
     #[inline]
@@ -485,63 +595,23 @@ impl AppState {
         mesh: impl Into<ObjectKey>,
         geo: impl Into<ObjectKey>,
         mat: impl Into<ObjectKey>,
-    ) -> MeshReturn {
-        fn inner(
-            this: &mut AppState,
-            mesh: ObjectKey,
-            geo: ObjectKey,
-            mat: ObjectKey,
-        ) -> MeshReturn {
-            this.meshes.add_mesh(mesh.clone(), geo, mat);
-            MeshReturn {
-                recv: this,
-                ret: mesh,
-            }
-        }
-
-        inner(self, mesh.into(), geo.into(), mat.into())
+    ) {
+        self.meshes.add_mesh(mesh, geo, mat);
     }
 
     #[inline]
-    pub fn register_entity(&mut self, reg: EntityForm) -> usize {
+    pub fn register_entity(&mut self, reg: EntityForm) -> EntityKey<'static> {
         self.sched.register_entity(reg)
     }
 
-    pub fn temp_begin_add_entity(&mut self, enti: usize) {
-        let cont = self
-            .sched
-            .entities
-            .get_entity_container_mut(EntityKey::Index(enti))
-            .unwrap();
-        cont.begin_add_item();
-    }
-
-    pub fn temp_add_entity_comp<C: Component>(&mut self, enti: usize, value: C) {
-        let cont = self
-            .sched
-            .entities
-            .get_entity_container_mut(EntityKey::Index(enti))
-            .unwrap();
-        let coli = cont.get_column_index(&ty!(C)).unwrap();
-        unsafe { cont.add_item(coli, &value as *const C as *const u8) };
-    }
-
-    pub fn temp_end_add_entity(&mut self, enti: usize) -> usize {
-        let cont = self
-            .sched
-            .entities
-            .get_entity_container_mut(EntityKey::Index(enti))
-            .unwrap();
-        cont.end_add_item()
+    #[inline]
+    pub fn add_entity<E: Entity>(&mut self, enti: usize, value: E) -> EntityId {
+        self.sched.add_entity(enti, value)
     }
 
     // TODO: AppError
     #[inline]
     pub fn add_scene(&mut self, key: impl Into<ObjectKey>, scene: Scene) -> Result<(), SceneError> {
-        self._add_scene(key.into(), scene)
-    }
-
-    fn _add_scene(&mut self, key: ObjectKey, mut scene: Scene) -> Result<(), SceneError> {
         let AppState {
             sched,
             render,
@@ -550,209 +620,21 @@ impl AppState {
             ..
         } = self;
 
-        scene.set_gpu(Rc::clone(&render.gpu));
-
-        // Makes mapping between scene's nodes and ECS's entities.
-        for (i, node) in scene.hierarchy.iter_nodes() {
-            if let Some((enti, eid)) = node.get_mapped_entity() {
-                // TODO: Use filter, This is duplicate implementation.
-                // Using system may be a good choice.
-                let cont = sched
-                    .entities
-                    .get_entity_container_mut(EntityKey::Index(enti))
-                    .unwrap();
-                let coli = cont.get_column_index(&ty!(components::Drawable)).unwrap();
-                let mut borrowed = cont.borrow_column_mut(coli).unwrap();
-                let mut getter: GetterMut<'_, components::Drawable> = (&mut *borrowed).into();
-                let value = getter.get(eid).unwrap();
-                value.node.scene_key = key.id;
-                value.node.node_index = i;
-            }
-        }
-
-        // Makes geometry to be interleaved and sets it to the scene.
-        meshes.make_mesh_geometry_interleaved(scene.meshes.iter());
-        scene.fill_geometry_and_material(meshes)?;
-
-        // Creates a surface pack and sets it to the scene.
-        let index = render.add_surface_pack_from(scene.canvases.iter());
-        scene.set_surface_pack_index(index);
-
-        // Creates shader builder, builds, and sets it to the scene.
-        let builder = scene.create_shader_builder(meshes, &render.surf_packs, &render.surfaces);
-        let builder_index = render.add_shader_builder(builder);
-        let shader = render.build_shader(builder_index, &key);
-        scene.set_shader(Rc::clone(shader));
-
-        // Calculates size for geometry buffers on consideration of alignment.
-        let (vert_size, index_size) = scene.calc_geometry_buffer_size(meshes);
-
-        // Requests geometry buffers and sets them to the scene.
-        let vert_buf = render.add_vertex_buffer(SizeOrData::Size(vert_size, true))?;
-        let index_buf = render.add_ro_index_buffer(SizeOrData::Size(index_size, true))?;
-        scene.set_geometry_buffer(meshes, vert_buf, index_buf);
-
-        // Instance buffer.
-        let inst_buf_view = scene.get_transform_buffer_view();
-        let inst_buf_size = inst_buf_view.size() as u64;
-        let inst_buf = render.add_vertex_buffer(SizeOrData::Size(inst_buf_size, false))?;
-        scene.set_instance_buffer(Rc::clone(&inst_buf));
-
-        // Requests camera buffers and sets them to the scene.
-        let Scene {
-            cameras,
-            camera_bufs,
-            camera_binds,
-            ..
-        } = &mut scene;
-        for (camera_key, camera) in cameras.iter() {
-            let cam_bytes = camera.as_bytes();
-            let uni_buf = render.add_uniform_buffer(SizeOrData::Data(cam_bytes))?;
-            let desc = descs::BufferBindDesc {
-                layout_key: camera_key.clone(),
-                group_key: camera_key.clone(),
-                bufs: &[&uni_buf],
-                item_sizes: &[cam_bytes.len() as u64],
-                ..Default::default()
-            };
-            render.add_default_buffer_bind(desc);
-            let bind_group = render.get_bind_group(camera_key).unwrap();
-            camera_binds.insert(camera_key.clone(), Rc::clone(bind_group));
-            camera_bufs.insert(camera_key.clone(), uni_buf);
-        }
-
-        // Requests material buffers and sets them to the scene.
-        let Scene {
-            mats,
-            mat_bufs,
-            mat_binds,
-            ..
-        } = &mut scene;
-        for (mat_key, _) in mats.iter() {
-            let mat = meshes.get_material(mat_key).unwrap();
-            let mat_bytes = mat.as_bytes();
-            let uni_buf = render.add_ro_uniform_buffer(SizeOrData::Data(mat_bytes))?;
-            let desc = descs::BufferBindDesc {
-                layout_key: mat_key.clone(),
-                group_key: mat_key.clone(),
-                bufs: &[&uni_buf],
-                item_sizes: &[mat_bytes.len() as u64],
-                ..Default::default()
-            };
-            render.add_default_buffer_bind(desc);
-            let bind_group = render.get_bind_group(mat_key).unwrap();
-            mat_binds.insert(mat_key.clone(), Rc::clone(bind_group));
-            mat_bufs.insert(mat_key.clone(), uni_buf);
-        }
-
-        // Creates pipeline layout.
-        let mut builder = PipelineLayoutBuilder::new();
-        let Scene { cameras, mats, .. } = &mut scene;
-        if let Some(camera_key) = cameras.keys().next() {
-            let bind_layout = render.get_bind_group_layout(camera_key).unwrap();
-            builder.bind_group_layouts.push(Rc::clone(bind_layout));
-        }
-        if let Some(mat_key) = mats.keys().next() {
-            let bind_layout = render.get_bind_group_layout(mat_key).unwrap();
-            builder.bind_group_layouts.push(Rc::clone(bind_layout));
-        }
-        let plb_index = render.add_pipeline_layout_builder(builder);
-        let layout = render.build_pipeline_layout(plb_index, key.clone());
-
-        // Creates pipeline.
-        let mut builder = PipelineBuilder::new();
-        builder.set_layout(Rc::clone(layout));
-        let shader = scene.shader.as_ref().unwrap();
-        if shader.has_vertex_stage() {
-            builder.set_vertex_shader(Rc::clone(shader));
-        }
-        if shader.has_fragment_stage() {
-            builder.set_fragment_shader(Rc::clone(shader));
-        }
-        if let Some(geo_key) = scene.geos.keys().next() {
-            let geo = meshes.get_geometry(geo_key).unwrap();
-            // vertex buffer
-            let view = BufferView::new_from_geometry(geo.as_interleaved().unwrap());
-            builder.vert_buf_view.push(view);
-            // instance buffer
-            let mut view = BufferView::new(
-                inst_buf_view.get_item_size(),
-                inst_buf_view.len,
-                inst_buf_view.offset,
-            );
-            view.set_buffer(inst_buf);
-            view.set_vertex_step_mode(wgpu::VertexStepMode::Instance);
-            // TODO: Hard coded
-            view.set_vertex_attributes(&[
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x4,
-                    offset: 0,
-                    shader_location: 2,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x4,
-                    offset: 16,
-                    shader_location: 3,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x4,
-                    offset: 32,
-                    shader_location: 4,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x4,
-                    offset: 48,
-                    shader_location: 5,
-                },
-            ]);
-            builder.vert_buf_view.push(view);
-        }
-        builder.set_surface_pack_index(scene.surf_pack_index.clone());
-        let pb_index = render.add_pipeline_builder(builder);
-        let pipeline = render.build_pipeline(pb_index, key.clone());
-        scene.pipelines.insert(key.clone(), Rc::clone(pipeline));
-
-        // Removes temporary builders.
-        render.remove_pipeline_layout_builder(plb_index);
-        render.remove_pipeline_builder(pb_index);
-
-        // PassGraph.
-        scene.build_pass_graph(&key.label);
-
-        // Adds the scene.
-        scene_mgr.insert_scene(key.clone(), scene);
-        scene_mgr.activate_scene(key);
-        Ok(())
+        SceneManager::temp_adopt(key.into(), scene, sched, render, meshes, scene_mgr)
     }
 
     /// Registers and activates a system.
     #[inline]
-    pub fn register_system<S: System>(&mut self, sys: S) -> bool {
-        let res = self.sched.register_system(sys);
-
-        fn activate(this: &mut AppState, skey: SystemKey) {
-            if let Some(last_sys) = this.last_sys.take() {
-                this.sched.activate_system(&skey, &last_sys);
-            } else {
-                this.sched.activate_system_as_first(&skey);
-            }
+    pub fn register_system<S: System>(&mut self, sys: S, live: u32) -> bool {
+        fn activate(this: &mut AppState, skey: SystemKey, live: u32) {
+            this.sched
+                .activate_system(&skey, this.last_sys.as_ref(), live);
             this.last_sys = Some(skey);
         }
 
-        activate(self, S::key());
+        let res = self.sched.register_system(sys);
+        activate(self, S::key(), live);
         res
-    }
-
-    #[inline]
-    pub fn register_inactive_system<S: System>(&mut self, _sys: S) {
-        todo!()
-    }
-
-    /// Adds a super system.
-    /// Super systems can add or remove normal systems.
-    #[inline]
-    pub fn add_super_system<S: System>(&mut self, _sys: S) -> &mut Self {
-        todo!()
     }
 
     pub fn run() {
@@ -799,11 +681,11 @@ pub unsafe fn sub_onmessage(ch: *const Channel, id: u32) {
 
                     return;
                 }
-                ChMsg::Task(mut task_ptr, buf_ptr) => {
+                ChMsg::Task(mut task_ptr, mut buf_ptr) => {
                     // crate::log!("[D] sub_onmessage(): worker({id}) received Task msg.");
 
                     let task = unsafe { task_ptr.as_mut() };
-                    let buf = unsafe { buf_ptr.as_ref() };
+                    let buf = unsafe { buf_ptr.as_mut() };
                     task.invoke(buf);
                     client.send(ChMsg::Fin(client.wid(), task.rkey())).unwrap();
                 }
@@ -830,10 +712,6 @@ pub unsafe fn sub_onmessage(ch: *const Channel, id: u32) {
 
     // crate::log!("[D] worker({id}) sub_onmessage has finished");
 }
-
-decl_return_wrap!(GeometryReturn, AppState, ObjectKey);
-decl_return_wrap!(MaterialReturn, AppState, ObjectKey);
-decl_return_wrap!(MeshReturn, AppState, ObjectKey);
 
 pub fn set_panic_hook() {
     #[cfg(debug_assertions)]

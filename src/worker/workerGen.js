@@ -5,7 +5,7 @@ export function createWorker(name) {
   });
 }
 
-// Note. This code is not related to worker.
+// NOTE: This code is not related to worker.
 //  But keeping this in here, somewhere in JS, helps us not to write complicate Rust code.
 //  For now, I don't want to make another JS file for this one.
 // Detects change of 'devicePixelRatio'.

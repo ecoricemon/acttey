@@ -1,6 +1,10 @@
 use super::opt_vec::OptVec;
 use crate::util;
-use std::{collections::HashMap, iter, ops};
+use std::{
+    collections::{HashMap, HashSet},
+    iter,
+    ops::{Deref, DerefMut, Range},
+};
 
 // TODO: Test
 // TODO: Alignment?, default is 1
@@ -17,7 +21,7 @@ pub struct VarChunkVec<T> {
 
     /// Fragment list.
     /// Assumes that there's no much fragments.
-    frags: Vec<usize>,
+    frags: HashSet<usize, ahash::RandomState>,
 
     /// Buffer index to view index, which is used to find next view.
     /// It always points to the valid [`ChunkView`].
@@ -36,7 +40,7 @@ impl<T> VarChunkVec<T> {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             views: OptVec::new(),
-            frags: Vec::new(),
+            frags: HashSet::default(),
             deref: HashMap::default(),
             buf: Vec::with_capacity(capacity),
         }
@@ -164,9 +168,8 @@ impl<T> VarChunkVec<T> {
 
             // Edits this view from fragment to chunk.
             let view = unsafe { self.views.get_unchecked_mut(fi) };
-            view.frag = false;
             self.buf[view.offset] = value;
-            unsafe { self.cut_chunk_unchecked(fi, 1) };
+            unsafe { self.shrink_chunk_unchecked(fi, 1) };
 
             fi
         } else {
@@ -175,14 +178,14 @@ impl<T> VarChunkVec<T> {
         }
     }
 
-    /// Cuts the chunk out of two chunks such that left one will have `left` items,
-    /// and right one will have left itmes as a fragment.
+    /// Shrinks the chunk to have `left` items only.
+    /// Then right range will become fragment.
     /// But if `left` is greater or equal to the current chunk size, nothing takes place.
     ///
     /// # Safety
     ///
     /// Undefined behavior if `ci` is out of bound or the view is vacant.
-    unsafe fn cut_chunk_unchecked(&mut self, ci: usize, left: usize) {
+    unsafe fn shrink_chunk_unchecked(&mut self, ci: usize, left: usize) {
         let view = self.views.get_unchecked_mut(ci);
         if view.len > left {
             let roff = view.offset + left;
@@ -201,18 +204,18 @@ impl<T> VarChunkVec<T> {
         fi
     }
 
-    #[inline]
     fn register_fragment(&mut self, fi: usize) {
-        self.frags.push(fi);
+        self.frags.insert(fi);
+
+        let view = self.views.get_mut(fi).unwrap();
+        view.frag = true;
     }
 
-    fn unregister_fragment(&mut self, fi: usize) {
-        for i in 0..self.frags.len() {
-            if self.frags[i] == fi {
-                self.frags.swap_remove(i);
-                break;
-            }
-        }
+    fn unregister_fragment(&mut self, ci: usize) {
+        self.frags.remove(&ci);
+
+        let view = self.views.get_mut(ci).unwrap();
+        view.frag = false;
     }
 
     /// Retrieves the next chunk index in buffer perspective.
@@ -258,9 +261,9 @@ impl<T> VarChunkVec<T> {
     ///
     /// Undefined behavior if `ci` is out of bound or the slot is vacant.
     unsafe fn push_item_unchecked(&mut self, ci: usize, value: T) {
+        self.unregister_fragment(ci);
         let view = unsafe { self.views.get_unchecked_mut(ci) };
         view.len += 1;
-        view.frag = false;
         if view.end() <= self.buf.len() {
             self.buf[view.end() - 1] = value;
         } else {
@@ -302,7 +305,7 @@ impl<T: Default + Copy> VarChunkVec<T> {
     pub fn push_item_to_chunk(&mut self, ci: usize, value: T) {
         // Checks.
         let view = *self.views.get(ci).unwrap();
-        assert!(!view.frag);
+        assert!(!view.is_fragment());
 
         // First, tries to use the next fragment.
         if self.push_item_using_fragment(ci, value) {
@@ -325,17 +328,21 @@ impl<T: Default + Copy> VarChunkVec<T> {
         // Appends `value`.
         self.buf[ii] = value;
 
-        // Swap views.
+        // Swaps views.
         self.views.swap_occupied(ci, fi);
 
-        // Adjust length.
-        unsafe { self.cut_chunk_unchecked(ci, view.len + 1) };
+        // Now, `ci` is not a fragment and `fi` is a fragment.
+        self.unregister_fragment(ci);
+        self.register_fragment(fi);
+
+        // Adjusts length.
+        unsafe { self.shrink_chunk_unchecked(ci, view.len + 1) };
     }
 
     /// # Panics
     ///
     /// Panics if `src` range is greater than `len`.
-    fn extend_buffer(&mut self, len: usize, src: ops::Range<usize>) {
+    fn extend_buffer(&mut self, len: usize, src: Range<usize>) {
         let diff = len - src.len();
         self.buf.reserve_exact(len);
         self.buf.extend_from_within(src);
@@ -471,7 +478,7 @@ impl ChunkView {
     }
 }
 
-impl ops::Deref for ChunkView {
+impl Deref for ChunkView {
     type Target = util::Window;
 
     #[inline]
@@ -480,7 +487,7 @@ impl ops::Deref for ChunkView {
     }
 }
 
-impl ops::DerefMut for ChunkView {
+impl DerefMut for ChunkView {
     #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.win

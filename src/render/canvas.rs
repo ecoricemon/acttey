@@ -2,7 +2,13 @@ use crate::{
     ds::generational::{GenIndexRc, GenVecRc},
     worker::msg::MsgEventCanvasResize,
 };
-use std::{mem::ManuallyDrop, ops::Deref, rc::Rc};
+use std::{
+    cmp::{Ordering, PartialEq, PartialOrd},
+    fmt::Display,
+    mem::ManuallyDrop,
+    ops::{Add, AddAssign, Deref},
+    rc::Rc,
+};
 
 /// A set of textures and views from the surfaces used in a single render pass.
 /// In a render pass, call [`SurfacePack::create_color_attachments`] and [`SurfacePack::present`].
@@ -286,7 +292,7 @@ impl Surface {
     }
 
     #[inline]
-    pub fn handle(&self) -> u32 {
+    pub fn handle(&self) -> CanvasHandle {
         self.offcanvas.handle()
     }
 
@@ -371,22 +377,22 @@ impl Surface {
 #[derive(Debug, Clone)]
 pub struct OffCanvas {
     element: web_sys::OffscreenCanvas,
-    handle: u32,
+    handle: CanvasHandle,
 }
 
 impl OffCanvas {
     #[inline]
-    pub const fn new(element: web_sys::OffscreenCanvas, handle: u32) -> Self {
+    pub const fn new(element: web_sys::OffscreenCanvas, handle: CanvasHandle) -> Self {
         Self { element, handle }
     }
 
     #[inline]
-    pub fn destructure(self) -> (web_sys::OffscreenCanvas, u32) {
+    pub fn destructure(self) -> (web_sys::OffscreenCanvas, CanvasHandle) {
         (self.element, self.handle)
     }
 
     #[inline]
-    pub const fn handle(&self) -> u32 {
+    pub const fn handle(&self) -> CanvasHandle {
         self.handle
     }
 }
@@ -397,5 +403,89 @@ impl Deref for OffCanvas {
     #[inline]
     fn deref(&self) -> &Self::Target {
         &self.element
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CanvasHandle(u32);
+
+impl CanvasHandle {
+    const DUMMY: Self = Self::new(u32::MAX - 1);
+    const WINDOW: Self = Self::new(0);
+
+    pub const fn new(handle: u32) -> Self {
+        Self(handle)
+    }
+
+    pub const fn dummy_handle() -> Self {
+        Self::DUMMY
+    }
+
+    pub const fn window_handle() -> Self {
+        Self::WINDOW
+    }
+
+    pub fn is_dummy_handle(&self) -> bool {
+        *self == Self::dummy_handle()
+    }
+
+    pub fn is_window_handle(&self) -> bool {
+        *self == Self::window_handle()
+    }
+
+    pub const fn into_inner(self) -> u32 {
+        self.0
+    }
+}
+
+impl Display for CanvasHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Add for CanvasHandle {
+    type Output = Self;
+
+    #[inline]
+    fn add(self, rhs: Self) -> Self::Output {
+        Self::new(self.0 + rhs.0)
+    }
+}
+
+impl Add<u32> for CanvasHandle {
+    type Output = Self;
+
+    #[inline]
+    fn add(self, rhs: u32) -> Self::Output {
+        Self::new(self.0 + rhs)
+    }
+}
+
+impl AddAssign for CanvasHandle {
+    #[inline]
+    fn add_assign(&mut self, rhs: Self) {
+        self.0 += rhs.0;
+    }
+}
+
+impl AddAssign<u32> for CanvasHandle {
+    #[inline]
+    fn add_assign(&mut self, rhs: u32) {
+        self.0 += rhs;
+    }
+}
+
+impl PartialEq<u32> for CanvasHandle {
+    #[inline]
+    fn eq(&self, other: &u32) -> bool {
+        &self.0 == other
+    }
+}
+
+impl PartialOrd<u32> for CanvasHandle {
+    #[inline]
+    fn partial_cmp(&self, other: &u32) -> Option<Ordering> {
+        self.0.partial_cmp(other)
     }
 }

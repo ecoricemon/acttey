@@ -4,9 +4,13 @@ pub mod event;
 mod r#loop;
 
 pub mod prelude {
-    pub use super::app::{App, AppState};
+    pub use super::{
+        app::{App, AppState},
+        event::EventType,
+    };
 }
 
+use crate::render::canvas::CanvasHandle;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -18,5 +22,5 @@ pub enum AppError {
     )]
     DoubleCanvasCreation(String),
     #[error("canvas can't transfer control to offscreen twice. your access handle was {0}")]
-    DoubleOffscreenCanvas(u32),
+    DoubleOffscreenCanvas(CanvasHandle),
 }

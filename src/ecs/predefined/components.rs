@@ -1,33 +1,14 @@
-use crate::{acttey, primitive::transform::Transform};
+use crate::{acttey, ecs::component::Component};
 use acttey_ecs_macros::Component;
 
-// Users can edit local transformations from ECS systems.
-#[derive(Component, Debug, Default)]
-pub struct Drawable {
-    /// Local transformation.
-    pub transform: Transform,
-
-    /// Scene node mapping.
-    pub(crate) node: SceneNodeKey,
-}
-
-impl Drawable {
-    #[inline]
-    pub fn get_scene_key(&self) -> u64 {
-        self.node.scene_key
-    }
-
-    #[inline]
-    pub fn get_scene_node_index(&self) -> usize {
-        self.node.node_index
-    }
-}
+pub use crate::primitive::transform::Transform;
+impl Component for Transform {}
 
 /// Scene node mapping.  
 #[derive(Component, Debug, Default)]
-pub struct SceneNodeKey {
+pub struct SceneNode {
     /// Scene key.
-    pub(crate) scene_key: u64,
+    pub(crate) scene_key: u32,
 
     /// Node index.
     pub(crate) node_index: usize,

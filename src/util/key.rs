@@ -1,38 +1,44 @@
-use crate::util::string::{RcStr, ToStr};
+use crate::util::string::ToStr;
 use std::{
     borrow::Cow,
     hash::{Hash, Hasher},
-    thread_local,
+    sync::{Arc, OnceLock},
 };
 
-/// Id for disginguishing objects such as colors, meshes, or graphics pipelines.
+/// Id for distinguishing objects such as colors, meshes, or graphics pipelines.
 #[derive(Debug, Eq, Clone)]
 pub struct ObjectKey {
     /// Unique ID.
     /// TODO: upper bits will be used for automatically generated sub-keys
     /// such as scene's pipelines.
-    pub(crate) id: u64,
+    id: u32,
 
     /// Optional label. Use default() if you don't want label.
-    pub(crate) label: RcStr,
+    label: Arc<str>,
 }
 
 impl ObjectKey {
-    #[inline]
-    pub const fn new(id: u64, label: RcStr) -> Self {
+    pub const fn new(id: u32, label: Arc<str>) -> Self {
         Self { id, label }
     }
 
-    #[inline]
-    pub fn with_id(mut self, id: impl Into<u64>) -> Self {
-        self.id = id.into();
-        self
+    pub fn dummy() -> Self {
+        static DUMMY: OnceLock<ObjectKey> = OnceLock::new();
+        DUMMY
+            .get_or_init(|| Self::new(u32::MAX, "dummy".into()))
+            .clone()
     }
 
-    #[inline]
-    pub fn with_label(mut self, label: impl Into<RcStr>) -> Self {
-        self.label = label.into();
-        self
+    pub const fn is_dummy(&self) -> bool {
+        self.id == u32::MAX
+    }
+
+    pub const fn id(&self) -> u32 {
+        self.id
+    }
+
+    pub const fn label(&self) -> &Arc<str> {
+        &self.label
     }
 }
 
@@ -63,7 +69,7 @@ impl PartialEq for ObjectKey {
     }
 }
 
-impl<T: Into<u64>> From<T> for ObjectKey {
+impl<T: Into<u32>> From<T> for ObjectKey {
     #[inline]
     fn from(value: T) -> Self {
         Self {
@@ -74,12 +80,7 @@ impl<T: Into<u64>> From<T> for ObjectKey {
 }
 
 impl Default for ObjectKey {
-    #[inline]
     fn default() -> Self {
-        DUMMY_RC_STR.with(|label| Self::new(0_u64, label.clone()))
+        Self::dummy()
     }
-}
-
-thread_local! {
-    pub(crate) static DUMMY_RC_STR: RcStr = RcStr::new("");
 }

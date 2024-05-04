@@ -113,9 +113,10 @@ impl<K, V> SetList<K, V> {
         }
     }
 
-    // Dev note. Don't implement len(). It's confusing because we put in default node.
     /// Retrieves the length of node buffer,
     /// which is default head node + # of vacant slots + # of occupied slots.
+    //
+    // NOTE: Don't implement len(). It's confusing because we put in default node.
     #[inline]
     pub fn len_buf(&self) -> usize {
         self.nodes.len()

@@ -1,12 +1,15 @@
 use super::{
     borrow_js::JsAtomic,
-    entity::{EntityDict, EntityForm, EntityKey, EntityKeyKind, EntityTag},
+    entity::{Entity, EntityDict, EntityForm, EntityId, EntityKey, EntityKeyKind, EntityTag},
     filter::{FilterInfo, Filtered},
-    predefined::resource::{RenderResource, SceneManager},
+    predefined::resources::{RenderResource, SceneManager},
     query::{QueryInfo, ResQueryInfo},
     request::{RequestBuffer, RequestInfo, RequestKey},
     resource::{Resource, ResourceKey, ResourcePack},
-    system::{SharedInfo, System, SystemData, SystemId, SystemKey, SystemPack},
+    system::{
+        FnSystem, Invokable, SharedInfo, StructOrFnSystem, System, SystemData, SystemId, SystemKey,
+        SystemPack,
+    },
     wait::{WaitNotifyType, WaitQueuePack, WaitRequest},
 };
 use crate::{
@@ -19,13 +22,14 @@ use crate::{
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt::Debug,
+    num::NonZeroU32,
     ptr::NonNull,
     sync::mpsc::TryRecvError,
     thread,
 };
 
 #[derive(Debug)]
-pub(crate) struct Scheduler {
+pub struct Scheduler {
     /// Systems.
     systems: SystemPack,
 
@@ -81,19 +85,50 @@ impl Scheduler {
         }
     }
 
-    /// Must be called before [`Self::register_system`].
-    #[inline]
-    pub(crate) fn register_default_resource(&mut self, rkey: ResourceKey, ptr: NonNull<u8>) {
-        let index = self.resources.register_default_resource(rkey, ptr);
-        self.waits.init_resource_queue(index);
+    pub fn register_entity(&mut self, reg: EntityForm) -> EntityKey<'static> {
+        // Registers new entity.
+        let ekey = self.entities.register_entity(reg);
+
+        // Updates cache for the new entity.
+        self.update_cache(ekey.index());
+
+        // Makes wait queue for the entity.
+        let cont = unsafe {
+            self.entities
+                .get_entity_container(ekey.clone())
+                .unwrap_unchecked()
+        };
+        self.waits
+            .init_entity_queue(ekey.index(), cont.get_column_num());
+
+        ekey
     }
 
-    pub(crate) fn register_resource(&mut self) {
-        todo!()
+    pub fn add_entity<E: Entity>(&mut self, enti: usize, value: E) -> EntityId {
+        let cont = self
+            .entities
+            .get_entity_container_mut(EntityKey::Index(enti))
+            .unwrap();
+        let index = value.add_to(cont);
+        EntityId::new(enti, index)
     }
 
     #[inline]
-    pub(crate) fn register_system<S: System>(&mut self, sys: S) -> bool {
+    pub fn register_system<T, S, Req, F>(&mut self, sys: T) -> bool
+    where
+        T: Into<StructOrFnSystem<S, Req, F>>,
+        S: System,
+        FnSystem<Req, F>: System,
+    {
+        self._register_system(sys).0
+    }
+
+    fn _register_system<T, S, Req, F>(&mut self, sys: T) -> (bool, SystemKey)
+    where
+        T: Into<StructOrFnSystem<S, Req, F>>,
+        S: System,
+        FnSystem<Req, F>: System,
+    {
         fn inner(this: &mut Scheduler, skey: SystemKey, sdata: SystemData) -> bool {
             // Determines whether the system is dedicated task or not.
             let (_, rinfo) = sdata.req();
@@ -103,10 +138,11 @@ impl Scheduler {
                 .rkeys()
                 .iter()
                 .chain(write_qinfo.rkeys().iter())
-                .any(|&rkey| 
+                .any(|&rkey| {
                     rkey == <RenderResource as Resource>::key()
-                    || rkey == <SceneManager as Resource>::key()
-                );
+                        || rkey == <SceneManager as Resource>::key()
+                        || rkey == <Scheduler as Resource>::key()
+                });
 
             this.create_cache_for_system(&sdata);
             let sid = this.systems.register_system(skey, sdata);
@@ -121,36 +157,62 @@ impl Scheduler {
             sid.is_some()
         }
 
-        let sdata = sys.into_data(&mut self.sh_info);
-        inner(self, S::key(), sdata)
-    }
-
-    pub(crate) fn register_entity(&mut self, reg: EntityForm) -> usize {
-        // Registers new entity.
-        let enti = self.entities.register_entity(reg);
-
-        // Updates cache for the new entity.
-        self.update_cache(enti);
-
-        // Makes wait queue for the entity.
-        let cont = unsafe {
-            self.entities
-                .get_entity_container(EntityKey::Index(enti))
-                .unwrap_unchecked()
+        let sys: StructOrFnSystem<S, Req, F> = sys.into();
+        let (skey, sdata) = match sys {
+            StructOrFnSystem::Struct(s) => {
+                let skey = S::key();
+                let sdata = s.into_data(&mut self.sh_info);
+                (skey, sdata)
+            }
+            StructOrFnSystem::Fn(f) => {
+                let skey = f.skey();
+                let sdata = f.into_data(&mut self.sh_info);
+                (skey, sdata)
+            }
         };
-        self.waits.init_entity_queue(enti, cont.get_column_num());
+        let res = inner(self, skey, sdata);
+        (res, skey)
+    }
 
-        enti
+    pub fn activate_system(
+        &mut self,
+        target: &SystemKey,
+        after: Option<&SystemKey>,
+        live: u32,
+    ) -> bool {
+        let live = NonZeroU32::new(live).unwrap();
+        if let Some(after) = after {
+            self.systems.activate_system(target, after, live)
+        } else {
+            self.systems.activate_system_as_first(target, live)
+        }
     }
 
     #[inline]
-    pub(crate) fn activate_system(&mut self, skey: &SystemKey, after: &SystemKey) -> bool {
-        self.systems.activate_system(skey, after)
+    pub fn append_system<T, S, Req, F>(&mut self, sys: T, live: u32) -> bool
+    where
+        T: Into<StructOrFnSystem<S, Req, F>>,
+        S: System,
+        FnSystem<Req, F>: System,
+    {
+        let (res, skey) = self._register_system(sys);
+        if res {
+            let live = NonZeroU32::new(live).unwrap();
+            let must_true = self.systems.activate_system_as_last(&skey, live);
+            debug_assert!(must_true);
+        }
+        res
     }
 
+    /// Must be called before [`Self::register_system`].
     #[inline]
-    pub(crate) fn activate_system_as_first(&mut self, skey: &SystemKey) -> bool {
-        self.systems.activate_system_as_first(skey)
+    pub(crate) fn register_default_resource(&mut self, rkey: ResourceKey, ptr: NonNull<u8>) {
+        let index = self.resources.register_default_resource(rkey, ptr);
+        self.waits.init_resource_queue(index);
+    }
+
+    pub(crate) fn register_resource(&mut self) {
+        todo!()
     }
 
     /// Schedules all systems(tasks).
@@ -233,6 +295,11 @@ impl Scheduler {
         }
 
         /// Tries to do the dedicated task on the main worker.
+        /// Note that a system can modify [`Scheduler`] directly.
+        /// That means inner data in the fields of [`Scheduler`] can be moved after invoking the system.
+        /// For now, it's fine.
+        //
+        // TODO: Is there more safe way? If I change schedule(), it can cause invalid address access.
         fn try_do_self(
             sdata: &mut SystemData,
             cache: &mut HashMap<RequestKey, RequestCache, ahash::RandomState>,
@@ -242,8 +309,12 @@ impl Scheduler {
         ) -> bool {
             if let Some(cached) = try_update_task(sdata, cache, waits, entities, resources) {
                 let invokable = sdata.invokable_mut();
-                invokable.invoke(&cached.buf);
+
+                // NOTE: If `Scheduler` is modified, `cached` could be moved in `invoke()`.
+                // Therefore, `dequeue()` must be called before it.
+                // It's fine because the system is a dedicated task.
                 waits.dequeue(&cached.wait);
+                invokable.invoke(&mut cached.buf);
                 true
             } else {
                 false
@@ -300,29 +371,30 @@ impl Scheduler {
             idle_workers.push(wi);
         }
 
-        // TODO: system pointers will be transferred to workers. 
-        // That means system must not be moved during **running**. 
+        // TODO: system pointers will be transferred to workers.
+        // That means system must not be moved during **running**.
         // Can we guarantee that?
 
         let worker_num = workers.len();
         let mut cur_sys = systems.iter_begin();
 
         'outer: loop {
-
             while try_recv(ch, cache, waits, idle_workers) {}
 
             // Safety: `cur_sys` is controlled to be valid.
-            let (has_normal_task, has_dedicated_task) = unsafe { has_task(
-                pending_tasks,
-                dedi_pending_tasks,
-                systems,
-                dedi_tasks,
-                cur_sys,
-            ) };
+            let (has_normal_task, has_dedicated_task) = unsafe {
+                has_task(
+                    pending_tasks,
+                    dedi_pending_tasks,
+                    systems,
+                    dedi_tasks,
+                    cur_sys,
+                )
+            };
 
             match (
-                has_normal_task, 
-                has_dedicated_task, 
+                has_normal_task,
+                has_dedicated_task,
                 idle_workers.is_empty(),
                 is_worker_working(idle_workers, worker_num),
             ) {
@@ -372,7 +444,7 @@ impl Scheduler {
                         cur_sys = next;
                     }
                 }
-            } 
+            }
 
             if has_dedicated_task {
                 if try_recv(ch, cache, waits, idle_workers) {
@@ -407,6 +479,9 @@ impl Scheduler {
         for worker in workers.iter() {
             worker.close().unwrap();
         }
+
+        // Inactivates dead systems.
+        systems.tick();
 
         // crate::log!("[D] schedule() has finished.");
     }
@@ -552,7 +627,7 @@ impl Scheduler {
         finfo: &FilterInfo,
     ) -> Option<(usize, usize, EntityTag)> {
         let ekey = EntityKey::Index(enti);
-        let cont = entities.get_entity_container(ekey)?;
+        let cont = entities.get_entity_container(ekey.clone())?;
         if !finfo.filter(|ckey| cont.contains_column(ckey.as_type())) {
             return None;
         }
@@ -636,7 +711,7 @@ impl RequestCache {
         }
         unsafe { self.buf.res_write.set_len(0) };
         for ri in self.wait.res_write.iter().cloned() {
-            let borrowed = res.borrow(ri).unwrap();
+            let borrowed = res.borrow_mut(ri).unwrap();
             self.buf.res_write.push(borrowed);
         }
 

@@ -1,11 +1,10 @@
 use crate::{ds::vec::VarChunkVec, util::Window};
-use ahash::AHashMap;
-use std::{borrow::Borrow, hash::Hash};
+use std::{borrow::Borrow, collections::HashMap, hash::Hash};
 
 #[derive(Debug, Clone)]
 pub struct VarChunkBuffer<K, V> {
     /// Key to view index.
-    map: AHashMap<K, usize>,
+    map: HashMap<K, usize, ahash::RandomState>,
 
     /// Chunks including fragments.
     vec: VarChunkVec<V>,
@@ -14,14 +13,14 @@ pub struct VarChunkBuffer<K, V> {
 impl<K, V> VarChunkBuffer<K, V> {
     pub fn new() -> Self {
         Self {
-            map: AHashMap::new(),
+            map: HashMap::default(),
             vec: VarChunkVec::new(),
         }
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            map: AHashMap::new(),
+            map: HashMap::default(),
             vec: VarChunkVec::with_capacity(capacity),
         }
     }
@@ -209,10 +208,9 @@ impl<K: Hash + Eq, V: Default + Copy> VarChunkBuffer<K, V> {
     }
 
     /// Inserts `value` to present chunk or newly generated chunk, then returns the chunk's index.
-    /// If you know index already, use [`Self::insert2`] instead, which is recommended way.
     pub fn insert_new(&mut self, key: K, value: V) -> usize {
         if let Some(ci) = self.get_index(&key) {
-            self.insert2(&key, value);
+            self.insert(ci, value);
             ci
         } else {
             let ci = self.vec.push_item(value);

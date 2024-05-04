@@ -1,5 +1,7 @@
-use ahash::{AHashMap, AHashSet};
-use std::hash::Hash;
+use std::{
+    collections::{HashMap, HashSet},
+    hash::Hash,
+};
 
 pub trait DepKey: PartialEq + Eq + Hash + Clone {}
 
@@ -7,13 +9,13 @@ impl<T: PartialEq + Eq + Hash + Clone> DepKey for T {}
 
 #[derive(Debug)]
 pub struct DepNode<K: DepKey> {
-    children: AHashSet<K>,
+    children: HashSet<K, ahash::RandomState>,
     rc: usize,
 }
 
 impl<K: DepKey> DepNode<K> {
     fn new(child: Option<K>, rc: usize) -> Self {
-        let mut children = AHashSet::new();
+        let mut children = HashSet::default();
         if let Some(child) = child {
             children.insert(child);
         }
@@ -23,13 +25,13 @@ impl<K: DepKey> DepNode<K> {
 
 #[derive(Debug)]
 pub struct DepGraph<K: DepKey> {
-    nodes: AHashMap<K, DepNode<K>>,
+    nodes: HashMap<K, DepNode<K>, ahash::RandomState>,
 }
 
 impl<K: DepKey> DepGraph<K> {
     pub fn new() -> Self {
         Self {
-            nodes: AHashMap::new(),
+            nodes: HashMap::default(),
         }
     }
 

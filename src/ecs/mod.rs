@@ -12,6 +12,13 @@ pub mod system;
 pub mod wait;
 
 pub mod prelude {
-    pub use super::{filter::Filter, predefined::prelude::*, request::Request, system::System};
+    pub use super::{
+        entity::EntityKey,
+        filter::Filter,
+        predefined::prelude::*,
+        query::{Read, ResRead, ResWrite, Write},
+        request::{Request, Response},
+        system::{AsFnSystemKey, System},
+    };
     pub use acttey_ecs_macros::Component;
 }

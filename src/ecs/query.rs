@@ -4,7 +4,74 @@ use super::{
     resource::ResourceKey,
 };
 use crate::ds::borrow::Borrowed;
-use std::{any::TypeId, ptr::NonNull, sync::Arc};
+use std::{
+    any::TypeId,
+    ops::{Deref, DerefMut},
+    ptr::NonNull,
+    sync::Arc,
+};
+
+/// A shallow wrapper structure for the [`Query`].
+pub struct Read<'r, R: Query>(pub(crate) <R as Query>::Output<'r>);
+
+impl<'r, R: Query> Deref for Read<'r, R> {
+    type Target = <R as Query>::Output<'r>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// A shallow wrapper structure for the [`QueryMut`].
+pub struct Write<'w, W: QueryMut>(pub(crate) <W as QueryMut>::Output<'w>);
+
+impl<'w, W: QueryMut> Deref for Write<'w, W> {
+    type Target = <W as QueryMut>::Output<'w>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<'w, W: QueryMut> DerefMut for Write<'w, W> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+/// A shallow wrapper structure for the [`ResQuery`].
+pub struct ResRead<RR: ResQuery>(pub(crate) <RR as ResQuery>::Output);
+
+impl<RR: ResQuery> Deref for ResRead<RR> {
+    type Target = <RR as ResQuery>::Output;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// A shallow wrapper structure for the [`ResQueryMut`].
+pub struct ResWrite<RW: ResQueryMut>(pub(crate) <RW as ResQueryMut>::Output);
+
+impl<RW: ResQueryMut> Deref for ResWrite<RW> {
+    type Target = <RW as ResQueryMut>::Output;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<RW: ResQueryMut> DerefMut for ResWrite<RW> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
 
 /// [`Query`] is a combination of [`Filter`](super::filter::Filter)s for read-only access.
 /// For instance, `()`, `FilterA`, and `(FilterA, FilterB)` are all `Query`.
@@ -30,7 +97,7 @@ pub trait QueryMut: 'static + Sized {
     }
 
     fn info<S: StoreQueryInfo>(info_stor: &mut S) -> Arc<QueryInfo>;
-    fn convert(input: &[Filtered]) -> Self::Output<'_>;
+    fn convert(input: &mut [Filtered]) -> Self::Output<'_>;
 }
 
 pub trait StoreQueryInfo: StoreFilterInfo {
@@ -75,7 +142,7 @@ impl QueryInfo {
 #[macro_export]
 macro_rules! impl_query {
     () => {const _: () = {
-        use $crate::acttey::ecs::{
+        use $crate::ecs::{
             query::{Query, QueryInfo, StoreQueryInfo},
             filter::Filtered,
         };
@@ -128,13 +195,13 @@ macro_rules! impl_query {
                 }
             }
 
-            fn convert(input: &[Filtered]) -> Self::Output<'_> {
+            fn convert(input: &mut [Filtered]) -> Self::Output<'_> {
                 debug_assert!(input.is_empty());
             }
         }
     };};
     ($id:ident) => {const _:() = {
-        use $crate::acttey::ecs::{
+        use $crate::ecs::{
             query::{Query, QueryInfo, StoreQueryInfo},
             filter::{Filter, Filtered},
         };
@@ -192,14 +259,15 @@ macro_rules! impl_query {
                 }
             }
 
-            fn convert(input: &[Filtered]) -> Self::Output<'_> {
+            fn convert(input: &mut [Filtered]) -> Self::Output<'_> {
                 debug_assert_eq!(1, input.len());
-                FilteredIterMut::new(input[0].query_res(), input[0].ent_tags())
+                let (etags, _, getters) = input[0].destructure();
+                FilteredIterMut::new(getters, etags)
             }
         }
     };};
     ($n:expr, $($i:expr),+) => {const _: () = {
-        use $crate::acttey::ecs::{
+        use $crate::ecs::{
             query::{Query, QueryInfo, StoreQueryInfo},
             filter::{Filter, Filtered},
         };
@@ -265,11 +333,12 @@ macro_rules! impl_query {
                     }
                 }
 
-                fn convert(input: &[Filtered]) -> Self::Output<'_> {
+                fn convert(input: &mut [Filtered]) -> Self::Output<'_> {
                     debug_assert_eq!($n, input.len());
-                    ( $(
-                        FilteredIterMut::new(input[$i].query_res(), input[$i].ent_tags())
-                    ),+ )
+                    ( $( {
+                        let (etags, _, getters) = input[$i].destructure();
+                        FilteredIterMut::new(getters, etags)
+                    } ),+ )
                 }
             }
         }
@@ -309,7 +378,7 @@ pub trait ResQueryMut: 'static + Sized {
     }
 
     fn info() -> ResQueryInfo;
-    fn convert(input: &[Borrowed<NonNull<u8>, JsAtomic>]) -> Self::Output;
+    fn convert(input: &mut [Borrowed<NonNull<u8>, JsAtomic>]) -> Self::Output;
 }
 
 /// [`TypeId`] for [`ResQuery`].
@@ -348,7 +417,7 @@ impl ResQueryInfo {
 #[macro_export]
 macro_rules! impl_res_query {
     () => {const _: () = {
-        use $crate::acttey::{
+        use $crate::{
             ecs::{query::{ResQuery, ResQueryInfo}, borrow_js::JsAtomic},
             ds::borrow::Borrowed,
         };
@@ -381,13 +450,13 @@ macro_rules! impl_res_query {
                 }
             }
 
-            fn convert(input: &[Borrowed<NonNull<u8>, JsAtomic>]) -> Self::Output {
+            fn convert(input: &mut [Borrowed<NonNull<u8>, JsAtomic>]) -> Self::Output {
                 debug_assert!(input.is_empty());
             }
         }
     };};
     ($id:ident) => {const _:() = {
-        use $crate::acttey::{
+        use $crate::{
             ecs::{
                 query::{ResQuery, ResQueryInfo},
                 resource::{Resource, ResourceRef, ResourceMut},
@@ -414,7 +483,9 @@ macro_rules! impl_res_query {
                 // Safety: Infallible.
                 unsafe {
                     ResourceRef::new(
-                        NonNull::new_unchecked(input.as_ptr().cast_mut())
+                        NonNull::new_unchecked( (
+                            &input[0] as *const Borrowed<NonNull<u8>, JsAtomic>
+                        ).cast_mut() )
                     )
                 }
             }
@@ -431,20 +502,20 @@ macro_rules! impl_res_query {
                 }
             }
 
-            fn convert(input: &[Borrowed<NonNull<u8>, JsAtomic>]) -> Self::Output {
+            fn convert(input: &mut [Borrowed<NonNull<u8>, JsAtomic>]) -> Self::Output {
                 debug_assert_eq!(1, input.len());
 
                 // Safety: Infallible.
                 unsafe {
                     ResourceMut::new(
-                        NonNull::new_unchecked(input.as_ptr().cast_mut())
+                        NonNull::new_unchecked(&mut input[0] as *mut _)
                     )
                 }
             }
         }
     };};
     ($n:expr, $($i:expr),+) => {const _: () = {
-        use $crate::acttey::{
+        use $crate::{
             ecs::{
                 query::{ResQuery, ResQueryInfo},
                 resource::{Resource, ResourceRef, ResourceMut},
@@ -473,14 +544,16 @@ macro_rules! impl_res_query {
                     // Safety: Infallible.
                     unsafe {( $(
                         ResourceRef::new(
-                            NonNull::new_unchecked(input.as_ptr().cast_mut().add($i))
+                            NonNull::new_unchecked( (
+                                &input[$i] as *const Borrowed<NonNull<u8>, JsAtomic>
+                            ).cast_mut() )
                         )
                     ),+ )}
                 }
             }
         }
 
-        // Implements `ResQueryMut` for (A, B, ...).
+        // Implements `ResQueryMut` for (A0, A1, ...).
         paste!{
             impl<$([<A $i>]: Resource),+> ResQueryMut for ( $([<A $i>]),+ ) {
                 type Output = ( $(ResourceMut<[<A $i>]>),+ );
@@ -492,13 +565,13 @@ macro_rules! impl_res_query {
                     }
                 }
 
-                fn convert(input: &[Borrowed<NonNull<u8>, JsAtomic>]) -> Self::Output {
+                fn convert(input: &mut [Borrowed<NonNull<u8>, JsAtomic>]) -> Self::Output {
                     debug_assert_eq!($n, input.len());
 
                     // Safety: Infallible.
                     unsafe {( $(
                         ResourceMut::new(
-                            NonNull::new_unchecked(input.as_ptr().cast_mut().add($i))
+                            NonNull::new_unchecked(&mut input[$i] as *mut _)
                         )
                     ),+ )}
                 }
