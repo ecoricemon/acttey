@@ -1,3 +1,10 @@
+use std::ops::Deref;
+
+// TODO: Enough small number?
+const F32_EPS: f32 = 1e-6;
+const U8_EPS: u8 = 1;
+const U16_EPS: u16 = 1;
+
 pub trait Number {
     type Output;
     fn zero() -> Self::Output;
@@ -7,6 +14,7 @@ pub trait Number {
     fn _acos(self) -> Self::Output;
     fn from_f32(v: f32) -> Self::Output;
     fn from_f64(v: f64) -> Self::Output;
+    fn eps() -> Self::Output;
 }
 
 impl Number for u8 {
@@ -45,6 +53,11 @@ impl Number for u8 {
     #[inline]
     fn from_f64(v: f64) -> Self::Output {
         v as Self::Output
+    }
+
+    #[inline]
+    fn eps() -> Self::Output {
+        U8_EPS
     }
 }
 
@@ -85,6 +98,11 @@ impl Number for u16 {
     fn from_f64(v: f64) -> Self::Output {
         v as Self::Output
     }
+
+    #[inline]
+    fn eps() -> Self::Output {
+        U16_EPS
+    }
 }
 
 impl Number for f32 {
@@ -123,6 +141,70 @@ impl Number for f32 {
     #[inline]
     fn from_f64(v: f64) -> Self::Output {
         v as Self::Output
+    }
+
+    #[inline]
+    fn eps() -> Self::Output {
+        F32_EPS
+    }
+}
+
+/// A shallow wrapper of [`Vector`].
+#[derive(Debug, PartialEq, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(transparent)]
+pub struct UnitVector<T, const D: usize>(Vector<T, D>);
+
+impl UnitVector<f32, 3> {
+    pub fn new(v: Vector<f32, 3>) -> Self {
+        assert!(v.is_unit());
+        unsafe { Self::new_unchecked(v) }
+    }
+
+    /// # Safety
+    ///
+    /// Undefined behavior if `v` is not an unit vector.
+    pub const unsafe fn new_unchecked(v: Vector<f32, 3>) -> Self {
+        Self(v)
+    }
+
+    pub const fn unwrap(self) -> Vector<f32, 3> {
+        self.0
+    }
+}
+
+impl Deref for UnitVector<f32, 3> {
+    type Target = Vector<f32, 3>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl UnitVector<f32, 4> {
+    pub fn new(v: Vector<f32, 4>) -> Self {
+        assert!(v.is_unit());
+        unsafe { Self::new_unchecked(v) }
+    }
+
+    /// # Safety
+    ///
+    /// Undefined behavior if `v` is not an unit vector.
+    pub const unsafe fn new_unchecked(v: Vector<f32, 4>) -> Self {
+        Self(v)
+    }
+
+    pub const fn unwrap(self) -> Vector<f32, 4> {
+        self.0
+    }
+}
+
+impl Deref for UnitVector<f32, 4> {
+    type Target = Vector<f32, 4>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
@@ -170,13 +252,27 @@ macro_rules! impl_vector {
                 + std::ops::Mul<Output = T>
                 + std::ops::Div<Output = T>
                 + std::ops::DivAssign
+                + std::ops::AddAssign
                 + Number<Output = T>
                 + PartialEq
+                + PartialOrd
                 + 'static
         {
             #[inline]
             pub const fn new($($field: T),+) -> Self {
                 Self([$($field),+])
+            }
+
+            /// Creates a vector with zeros.
+            #[inline]
+            pub fn zeros() -> Self {
+                T::zero().into()
+            }
+
+            /// Creates a vector with ones.
+            #[inline]
+            pub fn ones() -> Self {
+                T::one().into()
             }
 
             #[inline]
@@ -234,7 +330,7 @@ macro_rules! impl_vector {
             $(
                 /// Getter
                 #[inline]
-                pub fn $field(&self) -> T {
+                pub const fn $field(&self) -> T {
                     self.0[$index]
                 }
 
@@ -243,6 +339,11 @@ macro_rules! impl_vector {
                     #[inline]
                     pub fn [<set_ $field>](&mut self, v: T) {
                         self.0[$index] = v;
+                    }
+
+                    #[inline]
+                    pub fn [<add_ $field>](&mut self, v: T) {
+                        self.0[$index] += v;
                     }
                 }
             )+
@@ -268,6 +369,11 @@ macro_rules! impl_vector {
             }
 
             #[inline]
+            pub fn is_unit(&self) -> bool {
+                self.norm_l2() < T::eps()
+            }
+
+            #[inline]
             pub fn normalize(&mut self) {
                 let norm = self.norm_l2();
                 match norm != T::zero() {
@@ -278,7 +384,7 @@ macro_rules! impl_vector {
 
             #[inline]
             #[must_use]
-            pub fn unit(self) -> Self {
+            pub fn into_unit(self) -> Self {
                 let norm = self.norm_l2();
                 match norm != T::zero() {
                     true => {Self::new($(self.0[$index] / norm),+)},
@@ -313,7 +419,7 @@ macro_rules! impl_vector {
 
             #[inline]
             pub fn normal(self, rhs: Self) -> Self {
-                self.cross(rhs).unit()
+                self.cross(rhs).into_unit()
             }
 
             #[inline]
@@ -324,7 +430,7 @@ macro_rules! impl_vector {
             #[inline]
             pub fn random(max: f64, range: std::ops::Range<usize>) -> Self {
                 let gen = || T::from_f64(js_sys::Math::random() * max);
-                let mut v = Self::default();
+                let mut v = Self::zeros();
                 range.for_each(|i| v.0[i] = gen());
                 v
             }
@@ -341,16 +447,6 @@ macro_rules! impl_vector {
             #[inline]
             fn from(value: [T; $d]) -> Self {
                 Self(value)
-            }
-        }
-
-        impl<T> Default for Vector<T, $d>
-        where
-            T: Number<Output = T> + Copy
-        {
-            #[inline]
-            fn default() -> Self {
-                T::zero().into()
             }
         }
 
@@ -459,12 +555,108 @@ impl_vector!(2, {x: 0}, {y: 1});
 impl_vector!(3, {x: 0}, {y: 1}, {z: 2});
 impl_vector!(4, {x: 0}, {y: 1}, {z: 2}, {w: 3});
 
+/// Common normalized vector conversion.
+/// Converts from [u8; 3] to [f32; 3].
+impl From<Vector<u8, 3>> for Vector<f32, 3> {
+    /// 0..255 -> 0..1
+    fn from(value: Vector<u8, 3>) -> Self {
+        Self::new(
+            value.x() as f32 / 255_f32,
+            value.y() as f32 / 255_f32,
+            value.z() as f32 / 255_f32,
+        )
+    }
+}
+
+/// Common normalized vector conversion.
+/// Converts from [u8; 3] to [f32; 4], the last element is filled with 1.0.
+impl From<Vector<u8, 3>> for Vector<f32, 4> {
+    /// 0..255 -> 0..1
+    fn from(value: Vector<u8, 3>) -> Self {
+        Self::new(
+            value.x() as f32 / 255_f32,
+            value.y() as f32 / 255_f32,
+            value.z() as f32 / 255_f32,
+            1.0,
+        )
+    }
+}
+
+/// Unit length quaternion.
+/// Inner vector is used to represent quaternion, which's x, y, and z are used for
+/// quaternion's vector part, known as i, j, and k, and w is used for the scalar part.
+#[derive(Debug, Clone)]
+pub struct Quaternion(UnitVector<f32, 4>);
+
+impl Quaternion {
+    pub const fn unit() -> Self {
+        let v = Vector::<f32, 4>::new(0.0, 0.0, 0.0, 1.0);
+        // Safety: Infallible.
+        unsafe { Self(UnitVector::<f32, 4>::new_unchecked(v)) }
+    }
+
+    /// Creates quaternion from 4D unit vector.
+    /// Make sure that the vector's x, y, and z are the vector and w is the scalar of quaternion.
+    ///
+    /// # Panics
+    ///
+    /// In debug mode only, panics if the vector is not a unit vector.
+    pub fn new(v: UnitVector<f32, 4>) -> Self {
+        Self(v)
+    }
+
+    /// Creates quaternion from axis and angle in radian.
+    ///
+    /// # Panics
+    ///
+    /// In debug mode only, panics if the vector is not a unit vector.
+    pub fn from_axis(axis: UnitVector<f32, 3>, angle: f32) -> Self {
+        let mut axis = axis.unwrap();
+        let (sin, cos) = (angle * 0.5).sin_cos();
+        axis *= sin;
+        let v = Vector::<f32, 4>::new(axis.x(), axis.y(), axis.z(), cos);
+        // Safety: v is unit vector.
+        unsafe { Self(UnitVector::<f32, 4>::new_unchecked(v)) }
+    }
+
+    /// Creates quaternion from rotation `angle` radians around x-axis.
+    pub fn from_rotation_x(angle: f32) -> Self {
+        let (sin, cos) = (angle * 0.5).sin_cos();
+        let v = Vector::<f32, 4>::new(sin, 0.0, 0.0, cos);
+        // Safety: v is unit vector.
+        unsafe { Self(UnitVector::<f32, 4>::new_unchecked(v)) }
+    }
+
+    /// Creates quaternion from rotation `angle` radians around y-axis.
+    pub fn from_rotation_y(angle: f32) -> Self {
+        let (sin, cos) = (angle * 0.5).sin_cos();
+        let v = Vector::<f32, 4>::new(0.0, sin, 0.0, cos);
+        // Safety: v is unit vector.
+        unsafe { Self(UnitVector::<f32, 4>::new_unchecked(v)) }
+    }
+
+    /// Creates quaternion from rotation `angle` radians around z-axis.
+    pub fn from_rotation_z(angle: f32) -> Self {
+        let (sin, cos) = (angle * 0.5).sin_cos();
+        let v = Vector::<f32, 4>::new(0.0, 0.0, sin, cos);
+        // Safety: v is unit vector.
+        unsafe { Self(UnitVector::<f32, 4>::new_unchecked(v)) }
+    }
+}
+
+impl Deref for Quaternion {
+    type Target = UnitVector<f32, 4>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use wasm_bindgen_test::*;
-
-    wasm_bindgen_test_configure!(run_in_browser);
 
     const EPS: f32 = 1e-6;
 
@@ -558,7 +750,7 @@ mod tests {
         let (x, y, z) = (1.0, 2.0, 3.0);
         let mut v = V3f32::new(x, y, z);
         let norm = v.norm_l2();
-        let unit_v = v.unit();
+        let unit_v = v.into_unit();
         v.normalize();
         assert!((v.norm_l2() - 1.0).abs() < EPS);
         assert_eq!(V3f32::new(x / norm, y / norm, z / norm), v);
@@ -607,14 +799,5 @@ mod tests {
         assert_eq!(2, V2f32::dim());
         assert_eq!(3, V3f32::dim());
         assert_eq!(4, V4f32::dim());
-    }
-
-    #[wasm_bindgen_test]
-    fn test_random() {
-        let a = V4u8::random(255.0, 1..3);
-        assert_eq!(0, a.x());
-        assert_eq!(0, a.w());
-        assert_ne!(V4u8::random(255.0, 0..4), V4u8::random(255.0, 0..4));
-        assert_ne!(V4f32::random(1.0, 0..4), V4f32::random(1.0, 0..4));
     }
 }

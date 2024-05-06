@@ -111,7 +111,7 @@ fn gen_field(ast: TraitItemFn, st_ident: &Ident) -> Option<(Ident, Ident, TokenS
     let table_type_define = quote! {
         type #table_type_ident = std::collections::HashMap<
             std::any::TypeId,
-            std::boxed::Box<
+            std::rc::Rc<
                 dyn std::ops::Fn(
                     #(#input_types),*
                 ) #output_type
@@ -193,6 +193,7 @@ fn impl_fn_table_builder(
     // Defines a function table builder.
     let vis = &st.vis;
     let builder = quote! {
+        #[derive(Clone)]
         #vis struct #ident {
             #(
                 #field_idents: std::option::Option<#field_type_idents>
@@ -238,7 +239,7 @@ fn impl_fn_table_builder(
             if let Some(map) = self.#ident.as_mut() {
                 map.insert(
                     std::any::TypeId::of::<#common_generic_ident>(),
-                    std::boxed::Box::new(|s: &mut #st_ident, #(#args),*| {
+                    std::rc::Rc::new(|s: &mut #st_ident, #(#args),*| {
                         s.#ident::<#common_generic_ident>(#(#casted),*)
                     })
                 );

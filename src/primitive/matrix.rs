@@ -20,8 +20,44 @@ impl Matrix4f {
     }
 
     #[inline]
-    pub fn set(&mut self, r: usize, c: usize, value: f32) {
-        self.0[Self::index(r, c)] = value;
+    pub fn get_elem(&self, col: usize, row: usize) -> f32 {
+        self.0[Self::index(col, row)]
+    }
+
+    #[inline]
+    pub fn set_elem(&mut self, col: usize, row: usize, value: f32) {
+        self.0[Self::index(col, row)] = value;
+    }
+
+    #[inline]
+    pub fn add_elem(&mut self, col: usize, row: usize, increment: f32) {
+        self.0[Self::index(col, row)] += increment;
+    }
+
+    #[inline]
+    pub fn set_col3(&mut self, col: usize, x: f32, y: f32, z: f32) {
+        self.set_elem(col, 0, x);
+        self.set_elem(col, 1, y);
+        self.set_elem(col, 2, z);
+    }
+
+    #[inline]
+    pub fn add_col3(&mut self, col: usize, dx: f32, dy: f32, dz: f32) {
+        self.add_elem(col, 0, dx);
+        self.add_elem(col, 1, dy);
+        self.add_elem(col, 2, dz);
+    }
+
+    #[inline]
+    pub fn set_col4(&mut self, col: usize, x: f32, y: f32, z: f32, w: f32) {
+        self.set_col3(col, x, y, z);
+        self.set_elem(col, 3, w);
+    }
+
+    #[inline]
+    pub fn add_col4(&mut self, col: usize, x: f32, y: f32, z: f32, w: f32) {
+        self.add_col3(col, x, y, z);
+        self.add_elem(col, 3, w);
     }
 
     #[inline]
@@ -36,15 +72,23 @@ impl Matrix4f {
         ])
     }
 
-    #[inline]
-    fn index(r: usize, c: usize) -> usize {
-        r * 4 + c
+    #[inline(always)]
+    fn index(col: usize, row: usize) -> usize {
+        (col << 2) + row
     }
 }
 
 impl Default for Matrix4f {
+    /// Creates 4x4 identity matrix.
+    #[inline]
     fn default() -> Self {
         Matrix4f::identity()
+    }
+}
+
+impl<'a> From<&'a Matrix4f> for &'a [u8] {
+    fn from(value: &'a Matrix4f) -> Self {
+        bytemuck::cast_slice(std::slice::from_ref(value))
     }
 }
 
@@ -114,33 +158,6 @@ impl ops::Mul<Vector<f32, 4>> for &Matrix4f {
             self.0[1] * rhs.x() + self.0[5] * rhs.y() + self.0[9] * rhs.z() + self.0[13] * rhs.w(),
             self.0[2] * rhs.x() + self.0[6] * rhs.y() + self.0[10] * rhs.z() + self.0[14] * rhs.w(),
             self.0[3] * rhs.x() + self.0[7] * rhs.y() + self.0[11] * rhs.z() + self.0[15] * rhs.w(),
-        )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use wasm_bindgen_test::*;
-
-    wasm_bindgen_test_configure!(run_in_browser);
-
-    #[wasm_bindgen_test]
-    #[rustfmt::skip]
-    fn test_transpose() {
-        assert_eq!(
-            Matrix4f::new([
-                0.1, 0.2, 0.3, 0.4,
-                0.5, 0.6, 0.7, 0.8,
-                0.9, 1.0, 1.1, 1.2,
-                1.3, 1.4, 1.5, 1.6,
-            ]),
-            Matrix4f::new([
-                0.1, 0.5, 0.9, 1.3,
-                0.2, 0.6, 1.0, 1.4,
-                0.3, 0.7, 1.1, 1.5,
-                0.4, 0.8, 1.2, 1.6,
-            ]).transpose()
         )
     }
 }

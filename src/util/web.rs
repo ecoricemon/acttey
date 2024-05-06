@@ -1,41 +1,65 @@
 use wasm_bindgen::{JsCast, JsValue, UnwrapThrowExt};
-use web_sys::{window, Document, Element, HtmlElement, Navigator, Window};
+use web_sys::{self, Document, Element, HtmlElement, Navigator, Window};
 
-pub fn get_window() -> Window {
-    window().expect_throw(crate::errmsg::WEBSYS_GET_ELEMENT)
+#[inline]
+pub fn window() -> Window {
+    web_sys::window().expect_throw(crate::errmsg::WEBSYS_GET_ELEMENT)
 }
 
-pub fn get_document_from(window: &Window) -> Document {
+#[inline]
+pub fn device_pixel_ratio_from(window: &Window) -> f64 {
+    window.device_pixel_ratio()
+}
+
+pub fn device_pixel_ratio() -> f64 {
+    device_pixel_ratio_from(&window())
+}
+
+#[inline]
+pub fn document_from(window: &Window) -> Document {
     window
         .document()
         .expect_throw(crate::errmsg::WEBSYS_GET_ELEMENT)
 }
 
-pub fn get_document() -> Document {
-    get_document_from(&get_window())
+pub fn document() -> Document {
+    document_from(&window())
 }
 
-pub fn get_navigator_from(window: &Window) -> Navigator {
+#[inline]
+pub fn navigator_from(window: &Window) -> Navigator {
     window.navigator()
 }
 
-pub fn get_navigator() -> Navigator {
-    get_navigator_from(&get_window())
+pub fn navigator() -> Navigator {
+    navigator_from(&window())
 }
 
-pub fn get_body_from(document: &Document) -> HtmlElement {
+#[inline]
+pub fn body_from(document: &Document) -> HtmlElement {
     document
         .body()
         .expect_throw(crate::errmsg::WEBSYS_GET_ELEMENT)
 }
 
-pub fn get_body() -> HtmlElement {
-    get_body_from(&get_document())
+pub fn body() -> HtmlElement {
+    body_from(&document())
 }
 
 pub fn get_element_by_id(id: &str) -> Option<Element> {
-    let document = get_document();
-    document.get_element_by_id(id)
+    document().get_element_by_id(id)
+}
+
+#[inline]
+pub fn query_selector_from(
+    document: &Document,
+    selectors: &str,
+) -> Result<Option<Element>, JsValue> {
+    document.query_selector(selectors)
+}
+
+pub fn query_selector(selectors: &str) -> Result<Option<Element>, JsValue> {
+    query_selector_from(&document(), selectors)
 }
 
 pub fn set_attributes<'a>(
@@ -48,28 +72,53 @@ pub fn set_attributes<'a>(
     Ok(())
 }
 
+#[inline]
+pub fn has_attribute(element: &Element, name: &str) -> bool {
+    element.has_attribute(name)
+}
+
 pub fn create_element<T: JsCast>(local_name: &str) -> Option<T> {
-    let document = get_document();
+    let document = document();
     let element = document.create_element(local_name).ok()?;
     let body = document.body()?;
     let element = body.append_child(&element).ok()?;
     element.dyn_into().ok()
 }
 
-pub fn hardware_concurrency_from(navigator: &Navigator) -> usize {
-    navigator.hardware_concurrency() as usize
-}
-
 /// Returns the number of logical processors available to run thread(Web worker) concurrently.
 /// It may be lower than the actual number of logical processors depending on browser.
 pub fn hardware_concurrency() -> usize {
-    hardware_concurrency_from(&get_navigator())
+    if let Some(window) = web_sys::window() {
+        let navigator = window.navigator();
+        navigator.hardware_concurrency() as usize
+    } else {
+        let global: web_sys::WorkerGlobalScope = js_sys::global().unchecked_into();
+        let navigator = global.navigator();
+        navigator.hardware_concurrency() as usize
+    }
 }
 
-pub fn is_webgpu_available_from(window: &Window) -> bool {
-    !get_navigator_from(window).gpu().is_undefined()
-}
+// TODO: Version issue?
+// pub fn is_webgpu_available_from(window: &Window) -> bool {
+//     !navigator_from(window).gpu().is_undefined()
+// }
 
-pub fn is_webgpu_available() -> bool {
-    is_webgpu_available_from(&get_window())
+// TODO: Version issue?
+// pub fn is_webgpu_available() -> bool {
+//     is_webgpu_available_from(&window())
+// }
+
+pub fn cross_origin_isolated() -> bool {
+    let prop = "crossOriginIsolated";
+    let prop: &JsValue = &prop.into();
+
+    let res = if let Some(window) = web_sys::window() {
+        let obj: &JsValue = &window.into();
+        js_sys::Reflect::get(obj, prop).unwrap()
+    } else {
+        let global: web_sys::DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
+        let obj: &JsValue = &global.into();
+        js_sys::Reflect::get(obj, prop).unwrap()
+    };
+    res.as_bool().unwrap()
 }

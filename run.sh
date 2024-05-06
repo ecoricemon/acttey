@@ -22,7 +22,17 @@ wasm_dirs=(
 if [ "$1" = "build" ]; then
     wasm-pack build --dev
 elif [ "$1" = "test" ]; then
-    wasm-pack test --chrome --headless --workspace
+    wasm-pack test --node
+
+    # Test sub crates on host default target.
+    for dir in "crates"/*; do
+        if [ -d "$dir" ] && [ -e "$dir/Cargo.toml" ]; then
+            pushd .
+            cd $dir
+            rustc -vV | sed -n 's/host: \(\S*\)/\1/p' | xargs -I {} cargo test --target {}
+            popd
+        fi
+    done
 elif [ "$1" = "clean" ]; then
     # Direct cleaning
     echo "=== Cleaning root directory... ==="

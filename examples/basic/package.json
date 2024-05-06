@@ -1,36 +1,43 @@
 {
+  "type": "module",
   "author": "ecoricemon",
   "name": "basic",
   "version": "0.1.0",
   "scripts": {
-    "wasm-dev": "wasm-pack build --dev . --out-name wasm-index",
-    "wasm-release": "wasm-pack build --release . --out-name wasm-index",
-    "wasm-dev-gpu": "npm run wasm-dev -- --out-dir pkg_gpu",
-    "wasm-release-gpu": "npm run wasm-release -- --out-dir pkg_gpu",
-    "wasm-dev-gl": "npm run wasm-dev -- --out-dir pkg_gl --features acttey/webgl",
-    "wasm-release-gl": "npm run wasm-release -- --out-dir pkg_gl --features acttey/webgl",
+    "wasm-d": "wasm-pack build --dev --out-name wasm-index --target web .",
+    "wasm-r": "wasm-pack build --release --out-name wasm-index --target web .",
+    "wasm-d-gpu": "npm run wasm-d -- --out-dir pkg_gpu",
+    "wasm-r-gpu": "npm run wasm-r -- --out-dir pkg_gpu",
+    "wasm-d-gl": "npm run wasm-d -- --out-dir pkg_gl --features acttey/webgl",
+    "wasm-r-gl": "npm run wasm-r -- --out-dir pkg_gl --features acttey/webgl",
+    "wasm-mt-common": "cross-env RUSTFLAGS=\"-C target-feature=+atomics,+bulk-memory,+mutable-globals\" rustup run nightly-2023-12-07 wasm-pack build --target web --out-name wasm-index --out-dir pkg_mt .",
+    "wasm-d-mt": "npm run wasm-mt-common -- --dev -Z build-std=panic_abort,std",
+    "wasm-r-mt": "npm run wasm-mt-common -- --release -Z build-std=panic_abort,std",
 
-    "bundle-dev": "webpack --config webpack.dev.js",
-    "bundle-prod": "webpack --config webpack.prod.js",
+    "bundle-d": "vite build --mode development",
+    "bundle-r": "vite build",
 
-    "clean": "rimraf --glob dist pkg_gpu pkg_gl",
-    "clean-all": "rimraf --glob dist pkg_gpu pkg_gl target node_modules",
+    "clean": "rimraf --glob dist pkg_gpu pkg_gl pkg_mt",
+    "clean-all": "rimraf --glob dist pkg_gpu pkg_gl pkg_mt target node_modules",
 
-    "build": "run-s clean wasm-dev-gpu bundle-dev",
-    "build-gl": "run-s clean wasm-dev-gl bundle-dev",
-    "build-all": "run-s clean wasm-dev-gpu wasm-dev-gl bundle-dev",
-    "build-release": "run-s clean wasm-release-gpu wasm-release-gl bundle-prod",
+    "build": "run-s clean wasm-d-gpu bundle-d",
+    "build-gl": "run-s clean wasm-d-gl bundle-d",
+    "build-mt": "run-s clean wasm-d-mt bundle-d",
+    "build-r": "run-s clean wasm-r-gpu bundle-r",
+    "build-r-gl": "run-s clean wasm-r-gl bundle-r",
+    "build-r-mt": "run-s clean wasm-r-mt bundle-r",
 
-    "start": "webpack serve --config webpack.dev.js",
-    "test": "wasm-pack test --chrome --headless --workspace"
+    "start": "vite preview",
+    "test": "wasm-pack test --node"
   },
   "devDependencies": {
-    "copy-webpack-plugin": "^11.0.0",
+    "cross-env": "^7.0.3",
     "npm-run-all": "^4.1.5",
     "rimraf": "^5.0.1",
-    "webpack": "^5.88.2",
-    "webpack-cli": "^5.1.4",
-    "webpack-dev-server": "^4.15.1",
-    "webpack-merge": "^5.9.0"
+    "rollup-plugin-copy": "^3.5.0",
+    "vite": "^5.1.6",
+    "vite-plugin-cross-origin-isolation": "^0.1.6",
+    "vite-plugin-top-level-await": "^1.4.1",
+    "vite-plugin-wasm": "^3.3.0"
   }
 }

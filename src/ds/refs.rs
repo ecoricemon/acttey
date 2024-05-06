@@ -1,76 +1,197 @@
-use crate::util::current_thread_id;
+use crate::ds::DsError;
+use smallvec::SmallVec;
 use std::{
     cell::{Ref, RefCell, RefMut},
-    panic::Location,
+    ops::{Deref, DerefMut},
     rc::{Rc, Weak},
 };
 
-pub(crate) struct Weaks<T> {
-    weaks: Vec<Weak<T>>,
-    strongs: Vec<Rc<T>>,
+/// Value with reference counter.
+/// This helps you track usage of value itself.
+/// [`super::generational::GenIndexRc`] is similar, but its target is index, not value.
+/// But notice that this size is greater than normal value because of reference counter.
+/// So that using this as items in a vector will be a trade-off.
+///
+/// You can use inner value using deref coercion.  
+#[derive(Debug)]
+pub struct RcValue<T> {
+    value: T,
+    _ref: Rc<()>,
 }
 
-impl<T> Weaks<T> {
-    pub(crate) fn new() -> Self {
+impl<T> RcValue<T> {
+    #[inline]
+    pub fn new(value: T) -> Self {
         Self {
-            weaks: vec![],
-            strongs: vec![],
+            value,
+            _ref: Rc::new(()),
         }
     }
 
-    pub(crate) fn push(&mut self, value: &Rc<T>) {
+    #[inline]
+    pub fn strong_count(&self) -> usize {
+        Rc::strong_count(&self._ref)
+    }
+
+    #[inline]
+    pub fn weak_count(&self) -> usize {
+        Rc::weak_count(&self._ref)
+    }
+
+    #[inline]
+    pub fn unwrap(self) -> T {
+        self.value
+    }
+
+    /// Clones inner reference only.
+    #[inline]
+    pub fn clone_ref(&self) -> Rc<()> {
+        Rc::clone(&self._ref)
+    }
+}
+
+impl<T: Default> Default for RcValue<T> {
+    #[inline]
+    fn default() -> Self {
+        Self::new(T::default())
+    }
+}
+
+impl<T: Clone> Clone for RcValue<T> {
+    #[inline]
+    fn clone(&self) -> Self {
+        Self {
+            value: self.value.clone(),
+            _ref: self.clone_ref(),
+        }
+    }
+}
+
+impl<T> Deref for RcValue<T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+
+impl<T> DerefMut for RcValue<T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.value
+    }
+}
+
+impl<T> From<T> for RcValue<T> {
+    #[inline]
+    fn from(value: T) -> Self {
+        Self::new(value)
+    }
+}
+
+/// For use of smallvec with const generic N.
+pub struct Array<T, const N: usize>(pub [T; N]);
+
+unsafe impl<T, const N: usize> smallvec::Array for Array<T, N> {
+    type Item = T;
+
+    fn size() -> usize {
+        N
+    }
+}
+
+#[derive(Debug)]
+pub struct Weaks<T, const N: usize> {
+    pub weaks: SmallVec<Array<Weak<T>, N>>,
+    pub strongs: SmallVec<Array<Rc<T>, N>>,
+}
+
+impl<T, const N: usize> Weaks<T, N> {
+    pub fn new() -> Self {
+        Self {
+            weaks: smallvec::smallvec![],
+            strongs: smallvec::smallvec![],
+        }
+    }
+
+    pub fn push(&mut self, value: &Rc<T>) {
         self.weaks.push(Rc::downgrade(value));
         self.strongs.clear();
     }
 
-    pub(crate) fn iter(&self) -> std::slice::Iter<'_, Weak<T>> {
+    pub fn iter(&self) -> std::slice::Iter<'_, Weak<T>> {
         self.weaks.iter()
     }
 
-    #[inline]
-    pub(crate) fn upgrade_lasting(&mut self) {
-        if self.strongs.is_empty() {
-            self.strongs.reserve_exact(self.weaks.len());
-            for weak in self.weaks.iter() {
-                self.strongs.push(weak.upgrade().unwrap());
+    /// Don't forget to grab the return value because it will release upgraded references
+    /// when it is dropped.
+    pub fn upgrade(&mut self) -> Result<UpgradedWeaks<T, N>, DsError> {
+        self.upgrade_lasting()?;
+        Ok(UpgradedWeaks(self))
+    }
+
+    pub fn upgrade_lasting(&mut self) -> Result<(), DsError> {
+        self.drop_upgraded();
+        for weak in self.weaks.iter() {
+            if let Some(strong) = weak.upgrade() {
+                self.strongs.push(strong);
+            } else {
+                self.drop_upgraded();
+                return Err(DsError::WeakUpgradeFail);
             }
         }
+        Ok(())
     }
 
-    #[inline]
-    pub(crate) fn get_upgraded(&self) -> &[Rc<T>] {
-        &self.strongs
-    }
-
-    pub(crate) fn drop_upgraded(&mut self) {
+    pub fn drop_upgraded(&mut self) {
         self.strongs.clear();
     }
 }
 
+impl<T, const N: usize> Default for Weaks<T, N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct UpgradedWeaks<'a, T, const N: usize>(&'a mut Weaks<T, N>);
+
+impl<'a, T, const N: usize> UpgradedWeaks<'a, T, N> {
+    pub fn get(&self) -> &[Rc<T>] {
+        &self.0.strongs
+    }
+}
+
+impl<'a, T, const N: usize> Drop for UpgradedWeaks<'a, T, N> {
+    fn drop(&mut self) {
+        self.0.drop_upgraded();
+    }
+}
+
+#[derive(Debug)]
 /// Rc<RefCell\<T\>>
-pub(crate) struct RCell<T> {
+pub struct RCell<T> {
     value: Rc<RefCell<T>>,
     tag: &'static str,
-    strong: usize,
 }
 
 impl<T> RCell<T> {
-    pub(crate) fn new(value: T) -> Self {
+    pub fn new(value: T) -> Self {
         Self {
             value: Rc::new(RefCell::new(value)),
             tag: "",
-            strong: 1,
         }
     }
 
-    pub(crate) fn with_tag(mut self, tag: &'static str) -> Self {
+    pub fn with_tag(mut self, tag: &'static str) -> Self {
         self.tag = tag;
         self
     }
 
     #[cfg_attr(print_rcell, track_caller)]
     #[inline(always)]
-    pub(crate) fn borrow(&self) -> Ref<'_, T> {
+    pub fn borrow(&self) -> Ref<'_, T> {
         #[cfg(print_rcell)]
         {
             if !self.tag.is_empty() {
@@ -89,7 +210,7 @@ impl<T> RCell<T> {
 
     #[cfg_attr(print_rcell, track_caller)]
     #[inline(always)]
-    pub(crate) fn borrow_mut(&self) -> RefMut<'_, T> {
+    pub fn borrow_mut(&self) -> RefMut<'_, T> {
         #[cfg(print_rcell)]
         {
             if !self.tag.is_empty() {
@@ -113,7 +234,6 @@ impl<T> Clone for RCell<T> {
         Self {
             value: Rc::clone(&self.value),
             tag: self.tag,
-            strong: Rc::strong_count(&self.value),
         }
     }
 }

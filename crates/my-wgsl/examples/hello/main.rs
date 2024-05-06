@@ -59,5 +59,5 @@ fn main() {
     );
 
     let wgsl: String = builder.build_pretty();
-    println!("{}", wgsl);
+    println!("{wgsl}");
 }

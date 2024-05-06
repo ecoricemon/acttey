@@ -1,18 +1,21 @@
-use ahash::{AHashMap, AHashSet};
-use std::hash::Hash;
+use std::{
+    collections::{HashMap, HashSet},
+    hash::Hash,
+};
 
 pub trait DepKey: PartialEq + Eq + Hash + Clone {}
 
 impl<T: PartialEq + Eq + Hash + Clone> DepKey for T {}
 
+#[derive(Debug)]
 pub struct DepNode<K: DepKey> {
-    children: AHashSet<K>,
+    children: HashSet<K, ahash::RandomState>,
     rc: usize,
 }
 
 impl<K: DepKey> DepNode<K> {
     fn new(child: Option<K>, rc: usize) -> Self {
-        let mut children = AHashSet::new();
+        let mut children = HashSet::default();
         if let Some(child) = child {
             children.insert(child);
         }
@@ -20,14 +23,15 @@ impl<K: DepKey> DepNode<K> {
     }
 }
 
+#[derive(Debug)]
 pub struct DepGraph<K: DepKey> {
-    nodes: AHashMap<K, DepNode<K>>,
+    nodes: HashMap<K, DepNode<K>, ahash::RandomState>,
 }
 
 impl<K: DepKey> DepGraph<K> {
     pub fn new() -> Self {
         Self {
-            nodes: AHashMap::new(),
+            nodes: HashMap::default(),
         }
     }
 
@@ -100,13 +104,17 @@ impl<K: DepKey> DepGraph<K> {
     }
 }
 
+impl<K: DepKey> Default for DepGraph<K> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
     use wasm_bindgen_test::*;
-
-    wasm_bindgen_test_configure!(run_in_browser);
 
     struct Storage<K: DepKey> {
         keys: HashSet<K>,
