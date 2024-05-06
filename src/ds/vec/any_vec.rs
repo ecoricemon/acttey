@@ -314,6 +314,9 @@ impl AnyVec {
         }
     }
 
+    /// # Safety
+    ///
+    /// `index` must be inbound and result address must not overflow `isize`.
     #[inline]
     pub unsafe fn get_raw_unchecked(&self, index: usize) -> NonNull<u8> {
         NonNull::new_unchecked(self.get_ptr(index))
@@ -323,8 +326,7 @@ impl AnyVec {
     ///
     /// # Safety
     ///
-    /// Return pointer must not be null, but caller should guarantee that the offset,
-    /// calculated by `index` * `self.padded_item_size`, doesn't overflow [`isize`].
+    /// `index` must be inbound and result address must not overflow `isize`.
     #[inline]
     pub const unsafe fn get_ptr(&self, index: usize) -> *mut u8 {
         let offset = index * self.padded_item_size();

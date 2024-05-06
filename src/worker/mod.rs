@@ -34,12 +34,13 @@ extern "C" {
     fn attachWorker();
 }
 
+#[derive(Debug)]
 pub struct MainWorker {
     /// JS worker handle.
     handle_js: web_sys::Worker,
 
     /// Worker name. You can see this name in browser's dev tool.
-    name: String,
+    _name: String,
 
     /// Callback for message from main worker.
     /// Not used for now.
@@ -67,7 +68,7 @@ impl MainWorker {
 
         Ok(Self {
             handle_js,
-            name: name.to_owned(),
+            _name: name.to_owned(),
             callback,
         })
     }

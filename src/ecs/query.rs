@@ -11,8 +11,15 @@ use std::{
     sync::Arc,
 };
 
-/// A shallow wrapper structure for the [`Query`].
+/// A shallow wrapper structure for the [`Query::Output`].
 pub struct Read<'r, R: Query>(pub(crate) <R as Query>::Output<'r>);
+
+impl<'r, R: Query> Read<'r, R> {
+    #[inline]
+    pub fn unwrap(self) -> <R as Query>::Output<'r> {
+        self.0
+    }
+}
 
 impl<'r, R: Query> Deref for Read<'r, R> {
     type Target = <R as Query>::Output<'r>;
@@ -23,8 +30,15 @@ impl<'r, R: Query> Deref for Read<'r, R> {
     }
 }
 
-/// A shallow wrapper structure for the [`QueryMut`].
+/// A shallow wrapper structure for the [`QueryMut::Output`].
 pub struct Write<'w, W: QueryMut>(pub(crate) <W as QueryMut>::Output<'w>);
+
+impl<'w, W: QueryMut> Write<'w, W> {
+    #[inline]
+    pub fn unwrap(self) -> <W as QueryMut>::Output<'w> {
+        self.0
+    }
+}
 
 impl<'w, W: QueryMut> Deref for Write<'w, W> {
     type Target = <W as QueryMut>::Output<'w>;
@@ -42,8 +56,15 @@ impl<'w, W: QueryMut> DerefMut for Write<'w, W> {
     }
 }
 
-/// A shallow wrapper structure for the [`ResQuery`].
+/// A shallow wrapper structure for the [`ResQuery::Output`].
 pub struct ResRead<RR: ResQuery>(pub(crate) <RR as ResQuery>::Output);
+
+impl<RR: ResQuery> ResRead<RR> {
+    #[inline]
+    pub fn unwrap(self) -> <RR as ResQuery>::Output {
+        self.0
+    }
+}
 
 impl<RR: ResQuery> Deref for ResRead<RR> {
     type Target = <RR as ResQuery>::Output;
@@ -54,8 +75,15 @@ impl<RR: ResQuery> Deref for ResRead<RR> {
     }
 }
 
-/// A shallow wrapper structure for the [`ResQueryMut`].
+/// A shallow wrapper structure for the [`ResQueryMut::Output`].
 pub struct ResWrite<RW: ResQueryMut>(pub(crate) <RW as ResQueryMut>::Output);
+
+impl<RW: ResQueryMut> ResWrite<RW> {
+    #[inline]
+    pub fn unwrap(self) -> <RW as ResQueryMut>::Output {
+        self.0
+    }
+}
 
 impl<RW: ResQueryMut> Deref for ResWrite<RW> {
     type Target = <RW as ResQueryMut>::Output;

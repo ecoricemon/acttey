@@ -10,10 +10,8 @@ use crate::{
         mesh::{Geometry, MeshResource},
     },
     render::{
-        buffer::{
-            to_padded_num, write_to_mapped_buffer, BufferView, GeometryBufferView, SizeOrData,
-        },
-        canvas::{CanvasHandle, Surface, SurfacePack, SurfacePackBuffer},
+        buffer::{self, BufferView, GeometryBufferView, SizeOrData},
+        canvas::{Surface, SurfacePack, SurfacePackBuffer},
         context::Gpu,
         descs,
         pass::{
@@ -290,7 +288,7 @@ impl SceneManager {
         render.remove_pipeline_builder(pb_index);
 
         // PassGraph.
-        scene.build_pass_graph(Arc::clone(&key.label()));
+        scene.build_pass_graph(Arc::clone(key.label()));
 
         // Adds the scene.
         scene_mgr.insert_scene(key.clone(), scene);
@@ -656,12 +654,13 @@ impl Scene {
             .iter_geometry(mesh_res)
             .map(|geo| {
                 let int_geo = geo.as_interleaved().unwrap();
-                let vert_padded_num = to_padded_num(int_geo.vertex_size, int_geo.vertex_num) as u64;
+                let vert_padded_num =
+                    buffer::to_padded_num(int_geo.vertex_size, int_geo.vertex_num) as u64;
                 let index_size = match int_geo.index_format {
                     wgpu::IndexFormat::Uint16 => 2,
                     wgpu::IndexFormat::Uint32 => 4,
                 };
-                let index_padded_num = to_padded_num(index_size, int_geo.index_num) as u64;
+                let index_padded_num = buffer::to_padded_num(index_size, int_geo.index_num) as u64;
                 (
                     int_geo.vertex_size as u64 * vert_padded_num,
                     index_size as u64 * index_padded_num,
@@ -722,8 +721,8 @@ impl Scene {
             // Writes to the buffer.
             let vert_offset_bytes = vert_offset * int_geo.vertex_size;
             let index_offset_bytes = vert_offset * int_geo.vertex_size;
-            write_to_mapped_buffer(&vert_buf, vert_bytes, vert_offset_bytes);
-            write_to_mapped_buffer(&index_buf, index_bytes, index_offset_bytes);
+            buffer::write_to_mapped_buffer(&vert_buf, vert_bytes, vert_offset_bytes);
+            buffer::write_to_mapped_buffer(&index_buf, index_bytes, index_offset_bytes);
 
             // Updates vertex buffer view for this geometry.
             let mut vert_buf_view =
@@ -743,8 +742,8 @@ impl Scene {
 
             // Increases offsets by padded numbers.
             // Because we can access to only the aligned address to the buffer.
-            vert_offset += to_padded_num(int_geo.vertex_size, int_geo.vertex_num);
-            index_offset += to_padded_num(index_size, int_geo.index_num);
+            vert_offset += buffer::to_padded_num(int_geo.vertex_size, int_geo.vertex_num);
+            index_offset += buffer::to_padded_num(index_size, int_geo.index_num);
         }
 
         // Unmaps the buffer.

@@ -2,7 +2,7 @@ use super::WorkerId;
 use crate::{
     ecs::{
         request::{RequestBuffer, RequestKey},
-        system::Invokable,
+        system::Invoke,
     },
     render::canvas::CanvasHandle,
 };
@@ -142,7 +142,7 @@ impl MsgEventCanvas {
         buf.set(1, JsValue::from(self.element.clone()));
         buf.set(
             2,
-            JsValue::from_f64(f64::from_bits(self.handle.into_inner() as u64)),
+            JsValue::from_f64(f64::from_bits(self.handle.unwrap() as u64)),
         );
         buf.set(3, JsValue::from_str(&self.selectors));
         buf.set(4, JsValue::from_f64(self.scale));
@@ -198,8 +198,9 @@ impl MsgEventFn {
     /// Returns minimum length of [`js_sys::Array`] for this message.
     #[inline]
     const fn message_array_len() -> u32 {
-        // 2, header + body array
-        HEADER_LEN as u32 + 1
+        // 2, message looks like [header, [body array]].
+        const BODY_LEN: u32 = 1;
+        HEADER_LEN as u32 + BODY_LEN
     }
 
     pub fn post_to(self, worker: &web_sys::Worker) {
@@ -351,8 +352,9 @@ impl MsgEventCanvasResize {
     /// Returns minimum length of [`js_sys::Array`] for this message.
     #[inline]
     const fn message_array_len() -> u32 {
-        // 2, header + body array
-        HEADER_LEN as u32 + 1
+        // 2, message looks like [header, [body array]].
+        const BODY_LEN: u32 = 1;
+        HEADER_LEN as u32 + BODY_LEN
     }
 
     #[inline]
@@ -415,15 +417,16 @@ impl MsgEventMouse {
     /// Returns minimum length of [`js_sys::Uint32Array`] for this message's body.
     #[inline]
     const fn body_array_len() -> u32 {
-        // 4 including padding
+        // 5 including padding
         ((mem::size_of::<Self>() + U32_ROUND_UP) / U32_SIZE) as u32
     }
 
     /// Returns minimum length of [`js_sys::Array`] for this message.
     #[inline]
     const fn message_array_len() -> u32 {
-        // 2, header + body array
-        HEADER_LEN as u32 + 1
+        // 2, message looks like [header, [body array]].
+        const BODY_LEN: u32 = 1;
+        HEADER_LEN as u32 + BODY_LEN
     }
 
     #[inline]
@@ -466,17 +469,10 @@ impl MsgEventMouseMove {
         buf
     }
 
-    /// Returns minimum length of [`js_sys::Uint32Array`] for this message's body.
-    #[inline]
-    const fn body_array_len() -> u32 {
-        // 4 including padding
-        MsgEventMouse::body_array_len()
-    }
-
     /// Returns minimum length of [`js_sys::Array`] for this message.
     #[inline]
     const fn message_array_len() -> u32 {
-        // 2, header + body array
+        // 2, message looks like [header, [body array]].
         MsgEventMouse::message_array_len()
     }
 
@@ -517,17 +513,9 @@ impl MsgEventClick {
         buf
     }
 
-    /// Returns minimum length of [`js_sys::Uint32Array`] for this message's body.
-    #[inline]
-    const fn body_array_len() -> u32 {
-        // 4 including padding
-        MsgEventMouse::body_array_len()
-    }
-
     /// Returns minimum length of [`js_sys::Array`] for this message.
     #[inline]
     const fn message_array_len() -> u32 {
-        // 2, header + body array
         MsgEventMouse::message_array_len()
     }
 
@@ -569,7 +557,7 @@ pub enum ChMsg {
     End,
 
     /// Main worker sends a task to the sub worker.
-    Task(NonNull<dyn Invokable>, NonNull<RequestBuffer>),
+    Task(NonNull<dyn Invoke>, NonNull<RequestBuffer>),
 
     /// Sub worker sends this to the main worker as a response of [`ChMsg::ReqHandle`].
     Handle(Thread),

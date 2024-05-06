@@ -433,7 +433,7 @@ impl CanvasHandle {
         *self == Self::window_handle()
     }
 
-    pub const fn into_inner(self) -> u32 {
+    pub const fn unwrap(self) -> u32 {
         self.0
     }
 }

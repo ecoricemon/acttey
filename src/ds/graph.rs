@@ -53,6 +53,7 @@ impl<T> DirectedGraph<T> {
     //
     /// Returns nodes, inbounds, and outbounds.
     /// Do not insert or remove any nodes.
+    #[allow(clippy::type_complexity)]
     pub fn destructure(
         &mut self,
     ) -> (

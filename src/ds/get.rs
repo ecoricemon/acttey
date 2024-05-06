@@ -17,6 +17,9 @@ impl RawGetter {
         }
     }
 
+    /// # Safety
+    ///
+    /// Undefined behavior if `index` is out of bound.
     #[inline]
     pub unsafe fn get_unchecked(&self, index: usize) -> NonNull<u8> {
         (self.fn_get)(self.me, index)

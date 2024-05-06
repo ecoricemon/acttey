@@ -28,7 +28,7 @@ pub struct ResourcePack {
     imap: HashMap<ResourceKey, usize, ahash::RandomState>,
 
     /// Owned user resources.
-    user: HashMap<ResourceKey, Box<dyn Any>>,
+    _user: HashMap<ResourceKey, Box<dyn Any>>,
 
     /// Raw pointers to resources.  
     /// This field grabs just pointers for performance reason.
@@ -43,7 +43,7 @@ impl ResourcePack {
     pub fn new() -> Self {
         Self {
             imap: HashMap::default(),
-            user: HashMap::default(),
+            _user: HashMap::default(),
             ptrs: OptVec::new(),
         }
     }

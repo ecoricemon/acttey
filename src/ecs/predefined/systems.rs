@@ -1,8 +1,11 @@
 use super::{components, resources};
 use crate::{
-    ecs::{request::Response, system::System},
+    ecs::{
+        query::{Read, ResRead, ResWrite, Write},
+        request::Response,
+        system::System,
+    },
     impl_filter, impl_request,
-    primitive::mesh::MeshResource,
     render::canvas::SurfacePackBuffer,
 };
 
@@ -47,106 +50,71 @@ impl_request!(
 );
 
 /// A system for resizing all surfaces contained in active scenes.
-/// This system works only if `resize` event is added,
+/// This system works if and only if `resize` event is added,
 /// but this system doesn't consume the event.
-/// Please note that `resize` event should be added into window itself.
-#[derive(Debug)]
-pub struct Resized;
-impl System for Resized {
-    type Req = ResizedRequest;
+///
+/// Please note that `resize` event should be added into **window** itself, not a canvas.
+pub fn resize(
+    ev_mgr: ResRead<resources::EventManager>,
+    mut render: ResWrite<resources::RenderResource>,
+) {
+    let resources::RenderResource {
+        gpu,
+        surfaces,
+        scale,
+        ..
+    } = &mut **render;
 
-    fn run(&mut self, resp: Response<Self::Req>) {
-        let ev_mgr = resp.res_read;
-        let mut render = resp.res_write;
-
-        let resources::RenderResource {
-            gpu,
-            surfaces,
-            scale,
-            ..
-        } = &mut *render;
-
-        // Can be time consuming, but it'd be okay for small number of surfaces.
-        // It's reasonable assumption.
-        for msg in ev_mgr.iter_resize() {
-            if let Some(surf) = surfaces
-                .sneak_iter_occupied_mut()
-                .find(|surf| msg.handle == surf.handle())
-            {
-                surf.resize(&gpu.device, *scale, *msg);
-            }
+    // Can be time consuming, but it'd be okay for small number of surfaces.
+    // It's reasonable assumption.
+    for msg in ev_mgr.iter_resize() {
+        if let Some(surf) = surfaces
+            .sneak_iter_occupied_mut()
+            .find(|surf| msg.handle == surf.handle())
+        {
+            surf.resize(&gpu.device, *scale, *msg);
         }
     }
 }
 
-impl_request!(
-    pub ResizedRequest,
-    ResRead = (resources::EventManager),
-    ResWrite = (resources::RenderResource)
-);
-
 /// A system for releasing all stacked events.
 /// It's recommended to add this system on a frame basis.
-#[derive(Debug)]
-pub struct ClearEvent;
-impl System for ClearEvent {
-    type Req = ClearEventRequest;
-
-    fn run(&mut self, resp: Response<Self::Req>) {
-        let mut ev_mgr = resp.res_write;
-        ev_mgr.clear();
-    }
+pub fn clear_event(mut ev_mgr: ResWrite<resources::EventManager>) {
+    ev_mgr.clear();
 }
 
-impl_request!(
-    pub ClearEventRequest,
-    ResWrite = (resources::EventManager)
-);
-
-/// A system for updating transformation of all entities.
+/// A system for updating transformation matrices of all entities.
 /// Various systems can update local translation, rotation, and scale in their manners.
 /// That means updating local transformations on each system can be inefficient.
 /// This system traverses all drawable components and update its local transformations at once
 /// according to their final states.
-#[derive(Debug)]
-pub struct UpdateTransform;
-impl System for UpdateTransform {
-    type Req = UpdateTransformRequest;
+pub fn update_transform(
+    scene_node: Read<SceneNodeFilter>,
+    transform: Write<TransformFilter>,
+    mut scene_mgr: ResWrite<resources::SceneManager>,
+) {
+    // Updates local transformation.
+    debug_assert_eq!(scene_node.len(), transform.len());
+    for (node_getter, mut tf_getter) in scene_node.unwrap().zip(transform.unwrap()) {
+        debug_assert_eq!(node_getter.etag, tf_getter.etag);
+        for i in 0..node_getter.len() {
+            let node = unsafe { node_getter.get_unchecked(i) };
+            let tf = unsafe { tf_getter.get_unchecked(i) };
+            if tf.is_dirty() {
+                let scene = scene_mgr.get_scene_mut(&node.scene_key.into()).unwrap();
+                let local = scene.hierarchy.get_local_mut(node.node_index).unwrap();
 
-    fn run(&mut self, resp: Response<Self::Req>) {
-        let scene_node = resp.read;
-        let transform = resp.write;
-        let mut scene_mgr = resp.res_write;
-
-        // Updates local transform.
-        debug_assert_eq!(scene_node.len(), transform.len());
-        for (node_getter, mut tf_getter) in scene_node.zip(transform) {
-            debug_assert_eq!(node_getter.etag, tf_getter.etag);
-            for i in 0..node_getter.len() {
-                let node = unsafe { node_getter.get_unchecked(i) };
-                let tf = unsafe { tf_getter.get_unchecked(i) };
-                if tf.is_dirty() {
-                    let scene = scene_mgr.get_scene_mut(&node.scene_key.into()).unwrap();
-                    let local = scene.hierarchy.get_local_mut(node.node_index).unwrap();
-
-                    tf.update_to(local);
-                }
+                tf.update_to(local);
             }
         }
+    }
 
-        // Updates global transform.
-        for (_key, scene) in scene_mgr.iter_active_scene_mut() {
-            scene.update_global_transform();
-        }
+    // Updates global transform.
+    for (_key, scene) in scene_mgr.iter_active_scene_mut() {
+        scene.update_global_transform();
     }
 }
 
-impl_request!(
-    pub UpdateTransformRequest,
-    Read=(SceneNodeFilter),
-    Write=(TransformFilter),
-    ResWrite=(resources::SceneManager)
-);
 impl_filter!(
     pub TransformFilter,
     Target=(components::Transform),

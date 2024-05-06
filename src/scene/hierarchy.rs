@@ -98,6 +98,9 @@ impl SceneHierarchy {
         }
     }
 
+    /// # Safety
+    ///
+    /// Undefine behavior if `index` is out of bound or the slot is vacant.
     pub unsafe fn get_local_unchecked_mut(&mut self, index: usize) -> &mut Matrix4f {
         let node = self.nodes.get_node_unchecked_mut(index);
         node.dirty_transform();
@@ -326,10 +329,6 @@ impl GlobalTransformIndex {
             chunk_idx: 0,
             item_idx: 0,
         }
-    }
-
-    pub(super) const fn is_dummy(&self) -> bool {
-        self.buf_idx == Self::DUMMY_IDX
     }
 
     pub(super) const fn is_mesh_index(&self) -> bool {

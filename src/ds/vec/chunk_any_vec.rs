@@ -319,6 +319,9 @@ impl ChunkAnyVec {
         }
     }
 
+    /// # Safety
+    ///
+    /// `index` must be inbound and result address must not overflow `isize`.
     #[inline]
     pub unsafe fn get_raw_unchecked(&self, index: usize) -> NonNull<u8> {
         let (ci, ii) = self.index_2d(index);

@@ -2,13 +2,13 @@ use super::{
     borrow_js::JsAtomic,
     entity::{Entity, EntityDict, EntityForm, EntityId, EntityKey, EntityKeyKind, EntityTag},
     filter::{FilterInfo, Filtered},
-    predefined::resources::{RenderResource, SceneManager},
-    query::{QueryInfo, ResQueryInfo},
+    predefined::resources,
+    query::{QueryInfo, ResQueryInfo, ResWrite},
     request::{RequestBuffer, RequestInfo, RequestKey},
     resource::{Resource, ResourceKey, ResourcePack},
     system::{
-        FnSystem, Invokable, SharedInfo, StructOrFnSystem, System, SystemData, SystemId, SystemKey,
-        SystemPack,
+        FnOnceSystem, FnSystem, Invoke, SharedInfo, StructOrFnSystem, System, SystemData, SystemId,
+        SystemKey, SystemPack,
     },
     wait::{WaitNotifyType, WaitQueuePack, WaitRequest},
 };
@@ -17,6 +17,9 @@ use crate::{
         borrow::Borrowed,
         set_list::{ListPos, SetValueList},
     },
+    scene::inner::{Scene, SceneManager},
+    unit::Tick,
+    util::key::ObjectKey,
     worker::{msg::ChMsg, MainChannel, Worker},
 };
 use std::{
@@ -114,22 +117,37 @@ impl Scheduler {
     }
 
     #[inline]
-    pub fn register_system<T, S, Req, F>(&mut self, sys: T) -> bool
+    pub fn register_once_system<T, Req, F, Args>(&mut self, sys: T) -> Option<(SystemKey, SystemId)>
     where
-        T: Into<StructOrFnSystem<S, Req, F>>,
-        S: System,
-        FnSystem<Req, F>: System,
+        /* To accept FnOnce("variable length of params") */
+        T: Into<FnOnceSystem<Req, F>>,
+        /* FnOnceSystem becomes FnMut */
+        FnOnceSystem<Req, F>: Into<Box<dyn FnMut(Args)>>,
+        /* We can handle FnMut as a System */
+        Box<dyn FnMut(Args)>: System,
     {
-        self._register_system(sys).0
+        let f: FnOnceSystem<Req, F> = sys.into();
+        let boxed: Box<dyn FnMut(Args)> = f.into();
+        self._register_system(boxed)
     }
 
-    fn _register_system<T, S, Req, F>(&mut self, sys: T) -> (bool, SystemKey)
+    #[inline]
+    pub fn register_system<T, S, Req, F>(&mut self, sys: T) -> Option<(SystemKey, SystemId)>
     where
         T: Into<StructOrFnSystem<S, Req, F>>,
         S: System,
         FnSystem<Req, F>: System,
     {
-        fn inner(this: &mut Scheduler, skey: SystemKey, sdata: SystemData) -> bool {
+        self._register_system(sys)
+    }
+
+    fn _register_system<T, S, Req, F>(&mut self, sys: T) -> Option<(SystemKey, SystemId)>
+    where
+        T: Into<StructOrFnSystem<S, Req, F>>,
+        S: System,
+        FnSystem<Req, F>: System,
+    {
+        fn inner(this: &mut Scheduler, skey: SystemKey, sdata: SystemData) -> Option<SystemId> {
             // Determines whether the system is dedicated task or not.
             let (_, rinfo) = sdata.req();
             let (_, read_qinfo) = rinfo.res_read();
@@ -139,8 +157,8 @@ impl Scheduler {
                 .iter()
                 .chain(write_qinfo.rkeys().iter())
                 .any(|&rkey| {
-                    rkey == <RenderResource as Resource>::key()
-                        || rkey == <SceneManager as Resource>::key()
+                    rkey == <resources::RenderResource as Resource>::key()
+                        || rkey == <resources::SceneManager as Resource>::key()
                         || rkey == <Scheduler as Resource>::key()
                 });
 
@@ -154,7 +172,7 @@ impl Scheduler {
                 }
             }
 
-            sid.is_some()
+            sid
         }
 
         let sys: StructOrFnSystem<S, Req, F> = sys.into();
@@ -170,15 +188,15 @@ impl Scheduler {
                 (skey, sdata)
             }
         };
-        let res = inner(self, skey, sdata);
-        (res, skey)
+        let sid = inner(self, skey, sdata);
+        sid.map(|sid| (skey, sid))
     }
 
     pub fn activate_system(
         &mut self,
-        target: &SystemKey,
-        after: Option<&SystemKey>,
-        live: u32,
+        target: &SystemId,
+        after: Option<&SystemId>,
+        live: Tick,
     ) -> bool {
         let live = NonZeroU32::new(live).unwrap();
         if let Some(after) = after {
@@ -189,19 +207,59 @@ impl Scheduler {
     }
 
     #[inline]
-    pub fn append_system<T, S, Req, F>(&mut self, sys: T, live: u32) -> bool
+    pub fn append_once_system<T, Req, F, Args>(&mut self, sys: T) -> Option<(SystemKey, SystemId)>
+    where
+        /* To accept FnOnce("variable length of params") */
+        T: Into<FnOnceSystem<Req, F>>,
+        /* FnOnceSystem becomes FnMut */
+        FnOnceSystem<Req, F>: Into<Box<dyn FnMut(Args)>>,
+        /* We can handle FnMut as a System */
+        Box<dyn FnMut(Args)>: System,
+    {
+        let f: FnOnceSystem<Req, F> = sys.into();
+        let boxed: Box<dyn FnMut(Args)> = f.into();
+        self.append_system(boxed, 1)
+    }
+
+    #[inline]
+    pub fn append_system<T, S, Req, F>(
+        &mut self,
+        sys: T,
+        live: Tick,
+    ) -> Option<(SystemKey, SystemId)>
     where
         T: Into<StructOrFnSystem<S, Req, F>>,
         S: System,
         FnSystem<Req, F>: System,
     {
-        let (res, skey) = self._register_system(sys);
-        if res {
+        let res = self._register_system(sys);
+        if let Some((_, sid)) = res.as_ref() {
             let live = NonZeroU32::new(live).unwrap();
-            let must_true = self.systems.activate_system_as_last(&skey, live);
+            let must_true = self.systems.activate_system_as_last(sid, live);
             debug_assert!(must_true);
         }
         res
+    }
+
+    pub fn append_scene(&mut self, key: ObjectKey, scene: Scene) {
+        let sys = move |res_write: ResWrite<(
+            resources::MeshResource,
+            resources::Scheduler,
+            resources::RenderResource,
+            resources::SceneManager,
+        )>| {
+            let (mut meshes, mut sched, mut render, mut scene_mgr) = res_write.unwrap();
+            SceneManager::temp_adopt(
+                key,
+                scene,
+                &mut sched,
+                &mut render,
+                &mut meshes,
+                &mut scene_mgr,
+            )
+            .unwrap();
+        };
+        self.append_once_system(sys);
     }
 
     /// Must be called before [`Self::register_system`].
@@ -211,7 +269,8 @@ impl Scheduler {
         self.waits.init_resource_queue(index);
     }
 
-    pub(crate) fn register_resource(&mut self) {
+    /// Registers user defined resource.
+    pub(crate) fn _register_resource(&mut self) {
         todo!()
     }
 
@@ -426,13 +485,22 @@ impl Scheduler {
 
                     // Searches not pending tasks after pending tasks.
                     // Safety: cur_sys is controlled to be valid.
-                    while let Some((next, sdata)) = unsafe { systems.iter_next_mut(cur_sys) } {
+                    while let Some((mut next, sdata)) = unsafe { systems.iter_next_mut(cur_sys) } {
                         if try_recv(ch, cache, waits, idle_workers) {
                             continue 'outer;
                         }
                         if is_dedicated(sdata, dedi_tasks) {
                             if !try_do_self(sdata, cache, waits, entities, resources) {
                                 dedi_pending_tasks.push_back(cur_sys);
+                            } else {
+                                // TODO: For now, dedicated tasks can modify next system silently.
+                                // But, it's quite danger.
+                                // For eaxmple, if a task remove current system, what will happen?
+                                // Even if it's a dedicated task, task that updates `systems`
+                                // must be treated carefully.
+                                next = unsafe {
+                                    systems.iter_next_position(cur_sys).unwrap_unchecked()
+                                };
                             }
                         } else if try_give(sdata, worker, cache, waits, entities, resources) {
                             idle_workers.pop();
@@ -455,10 +523,14 @@ impl Scheduler {
                     if try_do_self(sdata, cache, waits, entities, resources) {
                         dedi_pending_tasks.pop_front();
                     }
-                } else if let Some((next, sdata)) = unsafe { systems.iter_next_mut(cur_sys) } {
+                } else if let Some((mut next, sdata)) = unsafe { systems.iter_next_mut(cur_sys) } {
                     if is_dedicated(sdata, dedi_tasks) {
                         if !try_do_self(sdata, cache, waits, entities, resources) {
                             dedi_pending_tasks.push_back(cur_sys);
+                        } else {
+                            // TODO: See the exactly same procedure above.
+                            next =
+                                unsafe { systems.iter_next_position(cur_sys).unwrap_unchecked() };
                         }
                         cur_sys = next;
                     }

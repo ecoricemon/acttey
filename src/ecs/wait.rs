@@ -1,8 +1,5 @@
 use super::{component::ComponentKey, resource::ResourceKey};
-use crate::{
-    ds::{generational::GenQueue, vec::OptVec},
-    top::canvas::CanvasPack,
-};
+use crate::ds::{generational::GenQueue, vec::OptVec};
 use std::{fmt::Debug, ops::Deref, sync::Arc};
 
 /// A structure containing [`WaitQueue`]s for each component, resource, and entity.

@@ -160,11 +160,14 @@ impl UnitVector<f32, 3> {
         unsafe { Self::new_unchecked(v) }
     }
 
+    /// # Safety
+    ///
+    /// Undefined behavior if `v` is not an unit vector.
     pub const unsafe fn new_unchecked(v: Vector<f32, 3>) -> Self {
         Self(v)
     }
 
-    pub const fn into_inner(self) -> Vector<f32, 3> {
+    pub const fn unwrap(self) -> Vector<f32, 3> {
         self.0
     }
 }
@@ -184,11 +187,14 @@ impl UnitVector<f32, 4> {
         unsafe { Self::new_unchecked(v) }
     }
 
+    /// # Safety
+    ///
+    /// Undefined behavior if `v` is not an unit vector.
     pub const unsafe fn new_unchecked(v: Vector<f32, 4>) -> Self {
         Self(v)
     }
 
-    pub const fn into_inner(self) -> Vector<f32, 4> {
+    pub const fn unwrap(self) -> Vector<f32, 4> {
         self.0
     }
 }
@@ -605,7 +611,7 @@ impl Quaternion {
     ///
     /// In debug mode only, panics if the vector is not a unit vector.
     pub fn from_axis(axis: UnitVector<f32, 3>, angle: f32) -> Self {
-        let mut axis = axis.into_inner();
+        let mut axis = axis.unwrap();
         let (sin, cos) = (angle * 0.5).sin_cos();
         axis *= sin;
         let v = Vector::<f32, 4>::new(axis.x(), axis.y(), axis.z(), cos);

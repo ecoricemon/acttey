@@ -81,7 +81,7 @@ impl CanvasPack {
 
     /// Adds the canvas selected by the given `selectors`.
     pub fn insert(&mut self, selectors: &str) -> Result<Rc<Canvas>, AppError> {
-        let canvas = Rc::new(Canvas::new(selectors.as_ref(), self.cur_handle)?);
+        let canvas = Rc::new(Canvas::new(selectors, self.cur_handle)?);
         if let Some(orphan_handle) = self
             .selectors_to_handle
             .insert(selectors.to_owned(), self.cur_handle)
@@ -153,7 +153,7 @@ impl CanvasPack {
     }
 
     pub fn register_proxy(&mut self, handle: CanvasHandle, event: EventType, proxy: Box<dyn Any>) {
-        let idx = handle.into_inner() as usize;
+        let idx = handle.unwrap() as usize;
         let ev_idx = event as isize as usize;
         if self.proxies.len() <= idx {
             let mut value = [None, None, None, None];

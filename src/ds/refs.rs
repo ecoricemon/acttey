@@ -39,7 +39,7 @@ impl<T> RcValue<T> {
     }
 
     #[inline]
-    pub fn into_inner(self) -> T {
+    pub fn unwrap(self) -> T {
         self.value
     }
 

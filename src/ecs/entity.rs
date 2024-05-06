@@ -587,6 +587,9 @@ pub trait Together: std::fmt::Debug {
     fn len(&self) -> usize;
 
     fn begin_add_item(&mut self);
+    /// # Safety
+    ///
+    /// Undefined behavior if `ptr` is invalid.
     unsafe fn add_item(&mut self, ci: usize, ptr: NonNull<u8>);
     fn end_add_item(&mut self) -> usize;
     fn remove_item(&mut self, ri: usize) -> bool;

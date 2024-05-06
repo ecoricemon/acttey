@@ -7,21 +7,17 @@ use super::{
 use crate::{
     ds::refs::RCell,
     ecs::{
-        entity::{Entity, EntityForm, EntityId, EntityKey},
         resource::Resource,
         schedule::Scheduler,
-        system::{Client, System, SystemKey},
+        system::{FnSystem, StructOrFnSystem, System},
     },
-    primitive::mesh::{Material, MeshResource, SeparateGeometry},
+    primitive::mesh::MeshResource,
     render::{
         canvas::{CanvasHandle, OffCanvas},
         resource::RenderResource,
     },
-    scene::{
-        inner::{Scene, SceneManager},
-        SceneError,
-    },
-    util::{key::ObjectKey, string, web},
+    scene::inner::SceneManager,
+    util::{string, web},
     worker::{
         msg::{self, ChMsg},
         Channel, MainChannel, MainWorker, Worker, WorkerId,
@@ -100,7 +96,7 @@ impl App {
         Ok(())
     }
 
-    pub fn call_initializer(&self, f: fn(&mut AppState)) {
+    pub fn initialize(&self, f: fn(&mut AppState)) {
         // Sends user initialization function.
         let f: fn() = unsafe { mem::transmute(f) };
         msg::MsgEventFn {
@@ -167,7 +163,7 @@ impl App {
             })
         }
 
-        fn create_resize_event_proxy<'a>(
+        fn create_resize_event_proxy(
             main: Rc<MainWorker>,
             canvases: RCell<CanvasPack>,
         ) -> Closure<dyn Fn()> {
@@ -272,6 +268,9 @@ extern "C" {
 thread_local! {
     /// [`Worker`] owns this [`AppState`], which means the state belongs to worker.
     /// All graphics jobs will be done in the worker.
+    //
+    // Can't be const because it needs lazy initialization.
+    #[allow(clippy::thread_local_initializer_can_be_made_const)]
     static APP_STATE: RefCell<AppState> = panic!();
 
     /// Checks out all workers are ready or not.
@@ -484,13 +483,10 @@ pub struct AppState {
 
     /// Receiving only channel.
     ch: MainChannel,
-
-    /// The last active system registered through the state.
-    last_sys: Option<SystemKey>,
 }
 
 impl AppState {
-    async fn new(offcanvas: OffCanvas, selectors: String) -> Self {
+    pub(super) async fn new(offcanvas: OffCanvas, selectors: String) -> Self {
         Self {
             sched: Scheduler::new(),
             render: RenderResource::new(offcanvas, selectors).await.unwrap(),
@@ -500,8 +496,41 @@ impl AppState {
             main_loop: Loop::new(),
             workers: Vec::new(),
             ch: MainChannel::new(),
-            last_sys: None,
         }
+    }
+
+    pub fn spawn_worker(&mut self, num: usize) {
+        assert!(self.workers.is_empty());
+
+        // Spawns sub workers.
+        let num = if num != 0 {
+            num
+        } else {
+            web::hardware_concurrency() - 1
+        };
+        let mut name = "sub-worker-00".to_owned();
+        // Worker's id is equal to index + 1.
+        // This helps us find a specific worker easily.
+        self.workers = (1..=num as u32)
+            .map(|id| {
+                // Safety: Infallible.
+                let id = unsafe { NonZeroU32::new_unchecked(id) };
+                string::increase_rnumber(&mut name);
+                let tx_common = self.ch.clone_tx();
+                Worker::spawn(&name, id, tx_common).expect_throw("failed to spawn web worker")
+            })
+            .collect::<Vec<_>>();
+    }
+
+    #[inline]
+    pub fn append_setup_system<T, S, Req, F>(&mut self, sys: T)
+    where
+        T: Into<StructOrFnSystem<S, Req, F>>,
+        S: System,
+        FnSystem<Req, F>: System,
+    {
+        let must_some = self.sched.append_system(sys, 1);
+        assert!(must_some.is_some());
     }
 
     /// Acquires addresses of resource fields from this app state.
@@ -510,7 +539,7 @@ impl AppState {
     ///
     /// For performance reason, we're not going to use `Box` or something like that here.
     /// Because we are aware of when app state is fixed in memory and its resource fields will never be moved or dropped.
-    fn set_resource_address(&mut self) {
+    pub(super) fn set_resource_address(&mut self) {
         use std::ptr::addr_of_mut;
 
         // Registers `render` resource.
@@ -543,7 +572,7 @@ impl AppState {
             .register_default_resource(self.meshes.rkey(), ptr);
     }
 
-    fn register_offcanvas(
+    pub(super) fn register_offcanvas(
         &mut self,
         element: web_sys::OffscreenCanvas,
         handle: CanvasHandle,
@@ -556,88 +585,11 @@ impl AppState {
         self.render.scale = scale;
     }
 
-    fn update_scale_factor(&mut self, scale: f64) {
+    pub(super) fn update_scale_factor(&mut self, scale: f64) {
         self.render.scale = scale;
     }
 
-    pub fn spawn_worker(&mut self, num: Option<usize>) {
-        assert!(self.workers.is_empty());
-
-        // Spawns sub workers.
-        let num = num.unwrap_or(web::hardware_concurrency() - 1);
-        let mut name = "sub-worker-00".to_owned();
-        // Worker's id is equal to index + 1.
-        // This helps us find a specific worker easily.
-        self.workers = (1..=num as u32)
-            .map(|id| {
-                // Safety: Infallible.
-                let id = unsafe { NonZeroU32::new_unchecked(id) };
-                string::increase_rnumber(&mut name);
-                let tx_common = self.ch.clone_tx();
-                Worker::spawn(&name, id, tx_common).expect_throw("failed to spawn web worker")
-            })
-            .collect::<Vec<_>>();
-    }
-
-    #[inline]
-    pub fn add_geometry(&mut self, key: impl Into<ObjectKey>, geo: impl Into<SeparateGeometry>) {
-        self.meshes.add_geometry(key, geo);
-    }
-
-    #[inline]
-    pub fn add_material(&mut self, key: impl Into<ObjectKey>, mat: impl Into<Material>) {
-        self.meshes.add_material(key, mat);
-    }
-
-    #[inline]
-    pub fn add_mesh(
-        &mut self,
-        mesh: impl Into<ObjectKey>,
-        geo: impl Into<ObjectKey>,
-        mat: impl Into<ObjectKey>,
-    ) {
-        self.meshes.add_mesh(mesh, geo, mat);
-    }
-
-    #[inline]
-    pub fn register_entity(&mut self, reg: EntityForm) -> EntityKey<'static> {
-        self.sched.register_entity(reg)
-    }
-
-    #[inline]
-    pub fn add_entity<E: Entity>(&mut self, enti: usize, value: E) -> EntityId {
-        self.sched.add_entity(enti, value)
-    }
-
-    // TODO: AppError
-    #[inline]
-    pub fn add_scene(&mut self, key: impl Into<ObjectKey>, scene: Scene) -> Result<(), SceneError> {
-        let AppState {
-            sched,
-            render,
-            meshes,
-            scene_mgr,
-            ..
-        } = self;
-
-        SceneManager::temp_adopt(key.into(), scene, sched, render, meshes, scene_mgr)
-    }
-
-    /// Registers and activates a system.
-    #[inline]
-    pub fn register_system<S: System>(&mut self, sys: S, live: u32) -> bool {
-        fn activate(this: &mut AppState, skey: SystemKey, live: u32) {
-            this.sched
-                .activate_system(&skey, this.last_sys.as_ref(), live);
-            this.last_sys = Some(skey);
-        }
-
-        let res = self.sched.register_system(sys);
-        activate(self, S::key(), live);
-        res
-    }
-
-    pub fn run() {
+    pub(super) fn run() {
         // Creates main loop which is animation callback.
         let callback = Closure::<dyn FnMut(f64)>::new(move |_time: f64| {
             APP_STATE.with_borrow_mut(|state| {
@@ -665,16 +617,19 @@ impl AppState {
     }
 }
 
+/// # Safety
+///
+/// `ch` must be a valid pointer.
 #[wasm_bindgen(js_name = subOnMessage)]
 pub unsafe fn sub_onmessage(ch: *const Channel, id: u32) {
     // Entrypoint to the sub worker's meesage loop.
-    fn entry(client: &mut Client) {
-        while let Ok(msg) = client.recv() {
+    fn entry(ch: &Channel, wid: WorkerId) {
+        while let Ok(msg) = ch.recv() {
             match msg {
                 ChMsg::ReqHandle => {
                     // crate::log!("[D] sub_onmessage(): worker({id}) ReqHandle msg.");
 
-                    client.send(ChMsg::Handle(thread::current())).unwrap();
+                    ch.send(ChMsg::Handle(thread::current())).unwrap();
                 }
                 ChMsg::End => {
                     // crate::log!("[D] sub_onmessage(): worker({id}) received End msg.");
@@ -687,28 +642,26 @@ pub unsafe fn sub_onmessage(ch: *const Channel, id: u32) {
                     let task = unsafe { task_ptr.as_mut() };
                     let buf = unsafe { buf_ptr.as_mut() };
                     task.invoke(buf);
-                    client.send(ChMsg::Fin(client.wid(), task.rkey())).unwrap();
+                    ch.send(ChMsg::Fin(wid, task.rkey())).unwrap();
                 }
                 msg => {
                     panic!(
                         "[E] sub_onmessage(): worker({}) received unknown msg: {:?}",
-                        client.wid(),
-                        msg
+                        wid, msg
                     );
                 }
             }
         }
         unreachable!(
             "[E] sub_onmessage(): worker({}) failed to receive a msg",
-            client.wid()
+            wid,
         );
     }
 
     // Safety: `ch` came from worker, which guarantees `ch` is valid.
     // See Worker::ch and Worker::open() for more details.
-    let ch = unsafe { ch.as_ref() };
-    let mut client = Client::new(ch.unwrap(), entry, WorkerId::new(id));
-    entry(&mut client);
+    let ch = unsafe { ch.as_ref() }.unwrap();
+    entry(ch, WorkerId::new(id));
 
     // crate::log!("[D] worker({id}) sub_onmessage has finished");
 }
