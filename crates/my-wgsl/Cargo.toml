@@ -9,18 +9,12 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-[dependencies.smallvec]
-version = "1.11.2"
+[dependencies]
+paste = { version = "1.0.14" }
+my-wgsl-macros = { version = "0.0.1", path = "src/macros" }
 
-[dependencies.paste]
-version = "1.0.14"
-
-[dependencies.my-wgsl-macros]
-path = "src/my-wgsl-macros"
-version = "0.0.1"
-
-[dev-dependencies.pretty_assertions] 
-version = "1.4.0"
+[dev-dependencies] 
+pretty_assertions = { version = "1.4.0" }
 
 [[example]]
 name = "hello"

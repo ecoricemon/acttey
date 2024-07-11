@@ -152,7 +152,7 @@ impl ShaderHelper {
     }
 
     /// Adds `FragmentOutput` struct to the `builder`.
-    /// You can get `colors` from [`SurfacePack::create_color_targets()`].
+    /// You can get `colors` from [`SurfacePack::create_color_targets`](acttey::render::canvas::SurfacePack::create_color_targets).
     pub fn add_fragment_output_struct(
         builder: &mut Builder,
         color_targets: &[Option<wgpu::ColorTargetState>],
@@ -285,7 +285,7 @@ impl ShaderHelper {
         // Creates a structure.
         let mut st = Structure {
             ident: "VertexInput".to_owned(),
-            members: SmallVec::new(),
+            members: Vec::new(),
         };
 
         // Adds built-in attributes.

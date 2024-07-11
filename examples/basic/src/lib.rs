@@ -1,92 +1,36 @@
-use acttey::{ecs::entity::EntityForm, prelude::*, scene::inner::SceneManager};
+use acttey::prelude::*;
+use std::{iter, time::Duration};
 use wasm_bindgen::prelude::*;
 
-#[derive(Component)]
-struct Rotate {
-    speed: f32,
-    angle: f32,
-}
+#[wasm_bindgen]
+pub struct MyApp(App);
 
-impl_filter!(RotateFilter, Target = (Rotate));
-impl_filter!(TransformFilter, Target = (components::Transform));
+#[wasm_bindgen]
+impl MyApp {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Self {
+        WBG_INIT.set("default".to_owned()).unwrap();
+        let mut app = App::new();
 
-fn rotate(write: Write<(RotateFilter, TransformFilter)>) {
-    let (rot_2d, obj_2d) = write.unwrap();
-    for (mut rots, mut tfs) in rot_2d.zip(obj_2d) {
-        let len = rots.len();
-        for i in 0..len {
-            let rot = rots.get(i).unwrap();
-            let tf = tfs.get(i).unwrap();
-            tf.rotate_y(rot.angle);
-            rot.angle += rot.speed;
-        }
+        // Registers canvas.
+        app.register_canvas("", &[EventType::Scale, EventType::Resize])
+            .unwrap();
+        // app.register_canvas("#canvas0", &[EventType::MouseMove, EventType::Click])
+        app.register_canvas("#canvas0", &[]).unwrap();
+
+        // Calls state initializer.
+        app.initialize(|state: &mut AppState| {
+            state.register_event(EventType::Scale);
+            state.register_event(EventType::Resize);
+            state.register_event(EventType::MouseMove);
+            state.register_event(EventType::Click);
+
+            state.spawn_worker(1);
+            state.append_setup_system(setup);
+        });
+
+        Self(app)
     }
-}
-
-fn setup(res_write: ResWrite<(resources::MeshResource, resources::Scheduler)>) {
-    let (mut meshes, mut sched) = res_write.unwrap();
-
-    meshes.add_geometry(MyKey::Box, shapes::Box::new(0.3, 0.3, 0.3));
-    meshes.add_material(MyKey::Red, colors::RED);
-    meshes.add_material(MyKey::Blue, colors::BLUE);
-    meshes.add_mesh(MyKey::RedBox, MyKey::Box, MyKey::Red);
-    meshes.add_mesh(MyKey::BlueBox, MyKey::Box, MyKey::Blue);
-
-    let mut ent_reg = EntityForm::new("MyEntity".into(), None, None);
-    ent_reg.add_component(tinfo!(components::Transform));
-    ent_reg.add_component(tinfo!(components::SceneNode));
-    ent_reg.add_component(tinfo!(Rotate));
-    let ekey = sched.register_entity(ent_reg);
-    let enti = ekey.index();
-
-    let e0 = sched.add_entity(
-        enti,
-        (
-            components::Transform::from_xyz(0.0, 0.0, 0.0),
-            components::SceneNode::default(),
-            Rotate {
-                speed: 0.1,
-                angle: 0.0,
-            },
-        ),
-    );
-    let e1 = sched.add_entity(
-        enti,
-        (
-            components::Transform::from_xyz(0.5, 0.0, 0.0),
-            components::SceneNode::default(),
-            Rotate {
-                speed: 0.1,
-                angle: 0.0,
-            },
-        ),
-    );
-
-    // Makes a scene.
-    let mut scene = Scene::new();
-    scene
-        .add_canvas("#canvas0")
-        .add_node(0)
-        .with_camera(MyKey::MyCamera, camera::PerspectiveCamera::default());
-    let node = scene
-        .add_node(0)
-        .with_mesh(MyKey::RedBox)
-        .with_entity(e0)
-        .ret;
-    scene
-        .add_node(node)
-        .with_mesh(MyKey::BlueBox)
-        .with_entity(e1);
-
-    // Appends scene.
-    sched.append_scene(MyKey::MyScene.into(), scene);
-
-    // Appends systems.
-    sched.append_system(systems::resize, u32::MAX);
-    sched.append_system(rotate, 60 * 10);
-    sched.append_system(systems::update_transform, 60 * 10);
-    sched.append_system(systems::Render::new(), 60 * 10);
-    sched.append_system(systems::clear_event, u32::MAX);
 }
 
 enum MyKey {
@@ -105,27 +49,61 @@ impl From<MyKey> for u32 {
     }
 }
 
-#[wasm_bindgen]
-pub struct MyApp(App);
+fn setup(input: ResWrite<(resources::CommonStorage, resources::EcsManager)>) {
+    let (mut stor, mut ecs) = input.take();
 
-#[wasm_bindgen]
-impl MyApp {
-    #[wasm_bindgen(constructor)]
-    pub fn new() -> Self {
-        let mut app = App::new();
+    // Registers mesh.
+    stor.register_geometry(MyKey::Box, shapes::Box::new(0.3, 0.3, 0.3));
+    stor.register_material(MyKey::Red, colors::RED);
+    stor.register_material(MyKey::Blue, colors::BLUE);
+    stor.register_mesh(
+        MyKey::RedBox,
+        iter::once(MyKey::Box),
+        iter::once(MyKey::Red),
+    );
+    stor.register_mesh(
+        MyKey::BlueBox,
+        iter::once(MyKey::Box),
+        iter::once(MyKey::Blue),
+    );
 
-        // Registers canvas.
-        app.register_canvas("", &[EventType::Scale, EventType::Resize])
-            .unwrap();
-        app.register_canvas("#canvas0", &[EventType::MouseMove, EventType::Click])
-            .unwrap();
+    // Registers entity.
+    let ekey = ecs.register_entity::<entities::SimpleEntity>();
 
-        // Calls state initializer.
-        app.initialize(|state: &mut AppState| {
-            state.spawn_worker(2);
-            state.append_setup_system(setup);
-        });
+    ecs.append_once_system(create_scene).unwrap();
 
-        Self(app)
-    }
+    ecs.append_system(foo, NonZeroTick::MAX, false).unwrap();
+    ecs.append_system(bar, NonZeroTick::MAX, false).unwrap();
+    ecs.append_system(baz, NonZeroTick::MAX, false).unwrap();
+
+    // Adds entity.
+    // ecs.add_entity(
+    //     ekey.index(),
+    //     entities::SimpleEntity {
+    //         mesh: MyKey::RedBox.into(),
+    //         transform: components::Transform::from_xyz(0.0, 0.0, 0.0),
+    //     },
+    // );
+}
+
+fn create_scene(queue: ResWrite<resources::SceneCommandQueue>) {
+    let mut scene = Scene::new();
+    scene.register_entity(entities::SimpleEntity::key());
+
+    queue.take().push_back(Command(scene));
+}
+
+fn foo() {
+    std::thread::sleep(Duration::from_millis(100));
+    crate::log!("@@@ foo() on {:?}", std::thread::current().id());
+}
+
+fn bar() {
+    std::thread::sleep(Duration::from_millis(100));
+    crate::log!("@@@ bar() on {:?}", std::thread::current().id());
+}
+
+fn baz() {
+    std::thread::sleep(Duration::from_millis(100));
+    crate::log!("@@@ baz() on {:?}", std::thread::current().id());
 }

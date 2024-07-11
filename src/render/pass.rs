@@ -1,352 +1,370 @@
-use crate::{
-    debug_format,
-    ds::{
-        generational::{GenIndexRc, GenVecRc},
-        graph::DirectedGraph,
+use super::{
+    bind::exe::BindGroupCommand,
+    context::Gpu,
+    fragment::{
+        self,
+        exe::{ColorAttachmentPack, DepthStencilAttachment},
     },
-    impl_from_for_enum,
-    render::{
-        canvas::{Surface, SurfacePack, SurfacePackBuffer},
-        Gpu, RenderError,
-    },
+    pipeline::exe::RenderPipelineCommand,
+    vertex::exe::{IndexBufferCommand, VertexBufferCommand},
 };
-use std::{num::NonZeroU64, ops::Range, rc::Rc, sync::Arc};
+use crate::{ds::share::DebugLockKey, impl_from_for_enum};
+use std::{iter, ops::Range, rc::Rc, sync::Arc};
 
-/// Directed acyclic graph representing pass command dependency.
-/// Direction here means `From` command *requires* `To` command to be executed beforehand.
-#[derive(Debug, Clone)]
-pub struct PassGraph {
-    gpu: Rc<Gpu>,
+/// Render module consists of Resource(res), Description(desc), and Execution(exe) layers.
+/// Execution layer is responsible for executing render or compute passes.
+pub(crate) mod exe {
+    use super::*;
 
-    /// Common label.
-    /// Pass label is formatted like `label_0`.
-    label: Arc<str>,
+    #[derive(Debug)]
+    pub(crate) struct PassPack {
+        gpu: Rc<Gpu>,
+        passes: Vec<Pass>,
+    }
 
-    /// Pass descriptors, which determines types of passes.
-    /// Passes are executed in this order.
-    descs: Vec<PassDesc>,
-
-    graph: DirectedGraph<PassCmd>,
-
-    /// Dirty flag.
-    /// If this is true, next Self::run() will try to detect any cycles in this.
-    dirty: bool,
-}
-
-impl PassGraph {
-    pub fn new(label: Arc<str>, gpu: &Rc<Gpu>) -> Self {
-        Self {
-            gpu: Rc::clone(gpu),
-            label,
-            descs: Vec::new(),
-            graph: DirectedGraph::new(),
-            dirty: false,
+    impl PassPack {
+        /// You can append pass later.
+        pub(crate) const fn new(gpu: Rc<Gpu>, passes: Vec<Pass>) -> Self {
+            Self { gpu, passes }
         }
-    }
 
-    /// Adds a command node.
-    pub fn insert_command(&mut self, cmd: impl Into<PassCmd>) -> usize {
-        self.dirty = true;
-        self.graph.insert_node(cmd.into())
-    }
+        pub(crate) fn append_pass(&mut self, pass: Pass) {
+            self.passes.push(pass);
+        }
 
-    /// Adds an edge between nodes.
-    /// `from` node depends on `to` node, so that `to` node is executed first.
-    pub fn add_dependency(&mut self, from: usize, to: usize) {
-        self.dirty = true;
-        self.graph.add_edge(from, to);
-    }
+        pub(crate) fn execute(&mut self) {
+            // Some shared variables like textures must not change until encode finishes.
+            // We're not updating them during this execution for sure,
+            // so just checks for it in debug mode only.
+            #[cfg(debug_assertions)]
+            let frag_mod_lock = DebugLockKey::lock(&fragment::FRAG_MOD_DEBUG_LOCK);
 
-    pub fn add_pass(&mut self, desc: PassDesc) {
-        self.descs.push(desc);
-    }
+            // Creates command encoder.
+            let mut encoder = self
+                .gpu
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
-    pub fn validate(&mut self) -> Result<(), RenderError> {
-        if self.dirty {
-            self.dirty = false;
-            if self.graph.has_cycle() {
-                let errmsg = debug_format!("detected cycle in PassGraph({})", &*self.label);
-                return Err(RenderError::CycleInPassGraph(errmsg));
+            // Executes passes in their order.
+            for pass in self.passes.iter_mut() {
+                pass.execute(&mut encoder);
+            }
+
+            // Submits command buffer.
+            self.gpu.queue.submit(iter::once(encoder.finish()));
+
+            #[cfg(debug_assertions)]
+            drop(frag_mod_lock);
+
+            // Presents textures on surfaces.
+            for pass in self.passes.iter_mut() {
+                match pass {
+                    Pass::Render(rpass) => rpass.colors.present(),
+                    Pass::Compute(_) => {}
+                }
             }
         }
-        Ok(())
     }
 
-    /// Runs the graph.
-    /// It executes all render passes and compute passes in order they are added.
-    pub fn run(
-        &self,
-        surf_packs: &GenVecRc<SurfacePack>,
-        surf_pack_bufs: &mut Vec<SurfacePackBuffer>,
-        surfaces: &GenVecRc<Surface>,
-        visit_buf: &mut Vec<bool>,
-    ) {
-        assert!(!self.dirty, "call PassGraph::validate()");
+    #[derive(Debug)]
+    pub(crate) enum Pass {
+        Render(RenderPass),
+        Compute(ComputePass),
+    }
+    impl_from_for_enum!(Pass, Render, RenderPass);
+    impl_from_for_enum!(Pass, Compute, ComputePass);
 
-        // Clears `visit_buf`, but we can reuse its capacity.
-        visit_buf.clear();
-        visit_buf.resize(self.graph.len_buf(), false);
+    impl Pass {
+        pub(crate) fn execute(&mut self, encoder: &mut wgpu::CommandEncoder) {
+            match self {
+                Self::Render(render) => render.execute(encoder),
+                Self::Compute(_) => todo!(),
+            }
+        }
+    }
 
-        // Makes sure `surf_pack_bufs` is as long as passes. Each pass uses its own buffer.
-        surf_pack_bufs.resize_with(self.descs.len(), SurfacePackBuffer::default);
+    #[derive(Debug)]
+    pub(crate) struct RenderPass {
+        label: Arc<str>,
+        colors: ColorAttachmentPack,
+        depth_stencil: Option<DepthStencilAttachment>,
+        ops: PassOps,
+    }
 
-        // Creates command encoder.
-        let mut encoder = self.create_command_encoder();
+    impl RenderPass {
+        pub(crate) fn new(
+            label: Arc<str>,
+            colors: ColorAttachmentPack,
+            depth_stencil: Option<DepthStencilAttachment>,
+            mut ops: PassOps,
+        ) -> Self {
+            // Exploits reusable commands.
+            ops.dedup();
 
-        for (desc, sp_buf) in self.descs.iter().zip(surf_pack_bufs.iter_mut()) {
-            match desc {
-                PassDesc::Render(render_desc) => {
-                    // Creates color attachments.
-                    let colors;
-                    let color_attachments = if let Some(sp_index) = &render_desc.sp_index {
-                        let surf_pack = surf_packs.get(sp_index.index).unwrap();
-                        colors = surf_pack.create_color_attachments(surfaces, sp_buf);
-                        colors.as_slice()
-                    } else {
-                        &[]
-                    };
+            Self {
+                label,
+                colors,
+                depth_stencil,
+                ops,
+            }
+        }
 
-                    // Creates a render pass.
-                    let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some(&render_desc.label),
-                        color_attachments,
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
+        /// Calls to [`wgpu::CommandEncoder::begin_render_pass`] followed by set and draw calls.
+        /// And drops [`wgpu::RenderPass`] immediately.
+        ///
+        /// Don't forget to submit command buffer and call present method on surfaces
+        /// after execution of all passes.
+        pub(crate) fn execute(&mut self, encoder: &mut wgpu::CommandEncoder) {
+            let color_attachments = self.colors.as_color_attachments();
+            let depth_stencil_attachment = self
+                .depth_stencil
+                .as_ref()
+                .map(|attach| attach.as_attachment());
 
-                    // Executes commands.
-                    for node_index in render_desc.nodes.iter() {
-                        self.execute_node(&mut render_pass, *node_index, visit_buf);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(&self.label),
+                color_attachments,
+                depth_stencil_attachment,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            self.ops.execute_render_pass(&mut pass);
+        }
+    }
+
+    #[derive(Debug)]
+    pub(crate) struct ComputePass {}
+
+    #[derive(Debug)]
+    pub enum PassDesc {
+        Render {},
+        Compute { label: Arc<str>, ops: PassOps },
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct PassOps {
+        cmds: Vec<PassCommand>,
+
+        /// Operations that will be executed in this order.
+        ops: Vec<Operation>,
+    }
+
+    impl PassOps {
+        pub const fn new() -> Self {
+            Self {
+                cmds: Vec::new(),
+                ops: Vec::new(),
+            }
+        }
+
+        pub fn add_command(&mut self, cmd: PassCommand) -> usize {
+            self.cmds.push(cmd);
+            self.cmds.len() - 1
+        }
+
+        pub fn append_operation(&mut self, op: Operation) {
+            self.ops.push(op);
+        }
+
+        pub(crate) fn execute_render_pass<'a: 'b, 'b>(&'a self, pass: &mut wgpu::RenderPass<'b>) {
+            // Executes `Operation` in their order.
+            for op in self.ops.iter() {
+                // Executes dependent commands.
+                for i in op.dep_indices.iter() {
+                    self.cmds[*i].execute_render_pass(pass);
+                }
+
+                // Executes operational command.
+                self.cmds[op.op_index].execute_render_pass(pass);
+            }
+        }
+
+        pub(crate) fn dedup(&mut self) {
+            #[cfg(debug_assertions)]
+            self.validate();
+
+            let mut set_binds: [Option<&BindGroupCommand>; 4] = [None; 4];
+            let mut set_idx: Option<&IndexBufferCommand> = None;
+            let mut set_verts: [Option<&VertexBufferCommand>; 8] = [None; 8];
+            let mut set_pipe: Option<&RenderPipelineCommand> = None;
+
+            let mut dup = Vec::new();
+            for op in self.ops.iter_mut() {
+                for i in op.dep_indices.iter().cloned() {
+                    match &self.cmds[i] {
+                        PassCommand::None => panic!(),
+                        PassCommand::Bind(bind) => {
+                            let bi = bind.index() as usize;
+                            if matches!(set_binds[bi], Some(set) if set == bind) {
+                                dup.push(i);
+                            }
+                            set_binds[bi] = Some(bind);
+                        }
+                        PassCommand::Index(idx) => {
+                            if matches!(set_idx, Some(set) if set == idx) {
+                                dup.push(i);
+                            }
+                            set_idx = Some(idx);
+                        }
+                        PassCommand::Vertex(vert) => {
+                            let vi = vert.slot() as usize;
+                            if matches!(set_verts[vi], Some(set) if set == vert) {
+                                dup.push(i);
+                            }
+                            set_verts[vi] = Some(vert);
+                        }
+                        PassCommand::RenderPipeline(pipe) => {
+                            if matches!(set_pipe, Some(set) if set == pipe) {
+                                dup.push(i);
+                            }
+                            set_pipe = Some(pipe);
+                        }
+                        PassCommand::Draw(..) => unreachable!(),
                     }
                 }
-                PassDesc::Compute(_compute_desc) => {
-                    unimplemented!()
+                dup.sort_unstable();
+                while let Some(i) = dup.pop() {
+                    op.dep_indices.remove(i);
                 }
             }
         }
 
-        // Submits command buffer.
-        self.gpu.queue.submit(std::iter::once(encoder.finish()));
-        for sp_buf in surf_pack_bufs.iter_mut() {
-            SurfacePack::present(sp_buf);
+        /// # Panics
+        ///
+        /// Panics if the conditions below are not met.
+        /// - All commands must be unique.
+        /// - Operation's indices must be valid.
+        #[cfg(debug_assertions)]
+        fn validate(&self) {
+            // Is every command different from each other?
+            for i in 0..self.cmds.len() {
+                for j in i + 1..self.cmds.len() {
+                    assert_ne!(self.cmds.get(i), self.cmds.get(j));
+                }
+            }
+
+            // Is every operation valid?
+            let mut visit = vec![false; self.cmds.len()];
+            let is_valid_op = self.ops.iter().all(|op| {
+                // `Operation` must point to operational command.
+                let is_valid_op_index = self.cmds[op.op_index].is_operational();
+
+                // `Operation` must point to setting commands as dependencies.
+                // Plus, it must not contain duplication.
+                visit.fill(false);
+                is_valid_op_index
+                    && op.dep_indices.iter().all(|&i| {
+                        let res = self.cmds[i].is_setting() && !visit[i];
+                        visit[i] = true;
+                        res
+                    })
+            });
+            assert!(is_valid_op);
         }
     }
 
-    /// Executes nodes in depth first fashion.
-    fn execute_node<'a: 'b, 'b>(
-        &'a self,
-        render_pass: &mut wgpu::RenderPass<'b>,
-        index: usize,
-        visit: &mut Vec<bool>,
-    ) {
-        if !visit[index] {
-            visit[index] = true;
-            for dep_index in self.graph.iter_outbound(index) {
-                self.execute_node(render_pass, dep_index, visit);
-            }
-            self.graph[index].execute(render_pass);
-        }
+    #[derive(Debug, Clone)]
+    pub struct Operation {
+        /// Operational command index which is one of draw or dispatch commands.
+        pub(crate) op_index: usize,
+
+        /// Dependent command indices.
+        pub(crate) dep_indices: Vec<usize>,
     }
 
-    fn create_command_encoder(&self) -> wgpu::CommandEncoder {
-        self.gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some(&self.label),
-            })
-    }
-}
-
-/// Pass descriptor is used for generating a pass from [`wgpu::CommandEncoder`].  
-/// If this is `Render`, then [`wgpu::RenderPass`] will be generated by the [`wgpu::CommandEncoder::begin_render_pass`].  
-/// If this is `Compute`, then [`wgpu::ComputePass`] will be generated by the [`wgpu::CommandEncoder::begin_compute_pass`].  
-#[derive(Debug, Clone)]
-pub enum PassDesc {
-    Render(RenderPassDesc),
-    Compute(ComputePassDesc),
-}
-
-impl_from_for_enum!(PassDesc, Render, RenderPassDesc);
-impl_from_for_enum!(PassDesc, Compute, ComputePassDesc);
-
-/// A descriptor for single render pass.
-#[derive(Debug, Clone)]
-pub struct RenderPassDesc {
-    /// Pass label.
-    label: Arc<str>,
-
-    /// Optional index pointing to [`SurfacePack`] for generating color attachments.
-    sp_index: Option<GenIndexRc>,
-
-    // TODO: depth stencils
-    // something
-    /// Draw command nodes.
-    nodes: Vec<usize>,
-}
-
-impl RenderPassDesc {
-    pub const fn new(label: Arc<str>, surface_pack_index: Option<GenIndexRc>) -> Self {
-        Self {
-            label,
-            sp_index: surface_pack_index,
-            nodes: Vec::new(),
-        }
-    }
-
-    pub fn add_draw_command(&mut self, index: usize) {
-        self.nodes.push(index);
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ComputePassDesc {}
-
-#[derive(Debug, Clone)]
-pub enum PassCmd {
-    None,
-    SetBindGroup(SetBindGroupCmd),
-    SetVertexBuffer(SetVertexBufferCmd),
-    SetIndexBuffer(SetIndexBufferCmd),
-    SetPipeline(SetPipelineCmd),
-    DrawIndexed(DrawIndexedCmd),
-}
-
-impl_from_for_enum!(PassCmd, SetBindGroup, SetBindGroupCmd);
-impl_from_for_enum!(PassCmd, SetVertexBuffer, SetVertexBufferCmd);
-impl_from_for_enum!(PassCmd, SetIndexBuffer, SetIndexBufferCmd);
-impl_from_for_enum!(PassCmd, SetPipeline, SetPipelineCmd);
-impl_from_for_enum!(PassCmd, DrawIndexed, DrawIndexedCmd);
-
-impl Default for PassCmd {
-    fn default() -> Self {
-        Self::None
-    }
-}
-
-impl PassCmd {
-    pub fn execute<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
-        match self {
-            Self::None => {}
-            Self::SetBindGroup(cmd) => {
-                render_pass.set_bind_group(cmd.index, &cmd.bind_group, &[]);
-            }
-            Self::SetVertexBuffer(cmd) => {
-                render_pass.set_vertex_buffer(cmd.slot, cmd.get_buffer_slice());
-            }
-            Self::SetIndexBuffer(cmd) => {
-                render_pass.set_index_buffer(cmd.get_buffer_slice(), cmd.format);
-            }
-            Self::SetPipeline(cmd) => {
-                render_pass.set_pipeline(&cmd.pipeline);
-            }
-            Self::DrawIndexed(cmd) => {
-                render_pass.draw_indexed(
-                    cmd.indices.clone(),
-                    cmd.base_vertex,
-                    cmd.instances.clone(),
-                );
+    impl Operation {
+        pub const fn new(op: usize, deps: Vec<usize>) -> Self {
+            Self {
+                op_index: op,
+                dep_indices: deps,
             }
         }
     }
-}
 
-/// Corresponding to [`wgpu::RenderPass::set_bind_group`].
-#[derive(Debug, Clone)]
-pub struct SetBindGroupCmd {
-    index: u32,
-    bind_group: Rc<wgpu::BindGroup>,
-}
-
-impl SetBindGroupCmd {
-    pub fn new(index: u32, bind_group: Rc<wgpu::BindGroup>) -> Self {
-        Self { index, bind_group }
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    pub(crate) enum PassCommand {
+        None,
+        Bind(BindGroupCommand),
+        Index(IndexBufferCommand),
+        Vertex(VertexBufferCommand),
+        RenderPipeline(RenderPipelineCommand),
+        Draw(DrawCommand),
     }
-}
 
-/// Corresponding to [`wgpu::RenderPass::set_vertex_buffer`].
-#[derive(Debug, Clone)]
-pub struct SetVertexBufferCmd {
-    buf: Rc<wgpu::Buffer>,
-    offset: u64,
-    size: Option<NonZeroU64>,
-    slot: u32,
-}
+    impl PassCommand {
+        /// Determines the command is operational command or not.
+        pub(crate) fn is_operational(&self) -> bool {
+            match self {
+                Self::None => false,               // No command, so it's not operational.
+                Self::Bind(..) => false,           // Setting command.
+                Self::Index(..) => false,          // Setting command.
+                Self::Vertex(..) => false,         // Setting command.
+                Self::RenderPipeline(..) => false, // Setting command.
+                Self::Draw(..) => true,
+            }
+        }
 
-impl SetVertexBufferCmd {
-    /// If you set `size` to zero, then total range of the buffer is used.
-    pub fn new(buf: Rc<wgpu::Buffer>, offset: u64, size: u64, slot: u32) -> Self {
-        Self {
-            buf,
-            offset,
-            size: NonZeroU64::new(size),
-            slot,
+        /// Determines the command is setting command or not.
+        pub(crate) fn is_setting(&self) -> bool {
+            match self {
+                Self::None => false,
+                _ => !self.is_operational(),
+            }
+        }
+
+        pub(crate) fn execute_render_pass<'a: 'b, 'b>(&'a self, pass: &mut wgpu::RenderPass<'b>) {
+            match self {
+                Self::None => panic!(),
+                Self::Bind(bind) => bind.execute_render_pass(pass),
+                Self::Index(idx) => idx.execute(pass),
+                Self::Vertex(vert) => vert.execute(pass),
+                Self::RenderPipeline(pipe) => pipe.execute(pass),
+                Self::Draw(draw) => draw.execute(pass),
+            }
         }
     }
 
-    pub fn get_buffer_slice(&self) -> wgpu::BufferSlice {
-        if let Some(size) = self.size {
-            self.buf.slice(self.offset..self.offset + size.get())
-        } else {
-            self.buf.slice(self.offset..)
+    impl Default for PassCommand {
+        fn default() -> Self {
+            Self::None
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    pub(crate) struct DrawCommand {
+        indices: Range<u32>,
+        base_vertex: i32,
+        instances: Range<u32>,
+    }
+
+    impl DrawCommand {
+        pub(crate) const fn new(
+            indices: Range<u32>,
+            base_vertex: i32,
+            instances: Range<u32>,
+        ) -> Self {
+            Self {
+                indices,
+                base_vertex,
+                instances,
+            }
+        }
+
+        pub(crate) fn execute<'a: 'b, 'b>(&'a self, pass: &mut wgpu::RenderPass<'b>) {
+            pass.draw_indexed(
+                self.indices.clone(),
+                self.base_vertex,
+                self.instances.clone(),
+            );
         }
     }
 }
 
-/// Corresponding to [`wgpu::RenderPass::set_index_buffer`].
-#[derive(Debug, Clone)]
-pub struct SetIndexBufferCmd {
-    buf: Rc<wgpu::Buffer>,
-    offset: u64,
-    size: Option<NonZeroU64>,
-    format: wgpu::IndexFormat,
-}
+/// Render module consists of Resource(res), Description(desc), and Execution(exe) layers.
+/// Description layer is responsible for describing GPU state using something like pipeline.
+pub(crate) mod desc {}
 
-impl SetIndexBufferCmd {
-    pub fn new(buf: Rc<wgpu::Buffer>, offset: u64, size: u64, format: wgpu::IndexFormat) -> Self {
-        Self {
-            buf,
-            offset,
-            size: NonZeroU64::new(size),
-            format,
-        }
-    }
-
-    pub fn get_buffer_slice(&self) -> wgpu::BufferSlice {
-        if let Some(size) = self.size {
-            self.buf.slice(self.offset..self.offset + size.get())
-        } else {
-            self.buf.slice(self.offset..)
-        }
-    }
-}
-
-/// Corresponding to [`wgpu::RenderPass::set_pipeline`].
-#[derive(Debug, Clone)]
-pub struct SetPipelineCmd {
-    pipeline: Rc<wgpu::RenderPipeline>,
-}
-
-impl SetPipelineCmd {
-    pub fn new(pipeline: Rc<wgpu::RenderPipeline>) -> Self {
-        Self { pipeline }
-    }
-}
-
-/// Corresponding to [`wgpu::RenderPass::draw_indexed`].
-#[derive(Debug, Clone)]
-pub struct DrawIndexedCmd {
-    indices: Range<u32>,
-    base_vertex: i32,
-    instances: Range<u32>,
-}
-
-impl DrawIndexedCmd {
-    pub fn new(indices: Range<u32>, base_vertex: i32, instances: Range<u32>) -> Self {
-        Self {
-            indices,
-            base_vertex,
-            instances,
-        }
-    }
-}
+/// Render module consists of Resource(res), Description(desc), and Execution(exe) layers.
+/// Resource layer is responsible for holding GPU relative data.
+pub(crate) mod res {}

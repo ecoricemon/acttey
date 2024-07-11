@@ -1,17 +1,20 @@
+pub mod default;
+pub mod draw;
 pub mod ds;
-pub mod ecs;
+pub mod msg;
 pub mod primitive;
 pub mod render;
-pub mod scene;
 pub mod top;
-pub mod unit;
 pub mod util;
 pub mod worker;
+pub use my_ecs;
+pub use my_wgsl;
 
 pub mod prelude {
     pub use super::{
-        ds::prelude::*, ecs::prelude::*, impl_filter, impl_request, primitive::prelude::*,
-        render::prelude::*, scene::prelude::*, tinfo, top::prelude::*, util::prelude::*,
+        default::prelude::*, draw::prelude::*, ds::prelude::*, msg::prelude::*,
+        my_ecs::ecs::prelude::*, primitive::prelude::*, render::prelude::*, top::prelude::*,
+        util::prelude::*, worker::prelude::*,
     };
 }
 
@@ -22,4 +25,8 @@ pub(crate) mod errmsg {
     pub(crate) const WEBSYS_GET_ELEMENT: &str = "failed to get html element";
     pub(crate) const WEBSYS_REQ_ANIMATION: &str = "failed to request animation frame";
     pub(crate) const WEBSYS_ADD_ELEMENT: &str = "failed to create element";
+}
+
+pub mod common {
+    pub type AppHasher = ahash::RandomState;
 }

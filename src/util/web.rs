@@ -1,12 +1,10 @@
 use wasm_bindgen::{JsCast, JsValue, UnwrapThrowExt};
 use web_sys::{self, Document, Element, HtmlElement, Navigator, Window};
 
-#[inline]
 pub fn window() -> Window {
     web_sys::window().expect_throw(crate::errmsg::WEBSYS_GET_ELEMENT)
 }
 
-#[inline]
 pub fn device_pixel_ratio_from(window: &Window) -> f64 {
     window.device_pixel_ratio()
 }
@@ -15,7 +13,6 @@ pub fn device_pixel_ratio() -> f64 {
     device_pixel_ratio_from(&window())
 }
 
-#[inline]
 pub fn document_from(window: &Window) -> Document {
     window
         .document()
@@ -26,7 +23,6 @@ pub fn document() -> Document {
     document_from(&window())
 }
 
-#[inline]
 pub fn navigator_from(window: &Window) -> Navigator {
     window.navigator()
 }
@@ -35,7 +31,6 @@ pub fn navigator() -> Navigator {
     navigator_from(&window())
 }
 
-#[inline]
 pub fn body_from(document: &Document) -> HtmlElement {
     document
         .body()
@@ -50,7 +45,6 @@ pub fn get_element_by_id(id: &str) -> Option<Element> {
     document().get_element_by_id(id)
 }
 
-#[inline]
 pub fn query_selector_from(
     document: &Document,
     selectors: &str,
@@ -72,7 +66,6 @@ pub fn set_attributes<'a>(
     Ok(())
 }
 
-#[inline]
 pub fn has_attribute(element: &Element, name: &str) -> bool {
     element.has_attribute(name)
 }

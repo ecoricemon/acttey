@@ -43,20 +43,6 @@ macro_rules! ty {
 }
 
 #[macro_export]
-macro_rules! debug_format {
-    ($($t:tt)*) => {{
-        #[cfg(debug_assertions)]
-        {
-            format!($($t)*)
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            String::new()
-        }
-    }};
-}
-
-#[macro_export]
 macro_rules! ntimes {
     ($n:expr, $($t:tt)*) => {
         for _ in 0..$n {

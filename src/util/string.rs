@@ -133,7 +133,6 @@ pub const fn encode_base64(byte: u8) -> u8 {
 }
 
 /// Encodes a single u32 value into base64.
-#[inline]
 pub const fn encode_base64_u32(value: u32) -> [u8; 6] {
     const MASK: u32 = (1 << 6) - 1;
     [
@@ -144,4 +143,19 @@ pub const fn encode_base64_u32(value: u32) -> [u8; 6] {
         encode_base64(((value >> 2) & MASK) as u8),
         encode_base64(((value << 4) & MASK) as u8),
     ]
+}
+
+/// # Examples
+///
+/// ```
+/// # use acttey::util::string::upper_to_lower_camel_case;
+///
+/// assert_eq!("myStRing", upper_to_lower_camel_case("MyStRing").as_str());
+/// ```
+pub fn upper_to_lower_camel_case(s: &str) -> String {
+    s.chars()
+        .take(1)
+        .map(|ch| ch.to_ascii_lowercase())
+        .chain(s.chars().skip(1))
+        .collect()
 }

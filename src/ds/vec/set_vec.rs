@@ -1,29 +1,42 @@
-use super::OptVec;
-use std::{collections::HashMap, hash::Hash, ops::Deref};
+use my_ecs::ds::prelude::*;
+use std::{
+    collections::HashMap,
+    hash::{BuildHasher, Hash},
+    ops::Deref,
+};
 
-/// This doesn't allow duplication and support looking up values in O(1) like hash set.
+/// This doesn't allow duplication and supports looking up values in O(1) like hash set.
 /// Plus this guarantees inserted order like vector.
 /// Similar to [`GenVec`](crate::ds::generational::GenVec), but this doesn't have generation.
 /// This is based on [`OptVec`] so that it's also recommended to use NonZero series if it's possible.
 #[derive(Debug, Clone)]
-pub struct SetVec<T> {
+pub struct SetVec<T, S> {
     /// Optional values.
-    values: OptVec<T>,
+    values: OptVec<T, S>,
 
     /// Inverse map.  
-    /// Vacant slots are not in here.
-    imap: HashMap<T, usize, ahash::RandomState>,
+    /// Vacant slots don't belong to this.
+    imap: HashMap<T, usize, S>,
 }
 
-impl<T: Clone + Hash + PartialEq + Eq> SetVec<T> {
+impl<T, S> SetVec<T, S>
+where
+    T: Clone + Hash + PartialEq + Eq,
+    S: Default,
+{
     pub fn new() -> Self {
         Self {
             values: OptVec::new(),
             imap: HashMap::default(),
         }
     }
+}
 
-    #[inline]
+impl<T, S> SetVec<T, S>
+where
+    T: Clone + Hash + PartialEq + Eq,
+    S: BuildHasher,
+{
     pub fn contains<Q>(&self, value: &Q) -> bool
     where
         T: std::borrow::Borrow<Q>,
@@ -32,7 +45,6 @@ impl<T: Clone + Hash + PartialEq + Eq> SetVec<T> {
         self.imap.contains_key(value)
     }
 
-    #[inline]
     pub fn get_index<Q>(&self, value: &Q) -> Option<usize>
     where
         T: std::borrow::Borrow<Q>,
@@ -74,15 +86,22 @@ impl<T: Clone + Hash + PartialEq + Eq> SetVec<T> {
     }
 }
 
-impl<T: Clone + Hash + PartialEq + Eq> Default for SetVec<T> {
+impl<T, S> Default for SetVec<T, S>
+where
+    T: Clone + Hash + PartialEq + Eq,
+    S: Default,
+{
     fn default() -> Self {
         Self::new()
     }
 }
 
 // Do not implement DerefMut because we need to synchronize imap.
-impl<T: Clone + Hash + PartialEq + Eq> Deref for SetVec<T> {
-    type Target = OptVec<T>;
+impl<T, S> Deref for SetVec<T, S>
+where
+    T: Clone + Hash + PartialEq + Eq,
+{
+    type Target = OptVec<T, S>;
 
     fn deref(&self) -> &Self::Target {
         &self.values

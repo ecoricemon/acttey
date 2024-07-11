@@ -1,13 +1,9 @@
 pub mod app;
-pub mod canvas;
-pub mod event;
 mod r#loop;
+pub mod storage;
 
 pub mod prelude {
-    pub use super::{
-        app::{App, AppState},
-        event::EventType,
-    };
+    pub use super::app::{App, AppState};
 }
 
 use crate::render::canvas::CanvasHandle;

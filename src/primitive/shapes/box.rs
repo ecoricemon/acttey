@@ -102,19 +102,16 @@ pub struct Cube {
 }
 
 impl Cube {
-    #[inline]
     pub fn new(length: f32) -> Self {
         Self {
             b: Box::new(length, length, length),
         }
     }
 
-    #[inline]
     pub fn get_length(&self) -> f32 {
         self.b.width
     }
 
-    #[inline]
     pub fn set_length(&mut self, length: f32) {
         self.b.width = length;
         self.b.height = length;
@@ -125,7 +122,6 @@ impl Cube {
 impl Deref for Cube {
     type Target = Box;
 
-    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.b
     }

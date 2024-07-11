@@ -1,19 +1,16 @@
-use super::{
-    canvas::{OffCanvas, Surface},
-    RenderError,
-};
-use std::rc::Rc;
+use super::canvas::OffCanvas;
+use crate::render::RenderError;
 use wasm_bindgen::JsCast;
 
 #[derive(Debug)]
-pub struct RenderContext {
-    pub global: web_sys::DedicatedWorkerGlobalScope,
-    pub instance: wgpu::Instance,
-    pub adapter: wgpu::Adapter,
+pub(crate) struct RenderContext {
+    pub(crate) global: web_sys::DedicatedWorkerGlobalScope,
+    pub(crate) instance: wgpu::Instance,
+    pub(crate) adapter: wgpu::Adapter,
 }
 
 impl RenderContext {
-    pub async fn new(ref_canvas: Rc<OffCanvas>) -> Result<Self, RenderError> {
+    pub(crate) async fn new(ref_canvas: &OffCanvas) -> Result<Self, RenderError> {
         // Worker's scope.
         let global = js_sys::global().unchecked_into();
 
@@ -29,13 +26,18 @@ impl RenderContext {
             ..Default::default()
         });
 
+        let ref_surf = instance
+            .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(
+                web_sys::OffscreenCanvas::clone(ref_canvas),
+            ))
+            .unwrap();
+
         // wgpu::Adapter.
-        let dummy_surface = Surface::new(&instance, ref_canvas); // Drops at the end.
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::default(),
                 force_fallback_adapter: false,
-                compatible_surface: Some(&dummy_surface.surface),
+                compatible_surface: Some(&ref_surf),
             })
             .await
             .ok_or(RenderError::RequestAdapterError)?;
@@ -49,13 +51,13 @@ impl RenderContext {
 }
 
 #[derive(Debug)]
-pub struct Gpu {
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
+pub(crate) struct Gpu {
+    pub(crate) device: wgpu::Device,
+    pub(crate) queue: wgpu::Queue,
 }
 
 impl Gpu {
-    pub async fn new(
+    pub(crate) async fn new(
         adapter: &wgpu::Adapter,
         features: Option<wgpu::Features>,
         limits: Option<wgpu::Limits>,

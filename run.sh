@@ -11,7 +11,7 @@ my_exit() {
 }
 
 if [ "$#" -ne 1 ]; then
-    my_exit 1
+    my_exit
 fi
 
 wasm_dirs=(
@@ -68,5 +68,5 @@ elif [ "$1" = "clean" ]; then
     done
     echo "=== Done. ==="
 else
-    my_exit 1
+    my_exit
 fi

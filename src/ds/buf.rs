@@ -1,16 +1,23 @@
 use crate::{ds::vec::VarChunkVec, util::Window};
-use std::{borrow::Borrow, collections::HashMap, hash::Hash};
+use std::{
+    borrow::Borrow,
+    collections::HashMap,
+    hash::{BuildHasher, Hash},
+};
 
 #[derive(Debug, Clone)]
-pub struct VarChunkBuffer<K, V> {
+pub struct VarChunkBuffer<K, V, S> {
     /// Key to view index.
-    map: HashMap<K, usize, ahash::RandomState>,
+    map: HashMap<K, usize, S>,
 
     /// Chunks including fragments.
-    vec: VarChunkVec<V>,
+    vec: VarChunkVec<V, S>,
 }
 
-impl<K, V> VarChunkBuffer<K, V> {
+impl<K, V, S> VarChunkBuffer<K, V, S>
+where
+    S: Default,
+{
     pub fn new() -> Self {
         Self {
             map: HashMap::default(),
@@ -24,27 +31,30 @@ impl<K, V> VarChunkBuffer<K, V> {
             vec: VarChunkVec::with_capacity(capacity),
         }
     }
+}
 
+impl<K, V, S> VarChunkBuffer<K, V, S> {
     /// Retrieves length of the buffer, which contains all chunks and fragments.
-    #[inline]
     pub fn len(&self) -> usize {
         self.vec.len()
     }
 
     /// Determines the buffer is empty or not.
-    #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Returns iterator visiting all keys.
-    #[inline]
     pub fn keys(&self) -> std::collections::hash_map::Keys<'_, K, usize> {
         self.map.keys()
     }
+}
 
+impl<K, V, S> VarChunkBuffer<K, V, S>
+where
+    S: BuildHasher,
+{
     /// Returns iterator visiting all chunks only, not fragments.
-    #[inline]
     pub fn chunks(&self) -> impl Iterator<Item = (&K, &[V])> {
         self.map.iter().map(|(key, ci)| (key, self.as_chunk(*ci)))
     }
@@ -56,7 +66,6 @@ impl<K, V> VarChunkBuffer<K, V> {
     /// - `ci` is out of bound.
     /// - `ci` points to a vacant slot.
     /// - In debug mode only, `ci` points to a fragment.
-    #[inline]
     pub fn get_chunk_window(&self, ci: usize) -> &Window {
         self.vec.get_chunk_window(ci)
     }
@@ -64,7 +73,6 @@ impl<K, V> VarChunkBuffer<K, V> {
     /// Gets all range of buffer as a slice.
     /// Note that the slice includes not only chunks but fragments as well.
     /// If you want a specific chunk slice, use [`Self::as_chunk`].
-    #[inline]
     pub fn as_slice(&self) -> &[V] {
         self.vec.as_slice()
     }
@@ -76,7 +84,6 @@ impl<K, V> VarChunkBuffer<K, V> {
     /// - `ci` is out of bound.
     /// - `ci` points to a vacant slot.
     /// - In debug mode only, `ci` points to a fragment.
-    #[inline]
     pub fn as_chunk(&self, ci: usize) -> &[V] {
         self.vec.as_chunk(ci)
     }
@@ -88,7 +95,6 @@ impl<K, V> VarChunkBuffer<K, V> {
     /// - `ci` is out of bound.
     /// - `ci` points to a vacant slot.
     /// - In debug mode only, `ci` points to a fragment.
-    #[inline]
     pub fn as_chunk_mut(&mut self, ci: usize) -> &mut [V] {
         self.vec.as_chunk_mut(ci)
     }
@@ -100,7 +106,6 @@ impl<K, V> VarChunkBuffer<K, V> {
     ///
     /// - `ci` is out of bound.
     /// - `ci` points to a vacant slot.
-    #[inline]
     pub fn chunk_len(&self, ci: usize) -> usize {
         self.vec.chunk_len(ci)
     }
@@ -111,7 +116,6 @@ impl<K, V> VarChunkBuffer<K, V> {
     ///
     /// - `ci` or `ii` are out of bounds.
     /// - In debug mode only, `ci` points to a vacant slot.
-    #[inline]
     pub fn get_item(&self, ci: usize, ii: usize) -> &V {
         self.vec.get_item(ci, ii)
     }
@@ -122,29 +126,39 @@ impl<K, V> VarChunkBuffer<K, V> {
     ///
     /// - `ci` or `ii` are out of bounds.
     /// - In debug mode only, `ci` points to a vacant slot.
-    #[inline]
     pub fn get_item_mut(&mut self, ci: usize, ii: usize) -> &mut V {
         self.vec.get_item_mut(ci, ii)
     }
 }
 
-impl<K, V> Default for VarChunkBuffer<K, V> {
+impl<K, V, S> Default for VarChunkBuffer<K, V, S>
+where
+    S: Default,
+{
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<K, V: Default + Copy> VarChunkBuffer<K, V> {
+impl<K, V, S> VarChunkBuffer<K, V, S>
+where
+    V: Default + Copy,
+    S: BuildHasher,
+{
     /// # Panics
     ///
     /// Panics if `ci` is out of bound or points to a fragment or vacant slot.
-    #[inline]
     pub fn insert(&mut self, ci: usize, value: V) {
         self.vec.push_item_to_chunk(ci, value)
     }
 }
 
-impl<K: Hash + Eq, V: Default + Copy> VarChunkBuffer<K, V> {
+impl<K, V, S> VarChunkBuffer<K, V, S>
+where
+    K: Hash + Eq,
+    V: Default + Copy,
+    S: BuildHasher,
+{
     pub fn contains_key<Q>(&self, key: &Q) -> bool
     where
         K: Borrow<Q>,
@@ -154,7 +168,6 @@ impl<K: Hash + Eq, V: Default + Copy> VarChunkBuffer<K, V> {
     }
 
     /// Retrieves chunk window.
-    #[inline]
     pub fn get_chunk_window2<Q>(&self, key: &Q) -> Option<&Window>
     where
         K: Borrow<Q>,
@@ -233,7 +246,6 @@ impl<K: Hash + Eq, V: Default + Copy> VarChunkBuffer<K, V> {
         }
     }
 
-    #[inline]
     fn get_index<Q>(&self, key: &Q) -> Option<usize>
     where
         K: Borrow<Q>,
@@ -243,8 +255,12 @@ impl<K: Hash + Eq, V: Default + Copy> VarChunkBuffer<K, V> {
     }
 }
 
-impl<'a, K, V: bytemuck::Pod> From<&'a VarChunkBuffer<K, V>> for &'a [u8] {
-    fn from(value: &'a VarChunkBuffer<K, V>) -> Self {
+impl<'a, K, V, S> From<&'a VarChunkBuffer<K, V, S>> for &'a [u8]
+where
+    V: bytemuck::Pod,
+    S: BuildHasher,
+{
+    fn from(value: &'a VarChunkBuffer<K, V, S>) -> Self {
         bytemuck::cast_slice(value.as_slice())
     }
 }

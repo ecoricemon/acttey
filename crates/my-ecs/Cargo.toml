@@ -1,0 +1,33 @@
+[package]
+name = "my-ecs"
+description = "Entity Component System implementation"
+repository = "https://github.com/ecoricemon/acttey"
+license = "Apache-2.0 OR MIT"
+version = "0.0.1"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+my-ecs-macros = { version = "0.0.1", path = "src/macros" }
+paste = { version = "1.0.14" }
+thiserror = { version = "1.0.57" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = { version = "0.3.69" }
+web-sys = { version = "0.3.69", features = [
+    "Worker",
+    "WorkerOptions",
+    "WorkerType",
+    "Blob",
+    "BlobPropertyBag",
+    "Url",
+    "MessageEvent",
+]}
+wasm-bindgen = { version = "0.2.92" }
+once_cell = { version = "1.19.0" }
+
+[[example]]
+name = "hello"
+crate-type = ["bin"]

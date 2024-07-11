@@ -75,14 +75,10 @@
 #![allow(non_camel_case_types)]
 
 use paste::paste;
-use smallvec::SmallVec;
 use std::marker::PhantomData;
 
 pub use my_wgsl_macros::*;
 use util::*;
-
-/// Re-export smallvec.
-pub use smallvec;
 
 const TAB_SIZE: usize = 2;
 
@@ -138,12 +134,19 @@ impl PutStr for String {
 
 impl PutStrPretty for String {}
 
-pub trait AsStructure: ToIdent {
+pub trait AsStructure {
     fn as_structure() -> Structure;
 }
 
-impl<T: AsStructure> PutStr for T {
+impl<T: AsStructure + ToIdent> PutStr for T {
     fn put_ident(&self, buf: &mut String) {
+        // NOTE: Obviously, `AsStructure` can make ident as well.
+        // But we need ident only here.
+        #[cfg(debug_assertions)]
+        {
+            let st = T::as_structure();
+            assert_eq!(st.ident, Self::to_ident());
+        }
         buf.push_str(&Self::to_ident())
     }
 
@@ -152,15 +155,17 @@ impl<T: AsStructure> PutStr for T {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Builder {
     /// Each shader entry such as struct, global variable, and function.
     pub entries: Vec<ShaderEntry>,
 }
 
 impl Builder {
-    pub fn new() -> Self {
-        Self::default()
+    pub const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     /// Generates WGSL text.
@@ -209,7 +214,6 @@ impl Builder {
     }
 
     /// Determines if the structure exists.
-    #[inline]
     pub fn has_structure(&self, ident: &str) -> bool {
         self.find_structure(ident).is_some()
     }
@@ -368,7 +372,6 @@ impl Builder {
     }
 
     /// Determines if the global variable exists.
-    #[inline]
     pub fn has_global_variable(&self, ident: &str) -> bool {
         self.find_global_variable(ident).is_some()
     }
@@ -420,7 +423,6 @@ impl Builder {
     }
 
     /// Determines if the function exists.
-    #[inline]
     pub fn has_function(&self, ident: &str) -> bool {
         self.find_function(ident).is_some()
     }
@@ -499,11 +501,11 @@ impl Builder {
         fn_ident: &str,
         attr_outer: &str,
         attr_inner: Option<&str>,
-    ) -> SmallVec<[CompoundStatement; 4]> {
+    ) -> Vec<CompoundStatement> {
         if let Some(f) = self.get_function_mut(fn_ident) {
             f.remove_statement(attr_outer, attr_inner)
         } else {
-            smallvec::smallvec![]
+            Vec::new()
         }
     }
 
@@ -568,7 +570,7 @@ impl Builder {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ShaderEntry {
     Structure(Structure),
     GlobalVariable(GlobalVariable),
@@ -633,7 +635,7 @@ impl PutStrPretty for ShaderEntry {
 
 // 6.2.10. Structure Types
 // https://www.w3.org/TR/WGSL/#struct-types
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Structure {
     /// Name of the struct.
     ///
@@ -643,7 +645,7 @@ pub struct Structure {
     /// Structure members.
     ///
     /// e.g. struct Light { **pos : vec3f**, **color : vec3f** }
-    pub members: SmallVec<[StructureMember; 4]>,
+    pub members: Vec<StructureMember>,
 }
 
 impl Structure {
@@ -693,7 +695,7 @@ impl Structure {
     /// Caller should guarantee that all idents in `order` appear only once
     /// and match with this members.
     pub fn reorder_members<'a>(&mut self, order: impl Iterator<Item = &'a str>) {
-        let mut new_members = SmallVec::with_capacity(self.members.len());
+        let mut new_members = Vec::with_capacity(self.members.len());
         for ident in order {
             let i = self.find_member(ident).unwrap();
             new_members.push(self.members[i].clone());
@@ -744,7 +746,7 @@ impl Structure {
             .filter(|member| !rhs.has_member(member.ident.as_str()))
             .count()
             + rhs.members.len();
-        let mut merged = SmallVec::with_capacity(num);
+        let mut merged = Vec::with_capacity(num);
         for member in self.members.iter() {
             if !rhs.has_member(member.ident.as_str()) {
                 merged.push(member.clone());
@@ -775,12 +777,12 @@ impl PutStrPretty for Structure {
         self.put_ident(buf);
         buf.push_str(" {\n");
         let tab_str = " ".repeat(TAB_SIZE);
-        put_str_join(self.members.iter(), buf, &tab_str, ",\n", "\n");
+        put_str_pretty_join(self.members.iter(), buf, &tab_str, ",\n", "\n");
         buf.push('}');
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StructureMember {
     /// Attributes of the structure member.
     ///
@@ -834,7 +836,16 @@ impl PutStr for StructureMember {
     }
 }
 
-#[derive(Debug, Clone)]
+impl PutStrPretty for StructureMember {
+    fn put_str_pretty(&self, buf: &mut String) {
+        put_attrs_pretty(self.attrs.iter(), buf);
+        self.put_ident_pretty(buf);
+        buf.push_str(" : ");
+        buf.push_str(&self.ty);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GlobalVariable {
     /// Attributes of the global variable.
     ///
@@ -844,7 +855,7 @@ pub struct GlobalVariable {
     /// Templates of the global variable.
     ///
     /// e.g. group(0) binding(0) var<**storage**> light : LightStorage.
-    pub templates: SmallVec<[String; 2]>,
+    pub templates: Vec<String>,
 
     /// Name of the global variable.
     ///
@@ -965,7 +976,7 @@ impl PutStrPretty for GlobalVariable {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Function {
     /// Attributes of the function.
     ///
@@ -980,7 +991,7 @@ pub struct Function {
     /// Inputs of the function.
     ///
     /// e.g. fn foo(**input : Input**) {...}
-    pub inputs: SmallVec<[FunctionParameter; 4]>,
+    pub inputs: Vec<FunctionParameter>,
 
     /// Output of the function.
     ///
@@ -999,7 +1010,7 @@ impl Function {
         &mut self,
         attr_outer: &str,
         attr_inner: Option<&str>,
-    ) -> SmallVec<[CompoundStatement; 4]> {
+    ) -> Vec<CompoundStatement> {
         self.stmt
             .remove_statement_recur_partial(attr_outer, attr_inner)
     }
@@ -1072,7 +1083,7 @@ impl PutStrPretty for Function {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FunctionParameter {
     /// Attributes of the function parameter.
     ///
@@ -1121,7 +1132,7 @@ impl PutStrPretty for FunctionParameter {
 // 9.1. Compound Statement
 // https://www.w3.org/TR/WGSL/#compound-statement-section
 /// Compound statement is a set of statement wrapped with braces, {...}.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct CompoundStatement {
     /// Attributes of the statement.
     pub attrs: Attributes,
@@ -1132,7 +1143,7 @@ pub struct CompoundStatement {
 
 impl CompoundStatement {
     /// Retrieve statements that have given attribute using recursive search.
-    pub fn get_statement_recur(&self, attr: &Attribute) -> SmallVec<[&CompoundStatement; 4]> {
+    pub fn get_statement_recur(&self, attr: &Attribute) -> Vec<&CompoundStatement> {
         self.get_statement_recur_partial(attr.outer(), attr.inner().as_deref())
     }
 
@@ -1143,8 +1154,8 @@ impl CompoundStatement {
         &self,
         outer: &str,
         inner: Option<&str>,
-    ) -> SmallVec<[&CompoundStatement; 4]> {
-        let mut res = SmallVec::new();
+    ) -> Vec<&CompoundStatement> {
+        let mut res = Vec::new();
         for stmt in self.stmts.iter() {
             if let Statement::Compound(comp_stmt) = stmt {
                 if comp_stmt.attrs.has_attribute_partial(outer, inner) {
@@ -1159,10 +1170,7 @@ impl CompoundStatement {
     }
 
     /// Retrieve statements that have given attribute using recursive search.
-    pub fn get_statement_recur_mut(
-        &mut self,
-        attr: &Attribute,
-    ) -> SmallVec<[&mut CompoundStatement; 4]> {
+    pub fn get_statement_recur_mut(&mut self, attr: &Attribute) -> Vec<&mut CompoundStatement> {
         self.get_statement_recur_partial_mut(attr.outer(), attr.inner().as_deref())
     }
 
@@ -1173,8 +1181,8 @@ impl CompoundStatement {
         &mut self,
         outer: &str,
         inner: Option<&str>,
-    ) -> SmallVec<[&mut CompoundStatement; 4]> {
-        let mut res = SmallVec::new();
+    ) -> Vec<&mut CompoundStatement> {
+        let mut res = Vec::new();
         for stmt in self.stmts.iter_mut() {
             if let Statement::Compound(comp_stmt) = stmt {
                 if comp_stmt.attrs.has_attribute_partial(outer, inner) {
@@ -1190,7 +1198,7 @@ impl CompoundStatement {
 
     /// Removes statements that have given attribute using recursive search.
     /// Then returns removed statements.
-    pub fn remove_statement_recur(&mut self, attr: &Attribute) -> SmallVec<[CompoundStatement; 4]> {
+    pub fn remove_statement_recur(&mut self, attr: &Attribute) -> Vec<CompoundStatement> {
         self.remove_statement_recur_partial(attr.outer(), attr.inner().as_deref())
     }
 
@@ -1201,8 +1209,8 @@ impl CompoundStatement {
         &mut self,
         outer: &str,
         inner: Option<&str>,
-    ) -> SmallVec<[CompoundStatement; 4]> {
-        let mut removed = SmallVec::new();
+    ) -> Vec<CompoundStatement> {
+        let mut removed = Vec::new();
         for i in (0..self.stmts.len()).rev() {
             if let Statement::Compound(comp_stmt) = &mut self.stmts[i] {
                 if comp_stmt.attrs.has_attribute_partial(outer, inner) {
@@ -1290,7 +1298,7 @@ impl PutStrPretty for CompoundStatement {
 
 // 9.7. Statements Grammar Summary
 // https://www.w3.org/TR/WGSL/#statements-summary
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Statement {
     // Not fully implemented.
     /// Compoud statement is a set of statements wrapped with braces.
@@ -1395,12 +1403,12 @@ impl PutStrPretty for Statement {
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct Attributes(pub SmallVec<[Attribute; 2]>);
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct Attributes(pub Vec<Attribute>);
 
 impl Attributes {
     pub fn new() -> Self {
-        Self::default()
+        Self(Vec::new())
     }
 
     /// Retrieves the index of the exactly matched attribute.
@@ -1441,16 +1449,14 @@ impl Attributes {
 }
 
 impl std::ops::Deref for Attributes {
-    type Target = SmallVec<[Attribute; 2]>;
+    type Target = Vec<Attribute>;
 
-    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
 impl std::ops::DerefMut for Attributes {
-    #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
@@ -1458,7 +1464,7 @@ impl std::ops::DerefMut for Attributes {
 
 // 11. Attributes
 // https://www.w3.org/TR/WGSL/#attributes
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Attribute {
     Align(u32),
     Binding(u32),
@@ -1654,7 +1660,7 @@ impl From<(&str, &str)> for Attribute {
             ("fragment", _) => Self::Fragment,
             ("compute", _) => Self::Compute,
             ("ID", v) => Self::MyId(v.to_owned()),
-            _ => panic!("{:?} can't be Attribute", value),
+            _ => panic!("{}({}) is not a WGSL attribute", value.0, value.1),
         }
     }
 }
@@ -1679,7 +1685,7 @@ impl From<(&str, u32)> for Attribute {
             ("fragment", _) => Self::Fragment,
             ("compute", _) => Self::Compute,
             ("ID", v) => Self::MyId(v.to_string()),
-            _ => panic!("{:?} can't be Attribute", value),
+            _ => panic!("{}({}) is not a WGSL attribute", value.0, value.1),
         }
     }
 }
@@ -1704,14 +1710,14 @@ impl From<&str> for Attribute {
             "fragment" => Self::Fragment,
             "compute" => Self::Compute,
             "ID" => Self::MyId(Default::default()),
-            _ => panic!("{value} can't be Attribute"),
+            _ => panic!("{value} is not a WGSL attribute"),
         }
     }
 }
 
 // 12.3.1.1. Built-in Inputs and Outputs
 // https://www.w3.org/TR/WGSL/#builtin-inputs-outputs
-#[derive(Debug, PartialEq, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub enum BuiltinValue {
     #[default]
     VertexIndex, // Vertex input
@@ -1766,7 +1772,7 @@ impl From<&str> for BuiltinValue {
             "global_invocation_id" => Self::GlobalInvocationId,
             "workgroup_id" => Self::WorkgroupId,
             "num_workgroups" => Self::NumWorkgroups,
-            _ => panic!("{value} can't be BuiltinValue"),
+            _ => panic!("{value} is not a built-in inputs or outputs"),
         }
     }
 }
@@ -1913,6 +1919,11 @@ pub type mat3x4h = mat3x4<f16>;
 pub type mat4x2h = mat4x2<f16>;
 pub type mat4x3h = mat4x3<f16>;
 pub type mat4x4h = mat4x4<f16>;
+
+// 6.2.9. Array Types
+// https://www.w3.org/TR/WGSL/#array-types
+pub struct array<E, const N: usize = 0>(PhantomData<[E; N]>);
+impl_str!(array<E, N>);
 
 // 6.5.2. Sampled Texture Types
 // https://www.w3.org/TR/WGSL/#sampled-texture-type
@@ -2067,11 +2078,6 @@ macro_rules! wgsl_fn {
         }
     };
 }
-
-// 6.2.9. Array Types
-// https://www.w3.org/TR/WGSL/#array-types
-pub struct array<E, const N: usize = 0>(PhantomData<E>);
-impl_str!(array<E, N>);
 
 // Utility
 mod util {
@@ -2231,7 +2237,6 @@ mod tests {
         let mut builder = Builder::new();
 
         // ref: https://www.w3.org/TR/WGSL/
-
         #[wgsl_decl_struct]
         struct PointLight {
             position: vec3f,
@@ -2244,7 +2249,7 @@ mod tests {
             point: array<PointLight>,
         }
 
-        wgsl_structs![builder, PointLight, LightStorage];
+        wgsl_structs!(builder, PointLight, LightStorage);
 
         wgsl_bind!(
             builder, group(0) binding(0) var<storage> lights : LightStorage

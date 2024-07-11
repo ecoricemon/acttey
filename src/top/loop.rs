@@ -17,7 +17,6 @@ impl Loop {
         self.callback = callback;
     }
 
-    #[inline]
     pub fn request_animation_frame(&self) {
         self.global
             .request_animation_frame(self.callback.as_ref().unchecked_ref())

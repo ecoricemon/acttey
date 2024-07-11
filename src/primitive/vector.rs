@@ -20,42 +20,34 @@ pub trait Number {
 impl Number for u8 {
     type Output = u8;
 
-    #[inline]
     fn zero() -> Self::Output {
         0
     }
 
-    #[inline]
     fn one() -> Self::Output {
         1
     }
 
-    #[inline]
     fn max() -> Self::Output {
         u8::MAX
     }
 
-    #[inline]
     fn _sqrt(self) -> Self::Output {
         panic!("Oops! There's no sqrt() for u8")
     }
 
-    #[inline]
     fn _acos(self) -> Self::Output {
         panic!("Oops! There's no acos() for u8")
     }
 
-    #[inline]
     fn from_f32(v: f32) -> Self::Output {
         v as Self::Output
     }
 
-    #[inline]
     fn from_f64(v: f64) -> Self::Output {
         v as Self::Output
     }
 
-    #[inline]
     fn eps() -> Self::Output {
         U8_EPS
     }
@@ -64,42 +56,34 @@ impl Number for u8 {
 impl Number for u16 {
     type Output = u16;
 
-    #[inline]
     fn zero() -> Self::Output {
         0
     }
 
-    #[inline]
     fn one() -> Self::Output {
         1
     }
 
-    #[inline]
     fn max() -> Self::Output {
         u16::MAX
     }
 
-    #[inline]
     fn _sqrt(self) -> Self::Output {
         panic!("Oops! There's no sqrt() for u16")
     }
 
-    #[inline]
     fn _acos(self) -> Self::Output {
         panic!("Oops! There's no acos() for u16")
     }
 
-    #[inline]
     fn from_f32(v: f32) -> Self::Output {
         v as Self::Output
     }
 
-    #[inline]
     fn from_f64(v: f64) -> Self::Output {
         v as Self::Output
     }
 
-    #[inline]
     fn eps() -> Self::Output {
         U16_EPS
     }
@@ -108,42 +92,34 @@ impl Number for u16 {
 impl Number for f32 {
     type Output = f32;
 
-    #[inline]
     fn zero() -> Self::Output {
         0.0
     }
 
-    #[inline]
     fn one() -> Self::Output {
         1.0
     }
 
-    #[inline]
     fn max() -> Self::Output {
         f32::MAX
     }
 
-    #[inline]
     fn _sqrt(self) -> Self::Output {
         self.sqrt()
     }
 
-    #[inline]
     fn _acos(self) -> Self::Output {
         self.acos()
     }
 
-    #[inline]
     fn from_f32(v: f32) -> Self::Output {
         v as Self::Output
     }
 
-    #[inline]
     fn from_f64(v: f64) -> Self::Output {
         v as Self::Output
     }
 
-    #[inline]
     fn eps() -> Self::Output {
         F32_EPS
     }
@@ -175,7 +151,6 @@ impl UnitVector<f32, 3> {
 impl Deref for UnitVector<f32, 3> {
     type Target = Vector<f32, 3>;
 
-    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.0
     }
@@ -202,7 +177,6 @@ impl UnitVector<f32, 4> {
 impl Deref for UnitVector<f32, 4> {
     type Target = Vector<f32, 4>;
 
-    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.0
     }
@@ -258,24 +232,20 @@ macro_rules! impl_vector {
                 + PartialOrd
                 + 'static
         {
-            #[inline]
             pub const fn new($($field: T),+) -> Self {
                 Self([$($field),+])
             }
 
             /// Creates a vector with zeros.
-            #[inline]
             pub fn zeros() -> Self {
                 T::zero().into()
             }
 
             /// Creates a vector with ones.
-            #[inline]
             pub fn ones() -> Self {
                 T::one().into()
             }
 
-            #[inline]
             pub fn from_arr_f32<const L: usize>(arr: [f32; L], default: [f32; 4]) -> Self {
                 Self([$(
                     if $index < L { T::from_f32(arr[$index]) }
@@ -283,7 +253,6 @@ macro_rules! impl_vector {
                 ),+])
             }
 
-            #[inline]
             pub fn from_vec_f32<const L: usize>(v: Vector<f32, L>, default: [f32; 4]) -> Self {
                 Self([$(
                     if $index < L { T::from_f32(v.0[$index]) }
@@ -291,7 +260,6 @@ macro_rules! impl_vector {
                 ),+])
             }
 
-            #[inline]
             pub fn get_type() -> Option<&'static str> {
                 use std::any::TypeId;
                 match TypeId::of::<T>() {
@@ -302,46 +270,38 @@ macro_rules! impl_vector {
                 }
             }
 
-            #[inline]
             pub const fn size() -> usize {
                 std::mem::size_of::<Self>()
             }
 
-            #[inline]
             pub const fn get_size(&self) -> usize {
                 Self::size()
             }
 
-            #[inline]
             pub const fn dim() -> usize {
                 $d
             }
 
-            #[inline]
             pub const fn get_dim(&self) -> usize {
                 Self::dim()
             }
 
-            #[inline]
             pub fn get_max() -> T {
                 T::max()
             }
 
             $(
                 /// Getter
-                #[inline]
                 pub const fn $field(&self) -> T {
                     self.0[$index]
                 }
 
                 paste::item! {
                     /// Setter
-                    #[inline]
                     pub fn [<set_ $field>](&mut self, v: T) {
                         self.0[$index] = v;
                     }
 
-                    #[inline]
                     pub fn [<add_ $field>](&mut self, v: T) {
                         self.0[$index] += v;
                     }
@@ -349,31 +309,26 @@ macro_rules! impl_vector {
             )+
 
             /// Setter
-            #[inline]
             pub fn set(&mut self, $($field: T),+) {
                 $(
                     self.0[$index] = $field;
                 )+
             }
 
-            #[inline]
             pub fn iter(&self) -> core::slice::Iter<T> {
                 self.0.iter()
             }
 
-            #[inline]
             pub fn norm_l2(&self) -> T {
                 strip_first_op!(
                     $(+ self.0[$index] * self.0[$index])+
                 )._sqrt()
             }
 
-            #[inline]
             pub fn is_unit(&self) -> bool {
                 self.norm_l2() < T::eps()
             }
 
-            #[inline]
             pub fn normalize(&mut self) {
                 let norm = self.norm_l2();
                 match norm != T::zero() {
@@ -382,7 +337,6 @@ macro_rules! impl_vector {
                 }
             }
 
-            #[inline]
             #[must_use]
             pub fn into_unit(self) -> Self {
                 let norm = self.norm_l2();
@@ -392,19 +346,16 @@ macro_rules! impl_vector {
                 }
             }
 
-            #[inline]
             pub fn dist(self, rhs: Self) -> T {
                 (self - rhs).norm_l2()
             }
 
-            #[inline]
             pub fn dot(self, rhs: Self) -> T {
                 strip_first_op!(
                     $(+ self.0[$index] * rhs.0[$index])+
                 )
             }
 
-            #[inline]
             #[allow(unused)]
             pub fn cross(self, rhs: Self) -> Self {
                 Self(
@@ -417,17 +368,14 @@ macro_rules! impl_vector {
                 )
             }
 
-            #[inline]
             pub fn normal(self, rhs: Self) -> Self {
                 self.cross(rhs).into_unit()
             }
 
-            #[inline]
             pub fn angle(self, rhs: Self) -> T {
                 (self.dot(rhs) / self.norm_l2() / rhs.norm_l2())._acos()
             }
 
-            #[inline]
             pub fn random(max: f64, range: std::ops::Range<usize>) -> Self {
                 let gen = || T::from_f64(js_sys::Math::random() * max);
                 let mut v = Self::zeros();
@@ -437,14 +385,12 @@ macro_rules! impl_vector {
         }
 
         impl<T: Copy> From<T> for Vector<T, $d> {
-            #[inline]
             fn from(value: T) -> Self {
                 Self([value; $d])
             }
         }
 
         impl<T> From<[T; $d]> for Vector<T, $d> {
-            #[inline]
             fn from(value: [T; $d]) -> Self {
                 Self(value)
             }
@@ -459,7 +405,6 @@ macro_rules! impl_vector {
                 {
                     type Output = Self;
 
-                    #[inline]
                     #[must_use]
                     fn $fname(self, rhs: Self) -> Self {
                         Self([
@@ -475,7 +420,6 @@ macro_rules! impl_vector {
                 {
                     type Output = Vector<T, $d>;
 
-                    #[inline]
                     #[must_use]
                     fn $fname(self, rhs: &'b Vector<T, $d>) -> Self::Output {
                         Vector::<T, $d>([
@@ -491,7 +435,6 @@ macro_rules! impl_vector {
                 {
                     type Output = Self;
 
-                    #[inline]
                     #[must_use]
                     fn $fname(self, rhs: T) -> Self {
                         Self([
@@ -509,7 +452,6 @@ macro_rules! impl_vector {
                     T: std::ops::$trait
                         + Copy
                 {
-                    #[inline]
                     fn $fname(&mut self, rhs: Self) {
                         $(self.0[$index] $op rhs.0[$index]);+
                     }
@@ -520,7 +462,6 @@ macro_rules! impl_vector {
                     T: std::ops::$trait
                         + Copy
                 {
-                    #[inline]
                     fn $fname(&mut self, rhs: &'a Vector<T, $d>) {
                         $(self.0[$index] $op rhs.0[$index]);+
                     }
@@ -531,7 +472,6 @@ macro_rules! impl_vector {
                     T: std::ops::$trait
                         + Copy
                 {
-                    #[inline]
                     fn $fname(&mut self, rhs: T) {
                         $(self.0[$index] $op rhs);+
                     }
@@ -647,7 +587,6 @@ impl Quaternion {
 impl Deref for Quaternion {
     type Target = UnitVector<f32, 4>;
 
-    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.0
     }

@@ -1,10 +1,11 @@
-use crate::util;
+use crate::util::slice;
+use my_ecs::util::prelude::*;
 use std::{mem, ops};
 
 #[derive(Debug, Clone)]
 pub struct ChunkVec<T: 'static> {
     chunks: Vec<Vec<T>>,
-    chunk_size: util::PowerOfTwo,
+    chunk_size: PowerOfTwo,
     len: usize,
 }
 
@@ -12,14 +13,13 @@ impl<T: 'static> ChunkVec<T> {
     pub fn new(chunk_size: usize) -> Self {
         let mut instance = Self {
             chunks: vec![],
-            chunk_size: util::PowerOfTwo::new(chunk_size).unwrap(),
+            chunk_size: PowerOfTwo::new(chunk_size).unwrap(),
             len: 0,
         };
         instance.chunks.push(instance.new_chunk());
         instance
     }
 
-    #[inline(always)]
     fn chunk_index(&self, index: usize) -> (usize, usize) {
         (
             self.chunk_size.quotient(index),
@@ -27,22 +27,18 @@ impl<T: 'static> ChunkVec<T> {
         )
     }
 
-    #[inline(always)]
     fn new_chunk(&self) -> Vec<T> {
         Vec::with_capacity(self.chunk_size.get())
     }
 
-    #[inline(always)]
     pub fn len(&self) -> usize {
         self.len
     }
 
-    #[inline(always)]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    #[inline]
     pub fn capacity(&self) -> usize {
         self.chunks.len() * self.chunk_size.get()
     }
@@ -84,25 +80,21 @@ impl<T: 'static> ChunkVec<T> {
         }
     }
 
-    #[inline]
     pub fn get(&self, index: usize) -> Option<&T> {
         // Safetey: `index` is valid.
         (index < self.len).then(|| unsafe { self.get_unchecked(index) })
     }
 
-    #[inline]
     unsafe fn get_unchecked(&self, index: usize) -> &T {
         let (r, c) = self.chunk_index(index);
         self.chunks.get_unchecked(r).get_unchecked(c)
     }
 
-    #[inline]
     pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
         // Safetey: index is valid.
         (index < self.len).then(|| unsafe { self.get_unchecked_mut(index) })
     }
 
-    #[inline]
     unsafe fn get_unchecked_mut(&mut self, index: usize) -> &mut T {
         let (r, c) = self.chunk_index(index);
         self.chunks.get_unchecked_mut(r).get_unchecked_mut(c)
@@ -119,7 +111,7 @@ impl<T: 'static> ChunkVec<T> {
 
         // Swaps.
         if old_r != last_r {
-            let [old_chunk, last_chunk] = util::slice::split_mut(&mut self.chunks, [old_r, last_r]);
+            let [old_chunk, last_chunk] = slice::split_mut(&mut self.chunks, [old_r, last_r]);
             unsafe {
                 mem::swap(
                     old_chunk.get_unchecked_mut(old_c),
@@ -130,7 +122,7 @@ impl<T: 'static> ChunkVec<T> {
         } else {
             let last_chunk = unsafe { self.chunks.get_unchecked_mut(last_r) };
             if old_c != last_c {
-                let [old_v, last_v] = util::slice::split_mut(last_chunk, [old_c, last_c]);
+                let [old_v, last_v] = slice::split_mut(last_chunk, [old_c, last_c]);
                 mem::swap(old_v, last_v);
             }
             unsafe { last_chunk.pop().unwrap_unchecked() }

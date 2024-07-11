@@ -6,14 +6,13 @@ version = 3
 name = "acttey"
 version = "0.0.0"
 dependencies = [
- "acttey-ecs-macros",
  "ahash",
  "bitflags 2.4.2",
  "bytemuck",
  "console_error_panic_hook",
- "erased-generic-trait",
  "getrandom",
  "js-sys",
+ "my-ecs",
  "my-wgsl",
  "paste",
  "smallvec",
@@ -22,15 +21,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "wgpu",
-]
-
-[[package]]
-name = "acttey-ecs-macros"
-version = "0.0.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.50",
 ]
 
 [[package]]
@@ -44,9 +34,9 @@ dependencies = [
 
 [[package]]
 name = "ahash"
-version = "0.8.6"
+version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91429305e9f0a25f6205c5b8e0d2db09e0708a7a6df0f42212bb56c32c8ac97a"
+checksum = "e89da841a80418a9b391ebaea17f5c112ffaaa96f621d2c285b5174da76b9011"
 dependencies = [
  "cfg-if",
  "getrandom",
@@ -265,16 +255,6 @@ name = "equivalent"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5443807d6dff69373d433ab9ef5378ad8df50ca6298caf15de6e52e24aaf54d5"
-
-[[package]]
-name = "erased-generic-trait"
-version = "0.0.4"
-dependencies = [
- "ahash",
- "proc-macro2",
- "quote",
- "syn 2.0.50",
-]
 
 [[package]]
 name = "foreign-types"
@@ -540,12 +520,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "my-ecs"
+version = "0.0.1"
+dependencies = [
+ "js-sys",
+ "my-ecs-macros",
+ "once_cell",
+ "paste",
+ "thiserror",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
+name = "my-ecs-macros"
+version = "0.0.1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.50",
+]
+
+[[package]]
 name = "my-wgsl"
 version = "0.0.2"
 dependencies = [
  "my-wgsl-macros",
  "paste",
- "smallvec",
 ]
 
 [[package]]
@@ -862,9 +863,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-futures"
-version = "0.4.40"
+version = "0.4.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bde2032aeb86bdfaecc8b261eef3cba735cc426c1f3a3416d1e0791be95fc461"
+checksum = "76bc14366121efc8dbb487ab05bcc9d346b3b5ec0eaa76e46594cabbe51762c0"
 dependencies = [
  "cfg-if",
  "js-sys",

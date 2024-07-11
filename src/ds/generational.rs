@@ -1,9 +1,8 @@
-use crate::ds::vec::OptVec;
+use my_ecs::ds::prelude::*;
 use std::{
     borrow::Borrow,
-    collections::{HashMap, VecDeque},
-    hash::Hash,
-    ops::Deref,
+    collections::HashMap,
+    hash::{BuildHasher, Hash},
     rc::Rc,
 };
 
@@ -15,43 +14,52 @@ const GEN_IGNORE: u64 = u64::MAX - 1;
 /// However, generation increases whenever modificaions occur.
 /// Therefore, you can notice that the value has been changed.
 #[derive(Debug)]
-pub struct GenMap<K, V> {
-    items: HashMap<K, (V, u64), ahash::RandomState>,
+pub struct GenMap<K, V, S> {
+    items: HashMap<K, (V, u64), S>,
 }
 
-impl<K: Eq + Hash + Clone, V> GenMap<K, V> {
+impl<K, V, S> GenMap<K, V, S>
+where
+    K: Eq + Hash + Clone,
+    S: Default,
+{
     pub fn new() -> Self {
         Self {
             items: HashMap::default(),
         }
     }
+}
 
-    #[inline]
+impl<K, V, S> GenMap<K, V, S>
+where
+    K: Eq + Hash + Clone,
+{
     pub fn len(&self) -> usize {
         self.items.len()
     }
 
-    #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    #[inline]
     pub fn capacity(&self) -> usize {
         self.items.capacity()
     }
 
-    #[inline]
     pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         self.items.iter().map(|(k, (v, _))| (k, v))
     }
 
-    #[inline]
     pub fn values(&self) -> impl Iterator<Item = &V> {
         self.items.values().map(|(v, _)| v)
     }
+}
 
-    #[inline]
+impl<K, V, S> GenMap<K, V, S>
+where
+    K: Eq + Hash + Clone,
+    S: BuildHasher,
+{
     pub fn get<Q>(&self, key: &Q) -> Option<&(V, u64)>
     where
         K: Borrow<Q>,
@@ -60,7 +68,6 @@ impl<K: Eq + Hash + Clone, V> GenMap<K, V> {
         self.items.get(key)
     }
 
-    #[inline]
     pub fn get_value<Q>(&self, key: &Q) -> Option<&V>
     where
         K: Borrow<Q>,
@@ -69,7 +76,6 @@ impl<K: Eq + Hash + Clone, V> GenMap<K, V> {
         self.get(key).map(|(v, _)| v)
     }
 
-    #[inline]
     pub fn sneak_get_value_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
     where
         K: Borrow<Q>,
@@ -78,7 +84,6 @@ impl<K: Eq + Hash + Clone, V> GenMap<K, V> {
         self.items.get_mut(key).map(|(v, _)| v)
     }
 
-    #[inline]
     pub fn get_gen<Q>(&self, key: &Q) -> Option<u64>
     where
         K: Borrow<Q>,
@@ -87,7 +92,6 @@ impl<K: Eq + Hash + Clone, V> GenMap<K, V> {
         self.get(key).map(|(_, gen)| *gen)
     }
 
-    #[inline]
     pub fn contains_key<Q>(&self, key: &Q) -> bool
     where
         K: Borrow<Q>,
@@ -142,7 +146,10 @@ impl<K: Eq + Hash + Clone, V> GenMap<K, V> {
     }
 }
 
-impl<K, V> Default for GenMap<K, V> {
+impl<K, V, S> Default for GenMap<K, V, S>
+where
+    S: Default,
+{
     fn default() -> Self {
         Self {
             items: HashMap::default(),
@@ -159,51 +166,55 @@ impl<K, V> Default for GenMap<K, V> {
 /// because we want values are alongside each other in memory.
 /// Therefore, Rc doesn't have anything in it, its only purpose is tracking reference.
 #[derive(Debug, Default)]
-pub struct GenVecRc<T> {
+pub struct GenVecRc<T, S> {
     values: GenVec<T>,
     /// `refs` has always the same length as `values`.
-    refs: OptVec<Rc<()>>,
+    refs: OptVec<Rc<()>, S>,
 }
 
-impl<T> GenVecRc<T> {
+impl<T, S> GenVecRc<T, S>
+where
+    S: Default,
+{
     pub fn new() -> Self {
         Self {
             values: GenVec::new(),
             refs: OptVec::new(),
         }
     }
+}
 
-    #[inline]
+impl<T, S> GenVecRc<T, S> {
     pub fn len(&self) -> usize {
         self.values.len()
     }
 
-    #[inline]
     pub fn len_occupied(&self) -> usize {
         self.values.len_occupied()
     }
 
-    #[inline]
     pub fn len_vacant(&self) -> usize {
         self.values.len_vacant()
     }
 
-    #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    #[inline]
     pub fn capacity(&self) -> usize {
         self.values.capacity()
     }
+}
 
+impl<T, S> GenVecRc<T, S>
+where
+    S: BuildHasher,
+{
     /// Determines the slot is None.
     ///
     /// # Panics
     ///
     /// Panics if `index` is out of bound.
-    #[inline]
     pub fn is_vacant(&self, index: usize) -> bool {
         self.refs.is_vacant(index)
     }
@@ -211,7 +222,6 @@ impl<T> GenVecRc<T> {
     /// # Panics
     ///
     /// Panics if `index` is out of bound.
-    #[inline]
     pub fn is_occupied(&self, index: usize) -> bool {
         self.refs.is_occupied(index)
     }
@@ -221,7 +231,6 @@ impl<T> GenVecRc<T> {
     /// # Panics
     ///
     /// Panics if `index` is out of bound.
-    #[inline]
     pub fn is_unused(&self, index: usize) -> bool {
         if let Some(_ref) = &self.refs[index] {
             Rc::strong_count(_ref) == 1
@@ -235,7 +244,6 @@ impl<T> GenVecRc<T> {
     /// # Panics
     ///
     /// Panics if `index` is out of bound.
-    #[inline]
     pub fn is_used(&self, index: usize) -> bool {
         if let Some(_ref) = &self.refs[index] {
             Rc::strong_count(_ref) > 1
@@ -276,12 +284,10 @@ impl<T> GenVecRc<T> {
         self.refs.shrink_to_fit();
     }
 
-    #[inline]
     pub fn iter(&self) -> impl Iterator<Item = Option<&T>> {
         self.values.iter()
     }
 
-    #[inline]
     pub fn iter_occupied(&self) -> impl Iterator<Item = &T> {
         self.values.iter_occupied()
     }
@@ -299,12 +305,10 @@ impl<T> GenVecRc<T> {
         self.values.sneak_iter_occupied_mut()
     }
 
-    #[inline]
     pub fn get(&self, index: GenIndex) -> Option<&T> {
         self.values.get(index)
     }
 
-    #[inline]
     pub fn sneak_get_mut(&mut self, index: GenIndex) -> Option<&mut T> {
         self.values.sneak_get_mut(index)
     }
@@ -375,7 +379,6 @@ impl<T> GenVecRc<T> {
     /// # Panics
     ///
     /// Panics if `index` is out of bound.
-    #[inline]
     pub fn take(&mut self, index: GenIndex) -> Option<T> {
         if self.is_unused(index.index) {
             let old = self.values.take(index);
@@ -432,7 +435,6 @@ impl GenIndexRc {
         }
     }
 
-    #[inline]
     pub fn is_dummy(&self) -> bool {
         self.index.is_dummy()
     }
@@ -475,27 +477,22 @@ impl<T> GenVec<T> {
         }
     }
 
-    #[inline]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    #[inline]
     pub fn len_occupied(&self) -> usize {
         self.entries.len() - self.vacancies.len()
     }
 
-    #[inline]
     pub fn len_vacant(&self) -> usize {
         self.vacancies.len()
     }
 
-    #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    #[inline]
     pub fn capacity(&self) -> usize {
         self.entries.capacity()
     }
@@ -503,7 +500,6 @@ impl<T> GenVec<T> {
     /// # Panics
     ///
     /// Panics if `index` is out of bound.
-    #[inline]
     pub fn is_vacant(&self, index: usize) -> bool {
         self.entries[index].is_vacant()
     }
@@ -511,7 +507,6 @@ impl<T> GenVec<T> {
     /// # Panics
     ///
     /// Panics if `index` is out of bound.
-    #[inline]
     pub fn is_occupied(&self, index: usize) -> bool {
         self.entries[index].is_occupied()
     }
@@ -519,7 +514,6 @@ impl<T> GenVec<T> {
     /// # Panics
     ///
     /// Panics if `index` is out of bound.
-    #[inline]
     pub fn get_gen(&self, index: usize) -> u64 {
         self.entries[index].gen
     }
@@ -628,7 +622,6 @@ impl<T> GenVec<T> {
     /// # Panics
     ///
     /// Panics if `index` is out of bound.
-    #[inline]
     pub fn change(&mut self, index: GenIndex, value: T) -> Option<GenIndex> {
         assert!(index.index < self.entries.len());
         // Safety: Checked.
@@ -653,7 +646,6 @@ impl<T> GenVec<T> {
     /// # Panics
     ///
     /// Panics if `index` is out of bound.
-    #[inline]
     pub fn update<U>(
         &mut self,
         index: GenIndex,
@@ -693,7 +685,6 @@ impl<T> GenVec<T> {
     /// # Panics
     ///
     /// Panics if `index` is out of bound.
-    #[inline]
     pub fn sneak_update<U>(&mut self, index: GenIndex, f: impl FnOnce(&mut T) -> U) -> Option<U> {
         assert!(index.index < self.entries.len());
         // Safety: Checked.
@@ -722,7 +713,6 @@ impl<T> GenVec<T> {
     /// # Panics
     ///
     /// Panics if `index` is out of bound.
-    #[inline]
     pub fn take(&mut self, index: GenIndex) -> Option<T> {
         assert!(index.index < self.entries.len());
         // Safety: Checked.
@@ -796,12 +786,10 @@ impl<T> GenEntry<T> {
         Self { gen: 0, value }
     }
 
-    #[inline]
     pub fn is_vacant(&self) -> bool {
         self.value.is_none()
     }
 
-    #[inline]
     pub fn is_occupied(&self) -> bool {
         self.value.is_some()
     }
@@ -878,7 +866,6 @@ impl GenIndex {
         }
     }
 
-    #[inline]
     pub fn is_dummy(&self) -> bool {
         self == &Self::dummy()
     }
@@ -927,61 +914,6 @@ impl<'a, S: Borrow<str>> From<S> for LabelOrGenIndex<'a, S> {
 impl<'a, S: Borrow<str>> From<&'a GenIndex> for LabelOrGenIndex<'a, S> {
     fn from(value: &'a GenIndex) -> Self {
         Self::Index(value)
-    }
-}
-
-/// Whenever an item is popped, generation grows.
-/// This is useful when you're trying to detect number of popped items after you put something in.
-#[derive(Debug, Clone)]
-pub struct GenQueue<T> {
-    queue: VecDeque<T>,
-    gen: u64,
-}
-
-impl<T> GenQueue<T> {
-    pub const fn new() -> Self {
-        Self {
-            queue: VecDeque::new(),
-            gen: 0,
-        }
-    }
-
-    #[inline]
-    pub fn gen(&self) -> u64 {
-        self.gen
-    }
-
-    #[inline]
-    pub fn front_mut(&mut self) -> Option<&mut T> {
-        self.queue.front_mut()
-    }
-
-    #[inline]
-    pub fn back_mut(&mut self) -> Option<&mut T> {
-        self.queue.back_mut()
-    }
-
-    #[inline]
-    pub fn push_back(&mut self, value: T) {
-        self.queue.push_back(value);
-    }
-
-    /// Pops an item from the front of the queue and increases generation by one.
-    pub fn pop_front(&mut self) -> Option<T> {
-        let old = self.queue.pop_front();
-        if old.is_some() {
-            self.gen += 1;
-        }
-        old
-    }
-}
-
-impl<T> Deref for GenQueue<T> {
-    type Target = VecDeque<T>;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.queue
     }
 }
 

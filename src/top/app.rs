@@ -1,35 +1,25 @@
-use super::{
-    canvas::{Canvas, CanvasPack},
-    event::{Event, EventManager, EventType},
-    r#loop::Loop,
-    AppError,
-};
+use super::{r#loop::Loop, AppError};
 use crate::{
-    ds::refs::RCell,
-    ecs::{
-        resource::Resource,
-        schedule::Scheduler,
-        system::{FnSystem, StructOrFnSystem, System},
+    default::resources,
+    default::systems::{SceneHandler, WakeCommandHandlerSystem},
+    draw::scene::Scene,
+    msg::{
+        manager::{MessageManager, MessageQueue},
+        Command, Event, EventType, Message,
     },
-    primitive::mesh::MeshResource,
-    render::{
-        canvas::{CanvasHandle, OffCanvas},
-        resource::RenderResource,
-    },
-    scene::inner::SceneManager,
+    render::canvas::{CanvasHandle, OffCanvas, WinCanvas, WinCanvasPack},
+    ty,
     util::{string, web},
-    worker::{
-        msg::{self, ChMsg},
-        Channel, MainChannel, MainWorker, Worker, WorkerId,
-    },
+    worker::{msg, MainWorker, SubWorker},
 };
-use std::{cell::RefCell, mem, num::NonZeroU32, ptr::NonNull, rc::Rc, thread};
+use my_ecs::ecs::prelude::*;
+use std::{cell::RefCell, mem, ptr::NonNull, rc::Rc};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 pub struct App {
     main: Rc<MainWorker>,
-    canvases: RCell<CanvasPack>,
+    canvases: Rc<RefCell<WinCanvasPack>>,
 }
 
 impl App {
@@ -37,16 +27,17 @@ impl App {
         set_panic_hook();
 
         // Canvase pack.
-        let canvases = CanvasPack::new();
+        let canvases = WinCanvasPack::new();
 
         // Spawns main worker.
-        let main = MainWorker::spawn("main-worker").expect_throw("failed to spawn web worker");
+        let main = MainWorker::spawn("main-worker".to_owned()).expect("failed to spawn web worker");
         let main = Rc::new(main);
 
         // Sends INIT message with dummy canvas to the main worker.
-        let canvas = canvases.get_dummy();
-        let selectors = CanvasPack::DUMMY_SELECTORS.to_owned();
-        let offcanvas = canvas.transfer_control_to_offscreen().unwrap();
+        let canvas = canvases.get_dummy().as_ref();
+        let canvas: &WinCanvas = canvas.try_into().unwrap();
+        let selectors = WinCanvasPack::DUMMY_SEL.to_owned();
+        let offcanvas = canvas.transfer_control_to_offscreen();
         let (element, handle) = offcanvas.destructure();
         msg::MsgEventInit(msg::MsgEventCanvas {
             element,
@@ -54,14 +45,14 @@ impl App {
             selectors,
             scale: 0.0,
         })
-        .post_to(main.handle_js());
+        .post_to(&main.handle());
 
         // Detects scale change for the WINDOW_SCALE message.
         detect_scale_change();
 
         Self {
             main,
-            canvases: RCell::new(canvases),
+            canvases: Rc::new(RefCell::new(canvases)),
         }
     }
 
@@ -72,9 +63,13 @@ impl App {
     ) -> Result<(), AppError> {
         if !selectors.is_empty() {
             // Adds canvas.
-            let canvas = self.canvases.borrow_mut().insert(selectors)?;
+            let mut canvases = self.canvases.borrow_mut();
+            canvases.insert(selectors.to_owned());
+            // Safety: Infallible.
+            let canvas = unsafe { canvases.get_by_selectors(selectors).unwrap_unchecked() };
+            let canvas: &WinCanvas = canvas.as_ref().try_into().unwrap();
             let scale = canvas.width() as f64 / canvas.client_width() as f64;
-            let offcanvas = canvas.transfer_control_to_offscreen()?;
+            let offcanvas = canvas.transfer_control_to_offscreen();
 
             // Transfers offscreen canvas to the main worker.
             let (element, handle) = offcanvas.destructure();
@@ -85,7 +80,7 @@ impl App {
                 selectors,
                 scale,
             }
-            .post_to(self.main.handle_js());
+            .post_to(&self.main.handle());
         }
 
         // Registers events.
@@ -103,10 +98,10 @@ impl App {
             f: f as usize as _,
             disc: msg::MsgEventFnDisc::UserInit as _,
         }
-        .post_to(self.main.handle_js());
+        .post_to(&self.main.handle());
 
         // Sends run message.
-        msg::MsgEventRun.post_to(self.main.handle_js());
+        msg::MsgEventRun.post_to(&self.main.handle());
     }
 
     fn register_event_proxy(&mut self, selectors: &str, event: EventType) {
@@ -165,13 +160,13 @@ impl App {
 
         fn create_resize_event_proxy(
             main: Rc<MainWorker>,
-            canvases: RCell<CanvasPack>,
+            canvases: Rc<RefCell<WinCanvasPack>>,
         ) -> Closure<dyn Fn()> {
             let buf = msg::MsgEventCanvasResize::create_buffer();
             Closure::<dyn Fn()>::new(move || {
                 let canvases = canvases.borrow();
                 for canvas in canvases
-                    .values()
+                    .canvases()
                     .filter(|canvas| !canvas.is_dummy() && !canvas.is_window())
                 {
                     let msg = msg::MsgEventCanvasResize {
@@ -187,7 +182,7 @@ impl App {
 
         fn add_event_listener(
             handle: CanvasHandle,
-            canvas: &Rc<Canvas>,
+            canvas: &Rc<WinCanvas>,
             event: &str,
             listener: &js_sys::Function,
         ) {
@@ -231,7 +226,7 @@ impl App {
                 canvas_pack.register_proxy(handle, event, Box::new(proxy));
             }
             EventType::Resize if handle.is_window_handle() => {
-                let canvases = RCell::clone(&self.canvases);
+                let canvases = Rc::clone(&self.canvases);
                 let proxy = create_resize_event_proxy(main, canvases);
                 add_event_listener(handle, canvas, event.into(), proxy.as_ref().unchecked_ref());
                 canvas_pack.register_proxy(handle, event, Box::new(proxy));
@@ -259,7 +254,7 @@ impl Drop for App {
 }
 
 /// Binds JS.
-#[wasm_bindgen(module = "/src/worker/workerGen.js")]
+#[wasm_bindgen(module = "/src/util/detector.js")]
 extern "C" {
     #[wasm_bindgen(js_name = "detectScaleChange")]
     fn detect_scale_change();
@@ -278,47 +273,29 @@ thread_local! {
     static FN_WAIT_WORKER: RefCell<Closure<dyn FnMut()>> = panic!();
 }
 
-/// Initializes [`APP_STATE`] on main worker, not in window context.
-/// That's because we assume that window and worker don't share the memory for future compatibility.
-/// When initialization is over, JS replaces this event handler with [`main_onmessage`].
-#[wasm_bindgen(js_name = mainOnMessageInit)]
-pub async fn main_onmessage_init(event: web_sys::MessageEvent) {
-    let data = event.data();
+#[wasm_bindgen(js_name = mainOnMessage)]
+pub async fn main_onmessage(ev: web_sys::MessageEvent) {
+    let data = ev.data();
     debug_assert!(data.is_array());
     let buf: js_sys::Array = data.unchecked_into();
+
     match msg::MsgEventHeader::from_js_value(buf.get(0)).0 {
         msg::MsgEventHeader::INIT_INNER => {
             crate::log!("[D] main_onmessage_init(): worker received INIT msg.");
 
             // Initializes `APP_STATE`.
             let msg = msg::MsgEventInit::read_body(&buf);
-            let offcanvas = OffCanvas::new(msg.0.element, msg.0.handle);
-            let state = AppState::new(offcanvas, msg.0.selectors).await;
+            let ref_canvas = OffCanvas::new(msg.0.element, msg.0.handle);
+            let state = AppState::new(&ref_canvas).await;
             APP_STATE.set(state);
 
             // APP_STATE is settled now, so we can know fixed resource address.
             APP_STATE.with_borrow_mut(|state| {
-                state.set_resource_address();
+                state.set_default_resource_address();
             });
 
             // Fully initialized. JS will change `onmessage` right away.
         }
-        _ => {
-            crate::log!(
-                "[W] main_onmessage_init(): worker received unknown msg: {:?}",
-                buf
-            );
-        }
-    }
-}
-
-#[wasm_bindgen(js_name = mainOnMessage)]
-pub fn main_onmessage(event: web_sys::MessageEvent, _id: u32) {
-    let data = event.data();
-    debug_assert!(data.is_array());
-    let buf: js_sys::Array = data.unchecked_into();
-
-    match msg::MsgEventHeader::from_js_value(buf.get(0)).0 {
         msg::MsgEventHeader::CANVAS_INNER => {
             crate::log!("[D] main_onmessage(): worker received CANVAS msg.");
 
@@ -340,7 +317,11 @@ pub fn main_onmessage(event: web_sys::MessageEvent, _id: u32) {
 
             let msg = msg::MsgEventCanvasResize::read_body(&buf);
             APP_STATE.with_borrow_mut(|state| {
-                state.ev_mgr.push(Event::Resized(msg));
+                // Safety: The queue will be referenced in scheduling,
+                // but the scheduling will be performed after this.
+                unsafe {
+                    state.msg_mgr.push_resize(msg);
+                }
             });
         }
         msg::MsgEventHeader::MOUSE_MOVE_INNER => {
@@ -348,7 +329,9 @@ pub fn main_onmessage(event: web_sys::MessageEvent, _id: u32) {
 
             let msg = msg::MsgEventMouseMove::read_body(&buf);
             APP_STATE.with_borrow_mut(|state| {
-                state.ev_mgr.push(Event::MouseMove(msg));
+                // Safety: The queue will be referenced in scheduling,
+                // but the scheduling will be performed after this.
+                unsafe { state.msg_mgr.push_mouse_move(msg) };
             });
         }
         msg::MsgEventHeader::CLICK_INNER => {
@@ -356,7 +339,9 @@ pub fn main_onmessage(event: web_sys::MessageEvent, _id: u32) {
 
             let msg = msg::MsgEventClick::read_body(&buf);
             APP_STATE.with_borrow_mut(|state| {
-                state.ev_mgr.push(Event::Click(msg));
+                // Safety: The queue will be referenced in scheduling,
+                // but the scheduling will be performed after this.
+                unsafe { state.msg_mgr.push_click(msg) };
             });
         }
         msg::MsgEventHeader::FN_INNER => {
@@ -373,7 +358,9 @@ pub fn main_onmessage(event: web_sys::MessageEvent, _id: u32) {
                             let f: fn(&mut AppState) = unsafe { mem::transmute(msg.f as usize) };
 
                             // Initializes `AppState` with user's function.
+                            state.pre_initialize();
                             f(state);
+                            state.post_initialize();
                         });
                     }
                     _ => {
@@ -392,24 +379,10 @@ pub fn main_onmessage(event: web_sys::MessageEvent, _id: u32) {
             let check: Closure<dyn FnMut()> = Closure::new(|| {
                 let mut failed = false;
                 APP_STATE.with_borrow_mut(|state: &mut AppState| {
-                    let main_id = thread::current().id();
                     for worker in state.workers.iter_mut() {
                         if !worker.is_ready() {
                             failed = true;
                             break;
-                        }
-                        if main_id == worker.handle_rust().id() {
-                            worker.open();
-                            worker.send(ChMsg::ReqHandle).unwrap();
-
-                            let msg = state.ch.recv();
-                            if let Ok(ChMsg::Handle(handle)) = msg {
-                                worker.set_handle_rust(handle);
-                            } else {
-                                panic!();
-                            }
-
-                            worker.close().unwrap();
                         }
                     }
 
@@ -460,42 +433,40 @@ pub fn main_onmessage(event: web_sys::MessageEvent, _id: u32) {
 
 /// Resources representing the app's state.
 pub struct AppState {
-    /// System scheduler.
-    sched: Scheduler,
+    /// ECS data and controller.
+    ecs_mgr: resources::EcsManager,
 
     /// A resource managing all render resources.
-    render: RenderResource,
+    render: resources::RenderManager,
 
-    /// A resource managing all meshes.
-    meshes: MeshResource,
+    /// Glanular data such as mesh.
+    stor: resources::CommonStorage,
 
     /// A resource managing all scenes.
-    scene_mgr: SceneManager,
+    scene_mgr: resources::SceneManager,
 
-    /// A resource that handles all events such as input events.
-    ev_mgr: EventManager,
+    /// A resource holding event and command queues.
+    //
+    // One of not exposed resources.
+    msg_mgr: MessageManager,
 
     /// Loop function.
     main_loop: Loop,
 
     /// Sub workers.
-    workers: Vec<Worker>,
-
-    /// Receiving only channel.
-    ch: MainChannel,
+    workers: Vec<SubWorker>,
 }
 
 impl AppState {
-    pub(super) async fn new(offcanvas: OffCanvas, selectors: String) -> Self {
+    pub(super) async fn new(ref_canvas: &OffCanvas) -> Self {
         Self {
-            sched: Scheduler::new(),
-            render: RenderResource::new(offcanvas, selectors).await.unwrap(),
-            meshes: MeshResource::new(),
-            scene_mgr: SceneManager::new(),
-            ev_mgr: EventManager::new(),
+            ecs_mgr: resources::EcsManager::new(),
+            render: resources::RenderManager::new(ref_canvas).await.unwrap(),
+            stor: resources::CommonStorage::new(),
+            scene_mgr: resources::SceneManager::new(),
+            msg_mgr: MessageManager::new(),
             main_loop: Loop::new(),
             workers: Vec::new(),
-            ch: MainChannel::new(),
         }
     }
 
@@ -509,67 +480,121 @@ impl AppState {
             web::hardware_concurrency() - 1
         };
         let mut name = "sub-worker-00".to_owned();
-        // Worker's id is equal to index + 1.
-        // This helps us find a specific worker easily.
-        self.workers = (1..=num as u32)
-            .map(|id| {
+
+        // Indices start from 0.
+        self.workers = (0..=num)
+            .map(|_| {
                 // Safety: Infallible.
-                let id = unsafe { NonZeroU32::new_unchecked(id) };
                 string::increase_rnumber(&mut name);
-                let tx_common = self.ch.clone_tx();
-                Worker::spawn(&name, id, tx_common).expect_throw("failed to spawn web worker")
+                SubWorker::spawn(name.clone()).unwrap()
             })
             .collect::<Vec<_>>();
     }
 
-    #[inline]
-    pub fn append_setup_system<T, S, Req, F>(&mut self, sys: T)
+    pub fn append_setup_system<T, Sys, Req, F>(&mut self, sys: T)
     where
-        T: Into<StructOrFnSystem<S, Req, F>>,
-        S: System,
+        T: Into<StructOrFnSystem<Sys, Req, F>>,
+        Sys: System,
         FnSystem<Req, F>: System,
     {
-        let must_some = self.sched.append_system(sys, 1);
-        assert!(must_some.is_some());
+        // Setup system will be removed from memory after it's expired.
+        const VOLATILE: bool = true;
+        const LIVE: NonZeroTick = unsafe { NonZeroTick::new_unchecked(1) };
+        let must_ok = self.ecs_mgr.append_system(sys, LIVE, VOLATILE);
+        assert!(must_ok.is_ok());
+    }
+
+    pub fn register_event(&mut self, event: EventType) {
+        match event {
+            EventType::Scale => { /* No queue */ }
+            EventType::MouseMove => self.register_message::<Event<msg::MsgEventMouseMove>>(),
+            EventType::Click => self.register_message::<Event<msg::MsgEventClick>>(),
+            EventType::Resize => self.register_message::<Event<msg::MsgEventCanvasResize>>(),
+        }
+    }
+
+    pub fn register_command<C: Message>(&mut self) {
+        assert!(C::is_command());
+
+        self.register_message::<C>();
+    }
+
+    fn register_message<E: Message>(&mut self) {
+        // Creates event queue, `MessageQueue<E>`.
+        if E::is_event() {
+            self.msg_mgr.register_event::<E>();
+        } else {
+            self.msg_mgr.register_command::<E>();
+        }
+
+        // Registers event queue, `MessageQueue<E>`, as a resource.
+        let rkey = ResourceKey::new(crate::ty!(MessageQueue<E>));
+        let ptr = self.msg_mgr.queue_ptr::<E>().unwrap().cast();
+        self.ecs_mgr.register_resource(rkey, ptr);
+    }
+
+    /// Does some jobs before user initialization.
+    pub(super) fn pre_initialize(&mut self) {
+        // NOTE: For now, any resource required by a system must be regitered before the system.
+
+        // Registers built-in command and its command queue resource.
+        self.register_command::<Command<Scene>>();
+    }
+
+    /// Does some jobs after user initialization.
+    pub(super) fn post_initialize(&mut self) {
+        // Adds built-in main system in phase B.
+        let must_ok = self.ecs_mgr.set_main_system_b(WakeCommandHandlerSystem);
+        debug_assert!(must_ok.is_ok());
+
+        // Registers built-in command handler.
+        let must_ok = self
+            .ecs_mgr
+            .register_command_handler(ty!(Command<Scene>), SceneHandler);
+        debug_assert!(must_ok.is_ok());
     }
 
     /// Acquires addresses of resource fields from this app state.
     /// And then sets those addresses to the scheduler.
-    /// Note that this method must be called once app state is fixed in memory.
-    ///
-    /// For performance reason, we're not going to use `Box` or something like that here.
-    /// Because we are aware of when app state is fixed in memory and its resource fields will never be moved or dropped.
-    pub(super) fn set_resource_address(&mut self) {
+    /// Note that this method must be called once when app state is fixed in memory.
+    //
+    // We're not going to use `Box` or something like that here.
+    // Because we are aware of when app state is fixed in memory and its resource fields will never be moved or dropped.
+    pub(super) fn set_default_resource_address(&mut self) {
         use std::ptr::addr_of_mut;
 
-        // Registers `render` resource.
         // Safety: Infallible.
-        let ptr: NonNull<u8> = unsafe { NonNull::new_unchecked(addr_of_mut!(self.render) as _) };
-        self.sched
-            .register_default_resource(self.render.rkey(), ptr);
+        unsafe {
+            // Registers `RenderManager` resource.
+            let ptr = NonNull::new_unchecked(addr_of_mut!(self.render) as _);
+            self.ecs_mgr.register_resource(self.render.rkey(), ptr);
 
-        // Registers `scene_mgr` resource.
-        // Safety: Infallible.
-        let ptr: NonNull<u8> = unsafe { NonNull::new_unchecked(addr_of_mut!(self.scene_mgr) as _) };
-        self.sched
-            .register_default_resource(self.scene_mgr.rkey(), ptr);
+            // Registers `SceneManager` resource.
+            let ptr = NonNull::new_unchecked(addr_of_mut!(self.scene_mgr) as _);
+            self.ecs_mgr.register_resource(self.scene_mgr.rkey(), ptr);
 
-        // Registers `ev_mgr` resource.
-        // Safety: Infallible.
-        let ptr: NonNull<u8> = unsafe { NonNull::new_unchecked(addr_of_mut!(self.ev_mgr) as _) };
-        self.sched
-            .register_default_resource(self.ev_mgr.rkey(), ptr);
+            // Registers `MessageManager` resource.
+            let ptr = NonNull::new_unchecked(addr_of_mut!(self.msg_mgr) as _);
+            self.ecs_mgr.register_resource(self.msg_mgr.rkey(), ptr);
 
-        // Registers `sched` resource.
-        // Safety: Infallible.
-        let ptr: NonNull<u8> = unsafe { NonNull::new_unchecked(addr_of_mut!(self.sched) as _) };
-        self.sched.register_default_resource(self.sched.rkey(), ptr);
+            // Registers `EcsManager` resource.
+            let ptr = NonNull::new_unchecked(addr_of_mut!(self.ecs_mgr) as _);
+            self.ecs_mgr.register_resource(self.ecs_mgr.rkey(), ptr);
 
-        // Registers `meshes` resource.
-        // Safety: Infallible.
-        let ptr: NonNull<u8> = unsafe { NonNull::new_unchecked(addr_of_mut!(self.meshes) as _) };
-        self.sched
-            .register_default_resource(self.meshes.rkey(), ptr);
+            // Registers `CommonStorage` resource.
+            let ptr = NonNull::new_unchecked(addr_of_mut!(self.stor) as _);
+            self.ecs_mgr.register_resource(self.stor.rkey(), ptr);
+        }
+
+        // Registers dedicated resource.
+        // EcsManager
+        self.ecs_mgr
+            .register_dedicated_resource(self.ecs_mgr.rkey());
+        // RenderManager
+        self.ecs_mgr.register_dedicated_resource(self.render.rkey());
+        // SceneManager
+        self.ecs_mgr
+            .register_dedicated_resource(self.scene_mgr.rkey());
     }
 
     pub(super) fn register_offcanvas(
@@ -580,8 +605,7 @@ impl AppState {
         scale: f64,
     ) {
         self.render
-            .add_canvas(OffCanvas::new(element, handle), selectors)
-            .with_default_surface();
+            .register_canvas(selectors, OffCanvas::new(element, handle));
         self.render.scale = scale;
     }
 
@@ -594,15 +618,14 @@ impl AppState {
         let callback = Closure::<dyn FnMut(f64)>::new(move |_time: f64| {
             APP_STATE.with_borrow_mut(|state| {
                 let Self {
-                    sched,
+                    ecs_mgr,
                     main_loop,
                     workers,
-                    ch,
                     ..
                 } = state;
 
                 // TODO: super system is not scheduled for now.
-                sched.schedule(workers, ch);
+                ecs_mgr.schedule(workers);
 
                 // Requests next frame.
                 main_loop.request_animation_frame();
@@ -615,55 +638,6 @@ impl AppState {
             state.main_loop.request_animation_frame();
         })
     }
-}
-
-/// # Safety
-///
-/// `ch` must be a valid pointer.
-#[wasm_bindgen(js_name = subOnMessage)]
-pub unsafe fn sub_onmessage(ch: *const Channel, id: u32) {
-    // Entrypoint to the sub worker's meesage loop.
-    fn entry(ch: &Channel, wid: WorkerId) {
-        while let Ok(msg) = ch.recv() {
-            match msg {
-                ChMsg::ReqHandle => {
-                    // crate::log!("[D] sub_onmessage(): worker({id}) ReqHandle msg.");
-
-                    ch.send(ChMsg::Handle(thread::current())).unwrap();
-                }
-                ChMsg::End => {
-                    // crate::log!("[D] sub_onmessage(): worker({id}) received End msg.");
-
-                    return;
-                }
-                ChMsg::Task(mut task_ptr, mut buf_ptr) => {
-                    // crate::log!("[D] sub_onmessage(): worker({id}) received Task msg.");
-
-                    let task = unsafe { task_ptr.as_mut() };
-                    let buf = unsafe { buf_ptr.as_mut() };
-                    task.invoke(buf);
-                    ch.send(ChMsg::Fin(wid, task.rkey())).unwrap();
-                }
-                msg => {
-                    panic!(
-                        "[E] sub_onmessage(): worker({}) received unknown msg: {:?}",
-                        wid, msg
-                    );
-                }
-            }
-        }
-        unreachable!(
-            "[E] sub_onmessage(): worker({}) failed to receive a msg",
-            wid,
-        );
-    }
-
-    // Safety: `ch` came from worker, which guarantees `ch` is valid.
-    // See Worker::ch and Worker::open() for more details.
-    let ch = unsafe { ch.as_ref() }.unwrap();
-    entry(ch, WorkerId::new(id));
-
-    // crate::log!("[D] worker({id}) sub_onmessage has finished");
 }
 
 pub fn set_panic_hook() {

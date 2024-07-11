@@ -10,7 +10,7 @@
     "wasm-r-gpu": "npm run wasm-r -- --out-dir pkg_gpu",
     "wasm-d-gl": "npm run wasm-d -- --out-dir pkg_gl --features acttey/webgl",
     "wasm-r-gl": "npm run wasm-r -- --out-dir pkg_gl --features acttey/webgl",
-    "wasm-mt-common": "cross-env RUSTFLAGS=\"-C target-feature=+atomics,+bulk-memory,+mutable-globals\" rustup run nightly-2023-12-07 wasm-pack build --target web --out-name wasm-index --out-dir pkg_mt .",
+    "wasm-mt-common": "cross-env RUSTFLAGS=\"-C target-feature=+atomics,+bulk-memory,+mutable-globals\" rustup run nightly-2024-06-20 wasm-pack build --target web --out-name wasm-index --out-dir pkg_mt .",
     "wasm-d-mt": "npm run wasm-mt-common -- --dev -Z build-std=panic_abort,std",
     "wasm-r-mt": "npm run wasm-mt-common -- --release -Z build-std=panic_abort,std",
 

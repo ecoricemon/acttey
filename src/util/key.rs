@@ -43,7 +43,6 @@ impl ObjectKey {
 }
 
 impl From<&ObjectKey> for ObjectKey {
-    #[inline]
     fn from(value: &ObjectKey) -> Self {
         value.clone()
     }
@@ -56,21 +55,18 @@ impl ToStr for ObjectKey {
 }
 
 impl Hash for ObjectKey {
-    #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.id.hash(state);
     }
 }
 
 impl PartialEq for ObjectKey {
-    #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
     }
 }
 
 impl<T: Into<u32>> From<T> for ObjectKey {
-    #[inline]
     fn from(value: T) -> Self {
         Self {
             id: value.into(),

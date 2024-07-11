@@ -1,7 +1,8 @@
-use super::opt_vec::OptVec;
 use crate::util;
+use my_ecs::ds::prelude::*;
 use std::{
     collections::{HashMap, HashSet},
+    hash::BuildHasher,
     iter,
     ops::{Deref, DerefMut, Range},
 };
@@ -14,25 +15,27 @@ use std::{
 /// When you put an item in the buffer, only the corresponding chunk may move,
 /// not making move all follwing items. Therefore, there can be fragmentations.
 #[derive(Debug, Clone)]
-pub struct VarChunkVec<T> {
+pub struct VarChunkVec<T, S> {
     /// Chunk views. You can find chunk using the [`ChunkView`].
     /// It's guaranteed that index of each view won't change.
-    views: OptVec<ChunkView>,
+    views: OptVec<ChunkView, S>,
 
     /// Fragment list.
     /// Assumes that there's no much fragments.
-    frags: HashSet<usize, ahash::RandomState>,
+    frags: HashSet<usize, S>,
 
     /// Buffer index to view index, which is used to find next view.
     /// It always points to the valid [`ChunkView`].
-    deref: HashMap<usize, usize, ahash::RandomState>,
+    deref: HashMap<usize, usize, S>,
 
     /// Raw data.
     buf: Vec<T>,
 }
 
-impl<T> VarChunkVec<T> {
-    #[inline]
+impl<T, S> VarChunkVec<T, S>
+where
+    S: Default,
+{
     pub fn new() -> Self {
         Self::with_capacity(0)
     }
@@ -45,42 +48,31 @@ impl<T> VarChunkVec<T> {
             buf: Vec::with_capacity(capacity),
         }
     }
+}
 
+impl<T, S> VarChunkVec<T, S> {
     /// Retrieves length of the buffer, which contains all chunks and fragments.
-    #[inline]
     pub fn len(&self) -> usize {
         self.buf.len()
     }
 
     /// Determines the buffer is empty or not.
-    #[inline]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
-    }
-
-    /// Returns iterator visiting all chunks and fragments.
-    /// Use [`Self::chunks_occupied`] if you want to skip fragments.
-    pub fn iter(&self) -> impl Iterator<Item = &[T]> {
-        self.views
-            .values_occupied()
-            .map(|view| &self.buf[view.range()])
-    }
-
-    /// Returns iterator visiting all chunks only, not fragments.
-    pub fn chunks(&self) -> impl Iterator<Item = &[T]> {
-        self.views
-            .values_occupied()
-            .filter_map(|view| (!view.is_fragment()).then_some(&self.buf[view.range()]))
     }
 
     /// Gets all range of buffer as a slice.
     /// Note that the slice includes not only chunks but fragments as well.
     /// If you want a specific chunk slice, use [`Self::as_chunk`].
-    #[inline]
     pub fn as_slice(&self) -> &[T] {
         &self.buf
     }
+}
 
+impl<T, S> VarChunkVec<T, S>
+where
+    S: BuildHasher,
+{
     /// Retrieves chunk window.
     ///
     /// # Panics
@@ -88,7 +80,6 @@ impl<T> VarChunkVec<T> {
     /// - `ci` is out of bound.
     /// - `ci` points to a vacant slot.
     /// - In debug mode only, `ci` points to a fragment.
-    #[inline]
     pub fn get_chunk_window(&self, ci: usize) -> &util::Window {
         let view = self.views.get(ci).unwrap();
         debug_assert!(!view.is_fragment());
@@ -102,7 +93,6 @@ impl<T> VarChunkVec<T> {
     /// - `ci` is out of bound.
     /// - `ci` points to a vacant slot.
     /// - In debug mode only, `ci` points to a fragment.
-    #[inline]
     pub fn as_chunk(&self, ci: usize) -> &[T] {
         let range = self.get_chunk_window(ci).range();
         &self.buf[range]
@@ -115,7 +105,6 @@ impl<T> VarChunkVec<T> {
     /// - `ci` is out of bound.
     /// - `ci` points to a vacant slot.
     /// - In debug mode only, `ci` points to a fragment.
-    #[inline]
     pub fn as_chunk_mut(&mut self, ci: usize) -> &mut [T] {
         let range = self.get_chunk_window(ci).range();
         &mut self.buf[range]
@@ -128,7 +117,6 @@ impl<T> VarChunkVec<T> {
     ///
     /// - `ci` is out of bound.
     /// - `ci` points to a vacant slot.
-    #[inline]
     pub fn chunk_len(&self, ci: usize) -> usize {
         self.views.get(ci).unwrap().len
     }
@@ -140,7 +128,6 @@ impl<T> VarChunkVec<T> {
     /// - `ci` or `ii` are out of bounds.
     /// - `ci` points to a vacant slot.
     /// - In debug mode only, `ci` points to a vacant slot.
-    #[inline]
     pub fn get_item(&self, ci: usize, ii: usize) -> &T {
         let index = self.get_chunk_window(ci).index(ii);
         &self.buf[index]
@@ -153,7 +140,6 @@ impl<T> VarChunkVec<T> {
     /// - `ci` or `ii` are out of bounds.
     /// - `ci` points to a vacant slot.
     /// - In debug mode only, `ci` points to a vacant slot.
-    #[inline]
     pub fn get_item_mut(&mut self, ci: usize, ii: usize) -> &mut T {
         let index = self.get_chunk_window(ci).index(ii);
         &mut self.buf[index]
@@ -288,15 +274,37 @@ impl<T> VarChunkVec<T> {
             false
         }
     }
+
+    /// Returns iterator visiting all chunks and fragments.
+    /// Use [`Self::chunks_occupied`] if you want to skip fragments.
+    pub fn iter(&self) -> impl Iterator<Item = &[T]> {
+        self.views
+            .values_occupied()
+            .map(|view| &self.buf[view.range()])
+    }
+
+    /// Returns iterator visiting all chunks only, not fragments.
+    pub fn chunks(&self) -> impl Iterator<Item = &[T]> {
+        self.views
+            .values_occupied()
+            .filter_map(|view| (!view.is_fragment()).then_some(&self.buf[view.range()]))
+    }
 }
 
-impl<T> Default for VarChunkVec<T> {
+impl<T, S> Default for VarChunkVec<T, S>
+where
+    S: Default,
+{
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T: Default + Copy> VarChunkVec<T> {
+impl<T, S> VarChunkVec<T, S>
+where
+    T: Default + Copy,
+    S: BuildHasher,
+{
     /// Appends the `value` at the end of the chunk.
     ///
     /// # Panics
@@ -446,8 +454,8 @@ impl<T: Default + Copy> VarChunkVec<T> {
     // }
 }
 
-impl<'a, T: bytemuck::Pod> From<&'a VarChunkVec<T>> for &'a [u8] {
-    fn from(value: &'a VarChunkVec<T>) -> Self {
+impl<'a, T: bytemuck::Pod, S> From<&'a VarChunkVec<T, S>> for &'a [u8] {
+    fn from(value: &'a VarChunkVec<T, S>) -> Self {
         bytemuck::cast_slice(value.as_slice())
     }
 }
@@ -463,7 +471,6 @@ struct ChunkView {
 
 impl ChunkView {
     /// Creates a new view.
-    #[inline]
     pub fn new(offset: usize, len: usize, frag: bool) -> Self {
         Self {
             win: util::Window::new(offset, len),
@@ -472,7 +479,6 @@ impl ChunkView {
     }
 
     /// Determines whether this is a fragment or not.
-    #[inline]
     pub fn is_fragment(&self) -> bool {
         self.frag
     }
@@ -481,14 +487,12 @@ impl ChunkView {
 impl Deref for ChunkView {
     type Target = util::Window;
 
-    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.win
     }
 }
 
 impl DerefMut for ChunkView {
-    #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.win
     }

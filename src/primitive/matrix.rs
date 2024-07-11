@@ -7,60 +7,50 @@ use std::ops;
 pub struct Matrix4f([f32; 16]);
 
 impl Matrix4f {
-    #[inline]
     pub fn new(value: [f32; 16]) -> Self {
         Self(value)
     }
 
-    #[inline]
     pub fn identity() -> Self {
         Self::new([
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ])
     }
 
-    #[inline]
     pub fn get_elem(&self, col: usize, row: usize) -> f32 {
         self.0[Self::index(col, row)]
     }
 
-    #[inline]
     pub fn set_elem(&mut self, col: usize, row: usize, value: f32) {
         self.0[Self::index(col, row)] = value;
     }
 
-    #[inline]
     pub fn add_elem(&mut self, col: usize, row: usize, increment: f32) {
         self.0[Self::index(col, row)] += increment;
     }
 
-    #[inline]
     pub fn set_col3(&mut self, col: usize, x: f32, y: f32, z: f32) {
         self.set_elem(col, 0, x);
         self.set_elem(col, 1, y);
         self.set_elem(col, 2, z);
     }
 
-    #[inline]
     pub fn add_col3(&mut self, col: usize, dx: f32, dy: f32, dz: f32) {
         self.add_elem(col, 0, dx);
         self.add_elem(col, 1, dy);
         self.add_elem(col, 2, dz);
     }
 
-    #[inline]
     pub fn set_col4(&mut self, col: usize, x: f32, y: f32, z: f32, w: f32) {
         self.set_col3(col, x, y, z);
         self.set_elem(col, 3, w);
     }
 
-    #[inline]
     pub fn add_col4(&mut self, col: usize, x: f32, y: f32, z: f32, w: f32) {
         self.add_col3(col, x, y, z);
         self.add_elem(col, 3, w);
     }
 
-    #[inline]
     #[must_use]
     #[rustfmt::skip]
     pub fn transpose(self) -> Self {
@@ -72,7 +62,6 @@ impl Matrix4f {
         ])
     }
 
-    #[inline(always)]
     fn index(col: usize, row: usize) -> usize {
         (col << 2) + row
     }
@@ -80,7 +69,6 @@ impl Matrix4f {
 
 impl Default for Matrix4f {
     /// Creates 4x4 identity matrix.
-    #[inline]
     fn default() -> Self {
         Matrix4f::identity()
     }

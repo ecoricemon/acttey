@@ -1,30 +1,35 @@
-use super::set_list::SetValueList;
-use crate::ds::vec::OptVec;
+use my_ecs::ds::prelude::*;
 use std::{
     collections::HashSet,
+    hash::BuildHasher,
     num::NonZeroUsize,
     ops::{Index, IndexMut},
 };
 
 /// Directed graph.
 #[derive(Debug, Clone)]
-pub struct DirectedGraph<T> {
+pub struct DirectedGraph<T, S> {
     /// Nodes with default root node.
     /// Default root occupies slot at index 0.
-    nodes: OptVec<T>,
+    nodes: OptVec<T, S>,
 
-    // NonZeroUsize can help us to reduce redundant size caused by Option.
     /// Outgoing edges of each node.
     /// This field preserves inserted order,
     /// so that we can traverse neighbors in order we expect.  
-    outbounds: Vec<SetValueList<NonZeroUsize>>,
+    //
+    // NonZeroUsize can help us remove redundant size caused by Option.
+    outbounds: Vec<SetValueList<NonZeroUsize, S>>,
 
     /// Incoming edges of each node.
     /// This field doesn't preserve inserted order.  
-    inbounds: Vec<HashSet<usize, ahash::RandomState>>,
+    inbounds: Vec<HashSet<usize, S>>,
 }
 
-impl<T: Default> DirectedGraph<T> {
+impl<T, S> DirectedGraph<T, S>
+where
+    T: Default,
+    S: BuildHasher + Default,
+{
     /// Creates a directed acyclic graph with default root node.
     pub fn new() -> Self {
         let mut nodes = OptVec::new();
@@ -38,8 +43,14 @@ impl<T: Default> DirectedGraph<T> {
     }
 }
 
-impl<T> DirectedGraph<T> {
-    // Note
+impl<T, S> DirectedGraph<T, S>
+where
+    S: BuildHasher + Default,
+{
+    /// Returns nodes, inbounds, and outbounds.
+    /// Do not insert or remove any nodes.
+    //
+    // NOTE:
     // Sometimes, we want to update node's values while traversing the graph.
     // However, we have two problems to do so.
     // First problem is that we cannot modify `nodes` while borrowing out or inbounds.
@@ -50,16 +61,13 @@ impl<T> DirectedGraph<T> {
     // considered effective way in terms of memory.
     // Unfortunately, I couldn't find a way to solve those problems together.
     // (I don't like wrapping OptVec with another struct for this purpose only, it's strange to me)
-    //
-    /// Returns nodes, inbounds, and outbounds.
-    /// Do not insert or remove any nodes.
     #[allow(clippy::type_complexity)]
     pub fn destructure(
         &mut self,
     ) -> (
-        &mut OptVec<T>,
-        &Vec<SetValueList<NonZeroUsize>>,
-        &Vec<HashSet<usize, ahash::RandomState>>,
+        &mut OptVec<T, S>,
+        &Vec<SetValueList<NonZeroUsize, S>>,
+        &Vec<HashSet<usize, S>>,
     ) {
         (&mut self.nodes, &self.outbounds, &self.inbounds)
     }
@@ -68,7 +76,6 @@ impl<T> DirectedGraph<T> {
     /// which is default root node + # of vacant slots + # of occupied slots.
     //
     // NOTE: Don't implement len(). It's confusing because we put in default node.
-    #[inline]
     pub fn len_buf(&self) -> usize {
         self.nodes.len()
     }
@@ -86,17 +93,14 @@ impl<T> DirectedGraph<T> {
 
     /// Determines `index` is in bounds and the slot is Some,
     /// which means there's a value in the slot.
-    #[inline]
     pub fn is_valid(&self, index: usize) -> bool {
         self.nodes.is_valid(index)
     }
 
-    #[inline]
     pub fn get_node(&self, index: usize) -> Option<&T> {
         self.nodes.get(index)
     }
 
-    #[inline]
     pub fn get_root_mut(&mut self) -> &mut T {
         // Safety: There's default root node at the first position.
         unsafe { self.nodes.get_unchecked_mut(0) }
@@ -105,14 +109,12 @@ impl<T> DirectedGraph<T> {
     /// # Safety
     ///
     /// Undefine behavior if `index` is out of bound or the slot is vacant.
-    #[inline]
     pub unsafe fn get_node_unchecked(&self, index: usize) -> &T {
         self.nodes.get_unchecked(index)
     }
 
     /// Returns mutable reference of the node,
     /// but it can be None if `index` is out of bound or the slot is vacant.
-    #[inline]
     pub fn get_node_mut(&mut self, index: usize) -> Option<&mut T> {
         self.nodes.get_mut(index)
     }
@@ -120,37 +122,29 @@ impl<T> DirectedGraph<T> {
     /// # Safety
     ///
     /// Undefine behavior if `index` is out of bound or the slot is vacant.
-    #[inline]
     pub unsafe fn get_node_unchecked_mut(&mut self, index: usize) -> &mut T {
         self.nodes.get_unchecked_mut(index)
     }
 
-    #[inline]
-    pub fn get_outbound(&self, index: usize) -> Option<&SetValueList<NonZeroUsize>> {
+    pub fn get_outbound(&self, index: usize) -> Option<&SetValueList<NonZeroUsize, S>> {
         self.outbounds.get(index)
     }
 
     /// # Safety
     ///
     /// Undefine behavior if `index` is out of bound or the slot is vacant.
-    #[inline]
-    pub unsafe fn get_outbound_unchecked(&self, index: usize) -> &SetValueList<NonZeroUsize> {
+    pub unsafe fn get_outbound_unchecked(&self, index: usize) -> &SetValueList<NonZeroUsize, S> {
         self.outbounds.get_unchecked(index)
     }
 
-    #[inline]
-    pub fn get_inbound(&self, index: usize) -> Option<&HashSet<usize, ahash::RandomState>> {
+    pub fn get_inbound(&self, index: usize) -> Option<&HashSet<usize, S>> {
         self.inbounds.get(index)
     }
 
     /// # Safety
     ///
     /// Undefine behavior if `index` is out of bound or the slot is vacant.
-    #[inline]
-    pub unsafe fn get_inbound_unchecked(
-        &self,
-        index: usize,
-    ) -> &HashSet<usize, ahash::RandomState> {
+    pub unsafe fn get_inbound_unchecked(&self, index: usize) -> &HashSet<usize, S> {
         self.inbounds.get_unchecked(index)
     }
 
@@ -203,18 +197,6 @@ impl<T> DirectedGraph<T> {
         self.inbounds[index].clear();
     }
 
-    pub fn iter_node(&self) -> impl Iterator<Item = (usize, &T)> {
-        self.nodes.iter_occupied()
-    }
-
-    pub fn iter_outbound(&self, index: usize) -> impl Iterator<Item = usize> + Clone + '_ {
-        self.outbounds[index].iter().map(|to| to.get())
-    }
-
-    pub fn iter_inbound(&self, index: usize) -> impl Iterator<Item = usize> + Clone + '_ {
-        self.inbounds[index].iter().cloned()
-    }
-
     // TODO: test
     /// Determines whether this graph has cycle or not.
     pub fn has_cycle(&self) -> bool {
@@ -222,12 +204,15 @@ impl<T> DirectedGraph<T> {
         let mut path_visit = vec![false; self.nodes.len()];
 
         // Returns true if it detected a cycle.
-        fn find(
+        fn find<S>(
             v: usize,
             visit: &mut [bool],
             path_visit: &mut [bool],
-            edges: &[SetValueList<NonZeroUsize>],
-        ) -> bool {
+            edges: &[SetValueList<NonZeroUsize, S>],
+        ) -> bool
+        where
+            S: BuildHasher,
+        {
             if !visit[v] {
                 visit[v] = true;
                 path_visit[v] = true;
@@ -257,19 +242,49 @@ impl<T> DirectedGraph<T> {
         self.inbounds[index].remove(&0);
     }
 
-    fn new_outbound() -> SetValueList<NonZeroUsize> {
+    fn new_outbound() -> SetValueList<NonZeroUsize, S> {
         let dummy = unsafe { NonZeroUsize::new_unchecked(1) };
         SetValueList::new(dummy)
     }
 }
 
-impl<T: Default> Default for DirectedGraph<T> {
+impl<T, S> DirectedGraph<T, S>
+where
+    S: BuildHasher,
+{
+    pub fn iter_node(&self) -> impl Iterator<Item = (usize, &T)> {
+        self.nodes.iter_occupied()
+    }
+}
+
+impl<T, S> DirectedGraph<T, S>
+where
+    S: BuildHasher + Clone,
+{
+    pub fn iter_outbound(&self, index: usize) -> impl Iterator<Item = usize> + Clone + '_ {
+        self.outbounds[index].iter().map(|to| to.get())
+    }
+
+    pub fn iter_inbound(&self, index: usize) -> impl Iterator<Item = usize> + Clone + '_ {
+        self.inbounds[index].iter().cloned()
+    }
+}
+
+impl<T, S> Default for DirectedGraph<T, S>
+where
+    T: Default,
+    S: BuildHasher + Default,
+{
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T: Default> Index<usize> for DirectedGraph<T> {
+impl<T, S> Index<usize> for DirectedGraph<T, S>
+where
+    T: Default,
+    S: BuildHasher + Default,
+{
     type Output = T;
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -277,7 +292,11 @@ impl<T: Default> Index<usize> for DirectedGraph<T> {
     }
 }
 
-impl<T: Default> IndexMut<usize> for DirectedGraph<T> {
+impl<T, S> IndexMut<usize> for DirectedGraph<T, S>
+where
+    T: Default,
+    S: BuildHasher + Default,
+{
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         self.get_node_mut(index).unwrap()
     }

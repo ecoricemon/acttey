@@ -25,53 +25,6 @@ pub fn current_thread_id() -> u64 {
     unsafe { transmute(id) }
 }
 
-/// A structure representing 2^k value.
-/// But you can designate zero to this structure although zero is not 2^k.
-/// In that case, zero is considered as usize::MAX + 1.
-#[derive(Debug, Clone)]
-pub struct PowerOfTwo {
-    value: usize,
-    k: u32,
-    mask: usize,
-}
-
-impl PowerOfTwo {
-    pub const fn new(value: usize) -> Option<Self> {
-        if value.is_power_of_two() {
-            Some(if value == 0 {
-                Self {
-                    value,
-                    k: 0,
-                    mask: 0,
-                }
-            } else {
-                Self {
-                    value,
-                    k: value.trailing_zeros(),
-                    mask: usize::MAX,
-                }
-            })
-        } else {
-            None
-        }
-    }
-
-    #[inline(always)]
-    pub const fn get(&self) -> usize {
-        self.value
-    }
-
-    #[inline(always)]
-    pub const fn quotient(&self, lhs: usize) -> usize {
-        (lhs >> self.k) & self.mask
-    }
-
-    #[inline(always)]
-    pub const fn remainder(&self, lhs: usize) -> usize {
-        lhs & self.value.wrapping_sub(1)
-    }
-}
-
 /// It's same with Into<&\[u8]\>.
 /// Structs that implements Into<&\[u8\]> also implements this automatically.
 pub trait AsBytes {
@@ -83,7 +36,6 @@ impl<T> AsBytes for T
 where
     for<'a> &'a T: Into<&'a [u8]>,
 {
-    #[inline]
     fn as_bytes(&self) -> &[u8] {
         self.into()
     }
@@ -129,36 +81,31 @@ where
 
 /// A window in an array.
 /// It's represented by *offset* and *length*.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Window {
     pub offset: usize,
     pub len: usize,
 }
 
 impl Window {
-    #[inline]
     pub const fn new(offset: usize, len: usize) -> Self {
         Self { offset, len }
     }
 
     /// Determines whether window's length is zero or not.
-    #[inline]
     pub const fn is_empty(&self) -> bool {
         self.len == 0
     }
 
-    #[inline]
     pub fn reset(&mut self, offset: usize, len: usize) {
         self.offset = offset;
         self.len = len;
     }
 
-    #[inline]
     pub const fn range(&self) -> std::ops::Range<usize> {
         self.offset..self.end()
     }
 
-    #[inline]
     pub const fn end(&self) -> usize {
         self.offset + self.len
     }
@@ -169,7 +116,6 @@ impl Window {
     /// # Panics
     ///
     /// Panics if offset + index is out of bound.
-    #[inline]
     pub const fn index(&self, index: usize) -> usize {
         let res = self.offset + index;
         assert!(res < self.end());
@@ -181,7 +127,6 @@ impl Window {
     /// # Panic
     ///
     /// Panics if `amount` is greater than `len`.
-    #[inline]
     pub fn shrink_rev(&mut self, amount: usize) {
         self.offset += amount;
         self.len -= amount;
@@ -190,17 +135,16 @@ impl Window {
 
 /// A view is a descriptor to see a part of a buffer.
 /// This is composed of [`Window`] and *unit item size* in byte.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct View<T = usize> {
-    win: Window,
-    item_size: T,
+    pub(crate) win: Window,
+    pub(crate) item_size: T,
 }
 
 impl<T> View<T>
 where
     T: Copy + From<usize> + Mul<T, Output = T>,
 {
-    #[inline]
     pub const fn new(offset: usize, len: usize, item_size: T) -> Self {
         Self {
             win: Window::new(offset, len),
@@ -208,37 +152,26 @@ where
         }
     }
 
-    /// Sets unit item size in bytes.
-    #[inline]
-    pub fn set_item_size(&mut self, item_size: T) {
-        self.item_size = item_size;
-    }
-
-    /// Retrieves unit item size in bytes.
-    #[inline]
-    pub const fn get_item_size(&self) -> T {
+    /// Returns unit item size in bytes.
+    pub const fn item_size(&self) -> T {
         self.item_size
     }
 
-    /// Retrieves offset in bytes.
-    #[inline]
+    /// Returns offset in bytes.
     pub fn byte_offset(&self) -> T {
         T::from(self.win.offset) * self.item_size
     }
 
-    /// Retrieves end position in bytes. End here means the next byte of the view.
-    #[inline]
+    /// Returns end position in bytes. End here means the next byte of the view.
     pub fn byte_end(&self) -> T {
         T::from(self.win.end()) * self.item_size
     }
 
-    /// Retrieves buffer window size in bytes.
-    #[inline]
+    /// Returns buffer window size in bytes.
     pub fn size(&self) -> T {
         T::from(self.win.len) * self.item_size
     }
 
-    #[inline]
     pub fn byte_range(&self) -> std::ops::Range<T> {
         self.byte_offset()..self.byte_end()
     }
@@ -274,7 +207,6 @@ impl Index2 {
     const INVALID: usize = usize::MAX;
 
     /// Creates with uninitialized state.
-    #[inline]
     pub fn uninit() -> Self {
         Self {
             first: Self::INVALID,
@@ -282,39 +214,56 @@ impl Index2 {
         }
     }
 
-    #[inline]
     pub fn into_single(&mut self, first: usize) {
         self.first = first;
         self.second = Self::INVALID;
     }
 
-    #[inline]
     pub fn into_pair(&mut self, first: usize, second: usize) {
         self.first = first;
         self.second = second;
     }
 
-    #[inline]
     pub fn is_single(&self) -> bool {
         self.first != Self::INVALID && self.second == Self::INVALID
     }
 
-    #[inline]
     pub fn is_pair(&self) -> bool {
         self.first != Self::INVALID && self.second != Self::INVALID
     }
 
-    #[inline]
     pub fn is_valid(&self) -> bool {
         self.is_single() || self.is_pair()
     }
 
     /// For convenience.
-    #[inline]
     pub fn get(&self) -> (Option<usize>, Option<usize>) {
         (
             (self.first != Self::INVALID).then_some(self.first),
             (self.second != Self::INVALID).then_some(self.second),
         )
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Rect<T> {
+    pub width: T,
+    pub height: T,
+}
+
+impl Rect<u32> {
+    pub const DEFAULT: Self = Rect {
+        width: 0,
+        height: 0,
+    };
+
+    pub const fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Or<A, B> {
+    A(A),
+    B(B),
 }

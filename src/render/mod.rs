@@ -1,22 +1,19 @@
-pub mod bind;
-pub mod buffer;
-pub mod canvas;
-pub mod context;
-pub mod descs;
-pub mod pass;
-pub mod pipeline;
-pub mod resource;
-pub mod shaders;
+pub(crate) mod bind;
+pub(crate) mod buffer;
+pub(crate) mod canvas;
+pub(crate) mod context;
+pub(crate) mod desc;
+pub(crate) mod fragment;
+pub(crate) mod manager;
+pub(crate) mod pass;
+pub(crate) mod pipeline;
+pub(crate) mod shaders;
+pub(crate) mod vertex;
 
 pub mod prelude {
-    pub use super::RenderError;
+    pub use super::fragment::desc::{DepthStencilState, FragmentState};
 }
 
-// Re-exports RenderResource iterator types.
-pub use resource::{IterBindGroupLayout, IterShader};
-
-use buffer::*;
-use context::*;
 use thiserror::Error;
 
 #[derive(Error, Debug)]

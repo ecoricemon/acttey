@@ -55,83 +55,70 @@ impl Transform {
         }
     }
 
-    #[inline]
     pub fn translate(&mut self, x: f32, y: f32, z: f32) {
         self.tr.set(x, y, z);
         self.dirty |= TransformDirty::TRANSLATE;
     }
 
-    #[inline]
     pub fn translate_x(&mut self, x: f32) {
         self.tr.set_x(x);
         self.dirty |= TransformDirty::TRANSLATE;
     }
 
-    #[inline]
     pub fn translate_y(&mut self, y: f32) {
         self.tr.set_y(y);
         self.dirty |= TransformDirty::TRANSLATE;
     }
 
-    #[inline]
     pub fn translate_z(&mut self, z: f32) {
         self.tr.set_z(z);
         self.dirty |= TransformDirty::TRANSLATE;
     }
 
     /// Rotates with the given radians around `axis`.
-    #[inline]
     pub fn rotate(&mut self, axis: UnitVector<f32, 3>, angle: f32) {
         self.rot = Quaternion::from_axis(axis, angle);
         self.dirty |= TransformDirty::ROTATE;
     }
 
     /// Rotates with the given radians around x-axis.
-    #[inline]
     pub fn rotate_x(&mut self, angle: f32) {
         self.rot = Quaternion::from_rotation_x(angle);
         self.dirty |= TransformDirty::ROTATE;
     }
 
     /// Rotates with the given radians around y-axis.
-    #[inline]
     pub fn rotate_y(&mut self, angle: f32) {
         self.rot = Quaternion::from_rotation_y(angle);
         self.dirty |= TransformDirty::ROTATE;
     }
 
     /// Rotates with the given radians around z-axis.
-    #[inline]
     pub fn rotate_z(&mut self, angle: f32) {
         self.rot = Quaternion::from_rotation_z(angle);
         self.dirty |= TransformDirty::ROTATE;
     }
 
-    #[inline]
     pub fn scale(&mut self, x: f32, y: f32, z: f32) {
         self.scale.set(x, y, z);
         self.dirty |= TransformDirty::SCALE;
     }
 
-    #[inline]
     pub fn scale_x(&mut self, x: f32) {
         self.scale.set_x(x);
         self.dirty |= TransformDirty::SCALE;
     }
 
-    #[inline]
     pub fn scale_y(&mut self, y: f32) {
         self.scale.set_y(y);
         self.dirty |= TransformDirty::SCALE;
     }
 
-    #[inline]
     pub fn scale_z(&mut self, z: f32) {
         self.scale.set_z(z);
         self.dirty |= TransformDirty::SCALE;
     }
 
-    #[inline]
     pub fn is_dirty(&self) -> bool {
         !self.dirty.is_empty()
     }
@@ -202,7 +189,6 @@ impl Transform {
     /// that is from r0c3 to r2c3.
     /// Other elements won't change.
     /// Don't forget to erase dirty flag.
-    #[inline]
     fn update_t(&mut self, mat: &mut Matrix4f) {
         mat.set_col3(3, self.tr.x(), self.tr.y(), self.tr.z());
     }
@@ -236,7 +222,6 @@ bitflags::bitflags! {
 
 impl TransformDirty {
     /// Resets all bits.
-    #[inline]
     pub fn clear(&mut self) {
         *self = Self::empty();
     }

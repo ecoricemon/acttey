@@ -6,6 +6,7 @@ use crate::{
     },
     util::AsBytes,
 };
+use my_wgsl::*;
 use std::mem::{discriminant, Discriminant};
 
 #[derive(Debug, Clone)]
@@ -18,7 +19,6 @@ impl_from_for_enum!(Camera, Perspective, PerspectiveCamera);
 impl_from_for_enum!(Camera, Orthographic, OrthographicCamera);
 
 impl Camera {
-    #[inline]
     pub fn variant(&self) -> Discriminant<Self> {
         discriminant(self)
     }
@@ -50,11 +50,17 @@ pub struct PerspectiveCamera {
     far: f32,
     view: Matrix4f,
     proj: Matrix4f,
+    pub data: CameraData,
+}
+
+#[derive(Debug, Clone)]
+#[wgsl_struct(Uniform)]
+pub struct CameraData {
+    #[wgsl_type(mat4x4f)]
     pub view_proj: Matrix4f,
 }
 
 impl PerspectiveCamera {
-    #[inline]
     pub fn new() -> Self {
         Default::default()
     }
@@ -101,7 +107,7 @@ impl PerspectiveCamera {
         }
 
         self.view = Self::look_at(self.camera, self.at, self.up);
-        self.view_proj = &self.proj * &self.view;
+        self.data.view_proj = &self.proj * &self.view;
     }
 
     pub fn set_proj(
@@ -125,7 +131,7 @@ impl PerspectiveCamera {
         }
 
         self.proj = Self::project(self.fovy, self.aspect, self.near, self.far);
-        self.view_proj = &self.proj * &self.view;
+        self.data.view_proj = &self.proj * &self.view;
     }
 }
 
@@ -152,19 +158,30 @@ impl Default for PerspectiveCamera {
             far,
             view,
             proj,
-            view_proj,
+            data: CameraData { view_proj },
         }
     }
 }
 
 impl<'a> From<&'a PerspectiveCamera> for &'a [u8] {
     fn from(value: &'a PerspectiveCamera) -> Self {
-        value.view_proj.as_bytes()
+        From::from(&value.data)
+    }
+}
+
+impl my_wgsl::AsStructure for PerspectiveCamera {
+    fn as_structure() -> my_wgsl::Structure {
+        use my_wgsl::*;
+
+        #[wgsl_decl_struct]
+        struct Camera {
+            viewProj: mat4x4<f32>,
+        }
+
+        Camera::as_structure()
     }
 }
 
 // TODO: Not implemented yet.
 #[derive(Debug, Clone)]
-pub struct OrthographicCamera {
-    pub dummy: PerspectiveCamera,
-}
+pub struct OrthographicCamera;

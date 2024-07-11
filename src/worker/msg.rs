@@ -1,12 +1,5 @@
-use super::WorkerId;
-use crate::{
-    ecs::{
-        request::{RequestBuffer, RequestKey},
-        system::Invoke,
-    },
-    render::canvas::CanvasHandle,
-};
-use std::{fmt::Debug, mem, ptr::NonNull, thread::Thread};
+use crate::render::canvas::CanvasHandle;
+use std::{fmt::Debug, mem};
 use wasm_bindgen::{JsCast, JsValue};
 
 /// Message event header.  
@@ -54,14 +47,12 @@ impl MsgEventHeader {
     pub const CLICK_INNER: u64 = Self::MOUSE_MOVE_INNER + 1;
     pub const CLICK: Self = Self(Self::CLICK_INNER);
 
-    #[inline]
     pub fn into_js_value(self) -> JsValue {
         let value = f64::from_bits(self.0);
         debug_assert!(value.is_finite()); // Nan or Inf are now allowed.
         JsValue::from_f64(value)
     }
 
-    #[inline]
     pub(crate) fn from_js_value(value: JsValue) -> Self {
         Self(value.unchecked_into_f64().to_bits())
     }
@@ -81,7 +72,6 @@ impl MsgEventInit {
     const HEADER: MsgEventHeader = MsgEventHeader::INIT;
 
     /// Returns minimum length of [`js_sys::Array`] for this message.
-    #[inline]
     const fn message_array_len() -> u32 {
         MsgEventCanvas::message_array_len()
     }
@@ -93,12 +83,10 @@ impl MsgEventInit {
         worker.post_message_with_transfer(&buf, &tr).unwrap();
     }
 
-    #[inline]
     fn write_header(buf: &js_sys::Array) {
         buf.set(0, Self::HEADER.into_js_value());
     }
 
-    #[inline]
     pub fn read_body(buf: &js_sys::Array) -> Self {
         debug_assert!(buf.length() >= Self::message_array_len());
         debug_assert_eq!(Self::HEADER, MsgEventHeader::from_js_value(buf.get(0)));
@@ -119,7 +107,6 @@ impl MsgEventCanvas {
     const HEADER: MsgEventHeader = MsgEventHeader::CANVAS;
 
     /// Returns minimum length of [`js_sys::Array`] for this message.
-    #[inline]
     const fn message_array_len() -> u32 {
         // 5
         const NUM_OF_FIELDS: u32 = 4;
@@ -133,7 +120,6 @@ impl MsgEventCanvas {
         worker.post_message_with_transfer(&buf, &tr).unwrap();
     }
 
-    #[inline]
     fn write_header(buf: &js_sys::Array) {
         buf.set(0, Self::HEADER.into_js_value());
     }
@@ -157,7 +143,6 @@ impl MsgEventCanvas {
         Self::_read_body(buf)
     }
 
-    #[inline]
     fn _read_body(buf: &js_sys::Array) -> Self {
         Self {
             element: buf.get(1).unchecked_into(),
@@ -189,14 +174,12 @@ impl MsgEventFn {
     const HEADER: MsgEventHeader = MsgEventHeader::FN;
 
     /// Returns minimum length of [`js_sys::Uint32Array`] for this message's body.
-    #[inline]
     const fn body_array_len() -> u32 {
         // 4 including padding
         ((mem::size_of::<Self>() + U32_ROUND_UP) / U32_SIZE) as u32
     }
 
     /// Returns minimum length of [`js_sys::Array`] for this message.
-    #[inline]
     const fn message_array_len() -> u32 {
         // 2, message looks like [header, [body array]].
         const BODY_LEN: u32 = 1;
@@ -210,7 +193,6 @@ impl MsgEventFn {
         worker.post_message(&buf).unwrap();
     }
 
-    #[inline]
     fn write_header(buf: &js_sys::Array) {
         buf.set(0, Self::HEADER.into_js_value());
     }
@@ -231,12 +213,10 @@ impl MsgEventFn {
         Self::decode(buf)
     }
 
-    #[inline]
     const fn encode(self) -> [u32; Self::body_array_len() as usize] {
         unsafe { MsgEventFnCodec { src: self }.dst }
     }
 
-    #[inline]
     const fn decode(encoded: [u32; Self::body_array_len() as usize]) -> Self {
         unsafe { MsgEventFnCodec { dst: encoded }.src }
     }
@@ -257,7 +237,6 @@ impl MsgEventRun {
     const HEADER: MsgEventHeader = MsgEventHeader::RUN;
 
     /// Returns minimum length of [`js_sys::Array`] for this message.
-    #[inline]
     const fn message_array_len() -> u32 {
         // 1, header only message
         HEADER_LEN as u32
@@ -269,7 +248,6 @@ impl MsgEventRun {
         worker.post_message(&buf).unwrap();
     }
 
-    #[inline]
     fn write_header(buf: &js_sys::Array) {
         buf.set(0, Self::HEADER.into_js_value());
     }
@@ -291,25 +269,21 @@ impl MsgEventWindowScale {
     }
 
     /// Returns minimum length of [`js_sys::Array`] for this message.
-    #[inline]
     pub const fn required_array_len() -> u32 {
         // 2
         HEADER_LEN as u32 + 1
     }
 
-    #[inline]
     fn write_header(buf: &js_sys::Array) {
         debug_assert!(buf.length() >= Self::required_array_len());
         buf.set(0, Self::HEADER.into_js_value());
     }
 
-    #[inline]
     pub fn write_body(&self, buf: &js_sys::Array) {
         debug_assert!(buf.length() >= Self::required_array_len());
         buf.set(1, JsValue::from_f64(self.scale));
     }
 
-    #[inline]
     pub fn read_body(buf: &js_sys::Array) -> Self {
         debug_assert!(buf.length() >= Self::required_array_len());
         debug_assert_eq!(Self::HEADER, MsgEventHeader::from_js_value(buf.get(0)));
@@ -343,21 +317,18 @@ impl MsgEventCanvasResize {
     }
 
     /// Returns minimum length of [`js_sys::Uint32Array`] for this message's body.
-    #[inline]
     const fn body_array_len() -> u32 {
         // 2
         ((mem::size_of::<Self>() + U32_ROUND_UP) / U32_SIZE) as u32
     }
 
     /// Returns minimum length of [`js_sys::Array`] for this message.
-    #[inline]
     const fn message_array_len() -> u32 {
         // 2, message looks like [header, [body array]].
         const BODY_LEN: u32 = 1;
         HEADER_LEN as u32 + BODY_LEN
     }
 
-    #[inline]
     fn write_header(buf: &js_sys::Array) {
         debug_assert!(buf.length() >= Self::message_array_len());
         buf.set(0, Self::HEADER.into_js_value());
@@ -382,12 +353,10 @@ impl MsgEventCanvasResize {
         Self::decode(buf)
     }
 
-    #[inline]
     const fn encode(self) -> [u32; Self::body_array_len() as usize] {
         unsafe { MsgEventCanvasResizeCodec { src: self }.dst }
     }
 
-    #[inline]
     const fn decode(encoded: [u32; Self::body_array_len() as usize]) -> Self {
         unsafe { MsgEventCanvasResizeCodec { dst: encoded }.src }
     }
@@ -415,28 +384,24 @@ union MsgEventMouseCodec {
 
 impl MsgEventMouse {
     /// Returns minimum length of [`js_sys::Uint32Array`] for this message's body.
-    #[inline]
     const fn body_array_len() -> u32 {
         // 5 including padding
         ((mem::size_of::<Self>() + U32_ROUND_UP) / U32_SIZE) as u32
     }
 
     /// Returns minimum length of [`js_sys::Array`] for this message.
-    #[inline]
     const fn message_array_len() -> u32 {
         // 2, message looks like [header, [body array]].
         const BODY_LEN: u32 = 1;
         HEADER_LEN as u32 + BODY_LEN
     }
 
-    #[inline]
     fn write_body(self, buf: &js_sys::Array) {
         let body = js_sys::Uint32Array::new_with_length(Self::body_array_len());
         body.copy_from(&self.encode());
         buf.set(1, body.into());
     }
 
-    #[inline]
     fn read_body(buf: &js_sys::Array) -> Self {
         let body: js_sys::Uint32Array = buf.get(1).unchecked_into();
         let mut buf: [u32; Self::body_array_len() as usize] = [0; Self::body_array_len() as usize];
@@ -444,12 +409,10 @@ impl MsgEventMouse {
         Self::decode(buf)
     }
 
-    #[inline]
     const fn encode(self) -> [u32; Self::body_array_len() as usize] {
         unsafe { MsgEventMouseCodec { src: self }.dst }
     }
 
-    #[inline]
     const fn decode(encoded: [u32; Self::body_array_len() as usize]) -> Self {
         unsafe { MsgEventMouseCodec { dst: encoded }.src }
     }
@@ -470,19 +433,16 @@ impl MsgEventMouseMove {
     }
 
     /// Returns minimum length of [`js_sys::Array`] for this message.
-    #[inline]
     const fn message_array_len() -> u32 {
         // 2, message looks like [header, [body array]].
         MsgEventMouse::message_array_len()
     }
 
-    #[inline]
     fn write_header(buf: &js_sys::Array) {
         debug_assert!(buf.length() >= Self::message_array_len());
         buf.set(0, Self::HEADER.into_js_value());
     }
 
-    #[inline]
     pub fn write_body(&self, buf: &js_sys::Array) {
         debug_assert!(buf.length() >= Self::message_array_len());
         debug_assert_eq!(Self::HEADER, MsgEventHeader::from_js_value(buf.get(0)));
@@ -490,7 +450,6 @@ impl MsgEventMouseMove {
         self.0.write_body(buf);
     }
 
-    #[inline]
     pub fn read_body(buf: &js_sys::Array) -> Self {
         debug_assert!(buf.length() >= Self::message_array_len());
         debug_assert_eq!(Self::HEADER, MsgEventHeader::from_js_value(buf.get(0)));
@@ -514,18 +473,15 @@ impl MsgEventClick {
     }
 
     /// Returns minimum length of [`js_sys::Array`] for this message.
-    #[inline]
     const fn message_array_len() -> u32 {
         MsgEventMouse::message_array_len()
     }
 
-    #[inline]
     fn write_header(buf: &js_sys::Array) {
         debug_assert!(buf.length() >= Self::message_array_len());
         buf.set(0, Self::HEADER.into_js_value());
     }
 
-    #[inline]
     pub fn write_body(&self, buf: &js_sys::Array) {
         debug_assert!(buf.length() >= Self::message_array_len());
         debug_assert_eq!(Self::HEADER, MsgEventHeader::from_js_value(buf.get(0)));
@@ -533,52 +489,10 @@ impl MsgEventClick {
         self.0.write_body(buf);
     }
 
-    #[inline]
     pub fn read_body(buf: &js_sys::Array) -> Self {
         debug_assert!(buf.length() >= Self::message_array_len());
         debug_assert_eq!(Self::HEADER, MsgEventHeader::from_js_value(buf.get(0)));
 
         Self(MsgEventMouse::read_body(buf))
-    }
-}
-
-/// Channel message that conveyed by channels between main and sub workers.
-/// Every sub worker has its own channel when it's spawned.
-/// When it comes to procedure of message transportation,
-/// worker first is woken up by main worker's call to [`Worker::open`](crate::worker::Worker::open),
-/// then the worker starts to listen to the channel and process this channel message.  
-/// Don't be confused between *channel message* and *message event*,
-/// which is a type of event used on JS.
-pub enum ChMsg {
-    /// Main worker requests Rust handle from the sub worker.
-    ReqHandle,
-
-    /// Main worker sends this to the sub worker in order to notify the end of work at this frame.
-    End,
-
-    /// Main worker sends a task to the sub worker.
-    Task(NonNull<dyn Invoke>, NonNull<RequestBuffer>),
-
-    /// Sub worker sends this to the main worker as a response of [`ChMsg::ReqHandle`].
-    Handle(Thread),
-
-    /// Sub worker notifies the task is done.
-    Fin(WorkerId, RequestKey),
-}
-
-impl Debug for ChMsg {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        const FROM_MAIN: &str = "ChMsg(main -> sub):";
-        const FROM_SUB: &str = "ChMsg(sub -> main):";
-
-        match self {
-            Self::ReqHandle => write!(f, "{FROM_MAIN} ReqHandle"),
-            Self::Task(task_ptr, buf_ptr) => {
-                write!(f, "{FROM_MAIN} Task({:?}, {:?})", task_ptr, buf_ptr)
-            }
-            Self::End => write!(f, "{FROM_MAIN} End"),
-            Self::Handle(handle) => write!(f, "{FROM_SUB} Handle({:?})", handle),
-            Self::Fin(wid, rkey) => write!(f, "{FROM_SUB} Fin({:?}, {:?})", wid, rkey),
-        }
     }
 }

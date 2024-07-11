@@ -1,19 +1,23 @@
 use std::{
     collections::{HashMap, HashSet},
-    hash::Hash,
+    hash::{BuildHasher, Hash},
 };
 
 pub trait DepKey: PartialEq + Eq + Hash + Clone {}
 
-impl<T: PartialEq + Eq + Hash + Clone> DepKey for T {}
+impl<T> DepKey for T where T: PartialEq + Eq + Hash + Clone {}
 
 #[derive(Debug)]
-pub struct DepNode<K: DepKey> {
-    children: HashSet<K, ahash::RandomState>,
+pub struct DepNode<K, S> {
+    children: HashSet<K, S>,
     rc: usize,
 }
 
-impl<K: DepKey> DepNode<K> {
+impl<K, S> DepNode<K, S>
+where
+    K: DepKey,
+    S: BuildHasher + Default,
+{
     fn new(child: Option<K>, rc: usize) -> Self {
         let mut children = HashSet::default();
         if let Some(child) = child {
@@ -24,17 +28,27 @@ impl<K: DepKey> DepNode<K> {
 }
 
 #[derive(Debug)]
-pub struct DepGraph<K: DepKey> {
-    nodes: HashMap<K, DepNode<K>, ahash::RandomState>,
+pub struct DepGraph<K, S> {
+    nodes: HashMap<K, DepNode<K, S>, S>,
 }
 
-impl<K: DepKey> DepGraph<K> {
+impl<K, S> DepGraph<K, S>
+where
+    K: DepKey,
+    S: Default,
+{
     pub fn new() -> Self {
         Self {
             nodes: HashMap::default(),
         }
     }
+}
 
+impl<K, S> DepGraph<K, S>
+where
+    K: DepKey,
+    S: BuildHasher + Default,
+{
     pub fn register_dependency(&mut self, cur: K, next: K) {
         let contains_cur = self.nodes.contains_key(&cur);
         let contains_next = self.nodes.contains_key(&next);
@@ -104,7 +118,11 @@ impl<K: DepKey> DepGraph<K> {
     }
 }
 
-impl<K: DepKey> Default for DepGraph<K> {
+impl<K, S> Default for DepGraph<K, S>
+where
+    K: DepKey,
+    S: Default,
+{
     fn default() -> Self {
         Self::new()
     }
@@ -143,7 +161,7 @@ mod tests {
     #[wasm_bindgen_test]
     fn test_dep_graph_register_and_remove() {
         let mut storage = Storage::<char>::new();
-        let mut deps = DepGraph::<char>::new();
+        let mut deps = DepGraph::<char, std::hash::RandomState>::new();
 
         // A -> B -> C <- D, Remove A, then C and D should be remained.
         storage.clear();

@@ -1,144 +1,183 @@
-pub mod basic;
-pub mod helper;
+pub(crate) mod basic;
+pub(crate) mod helper;
 
-use crate::{
-    ds::{
-        generational::{GenIndex, GenVec},
-        sparse_set::MonoSparseSet,
-    },
-    render::Gpu,
-    util::{key::ObjectKey, string::ToStr},
-};
+use crate::{render::context::Gpu, util::Or};
 use my_wgsl::*;
-use std::{borrow::Cow, rc::Rc};
+use res::*;
+use std::{
+    borrow::Cow,
+    hash::{Hash, Hasher},
+    rc::Rc,
+};
 
 #[derive(Debug)]
-pub struct ShaderPack {
+pub struct ShaderBuilder {
     gpu: Rc<Gpu>,
-    pub builders: GenVec<my_wgsl::Builder>,
-    pub shaders: MonoSparseSet<ObjectKey, Rc<Shader>>,
+    builder: my_wgsl::Builder,
+
+    /// Built shader by this builder.
+    /// Users can check the builder and make decision to use the last shader without modification.
+    /// In that case, the builder just clones this reference.
+    cur_shader: Option<Rc<Shader>>,
 }
 
-impl ShaderPack {
-    pub fn new(gpu: &Rc<Gpu>) -> Self {
+impl ShaderBuilder {
+    pub(crate) const fn new(gpu: Rc<Gpu>) -> Self {
         Self {
-            gpu: Rc::clone(gpu),
-            builders: GenVec::new(),
-            shaders: MonoSparseSet::new(),
+            gpu,
+            builder: my_wgsl::Builder::new(),
+            cur_shader: None,
         }
     }
 
-    /// Creates a shader from builder pointed by `builder_index`.
-    /// The shader will be overwritten if its label is unused anymore.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `builder_index` is invalid or overwrting fails.
-    pub fn create_shader(&mut self, builder_index: GenIndex, key: &ObjectKey) -> &Rc<Shader> {
-        let builder = self.builders.get(builder_index).unwrap();
-        let entry_point = match (
-            builder.get_vertex_stage_ident(),
-            builder.get_fragment_stage_ident(),
-        ) {
-            (Some(vert), None) => EntryPoint::Vert(vert.to_owned()),
-            (None, Some(frag)) => EntryPoint::Frag(frag.to_owned()),
-            (Some(vert), Some(frag)) => EntryPoint::VertFrag(vert.to_owned(), frag.to_owned()),
-            _ => panic!(),
-        };
-        let shader = Shader::new(key.clone(), &self.gpu.device, builder, entry_point);
-        if let Some(old) = self.shaders.insert(key.clone(), Rc::new(shader)) {
-            assert!(Rc::strong_count(&old) == 1)
-        }
-
-        // Safety: Infallible.
-        unsafe { self.shaders.get(key).unwrap_unchecked() }
+    pub fn get(&self) -> &my_wgsl::Builder {
+        &self.builder
     }
 
-    /// Clears unused shaders and returns the number of removed shaders.
-    pub fn clear_shader(&mut self) -> usize {
-        let unused = self
-            .shaders
-            .iter()
-            .filter_map(|(label, shader)| (Rc::strong_count(shader) == 1).then_some(label.clone()))
-            .collect::<Vec<_>>();
-        let removed = unused.len();
-        for label in unused {
-            self.shaders.remove(&label);
+    pub fn get_mut(&mut self) -> &mut my_wgsl::Builder {
+        // Getting as mutable reference invalidates generated shader.
+        self.cur_shader = None;
+
+        &mut self.builder
+    }
+
+    pub fn build(&mut self, label: Option<&str>) -> Rc<Shader> {
+        if let Some(shader) = self.cur_shader.as_ref() {
+            Rc::clone(shader)
+        } else {
+            // Generates wgsl code.
+            let code = self.builder.build();
+
+            // Creates wgpu's shader module.
+            let module = self
+                .gpu
+                .device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label,
+                    source: wgpu::ShaderSource::Wgsl(Cow::Owned(code)),
+                });
+
+            let shader = Rc::new(Shader::new(module, Or::A(self.builder.clone())));
+            self.cur_shader = Some(Rc::clone(&shader));
+            shader
         }
-        removed
     }
 }
 
-#[derive(Debug)]
-pub struct Shader {
-    pub module: wgpu::ShaderModule,
-    pub entry_point: EntryPoint,
-}
+/// Render module consists of Resource(res), Description(desc), and Execution(exe) layers.
+/// Execution layer is responsible for executing render or compute passes.
+pub(crate) mod exe {}
 
-impl Shader {
-    pub fn new(
-        key: ObjectKey,
-        device: &wgpu::Device,
-        builder: &Builder,
-        entry_point: EntryPoint,
-    ) -> Self {
-        // Builds WGSL code.
-        let wgsl = builder.build();
+/// Render module consists of Resource(res), Description(desc), and Execution(exe) layers.
+/// Description layer is responsible for describing GPU state using something like pipeline.
+pub(crate) mod desc {}
 
-        // Creates `wgpu::ShaderModule`.
-        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(&key.to_str()),
-            source: wgpu::ShaderSource::Wgsl(Cow::from(wgsl)),
-        });
+/// Render module consists of Resource(res), Description(desc), and Execution(exe) layers.
+/// Resource layer is responsible for holding GPU relative data.
+pub(crate) mod res {
+    use super::*;
 
-        Self {
-            module,
-            entry_point,
+    #[derive(Debug)]
+    pub struct Shader {
+        module: wgpu::ShaderModule,
+        entry: EntryPoint,
+
+        /// Read only builder.
+        /// If the module is built from custom string, then this field is empty.
+        builder: Option<my_wgsl::Builder>,
+    }
+
+    impl Shader {
+        // Users are allowed to create custom shader module, so this is public method.
+        pub fn new(
+            module: wgpu::ShaderModule,
+            builder_or_entry: Or<my_wgsl::Builder, EntryPoint>,
+        ) -> Self {
+            let (entry, builder) = match builder_or_entry {
+                Or::A(builder) => {
+                    let entry = match (
+                        builder.get_vertex_stage_ident(),
+                        builder.get_fragment_stage_ident(),
+                    ) {
+                        (Some(vert), None) => EntryPoint::Vert(vert.to_owned()),
+                        (None, Some(frag)) => EntryPoint::Frag(frag.to_owned()),
+                        (Some(vert), Some(frag)) => {
+                            EntryPoint::VertFrag(vert.to_owned(), frag.to_owned())
+                        }
+                        _ => panic!("invalid shader builder"),
+                    };
+                    (entry, Some(builder))
+                }
+                Or::B(entry) => (entry, None),
+            };
+
+            Self {
+                module,
+                entry,
+                builder,
+            }
+        }
+
+        pub fn get_module(&self) -> &wgpu::ShaderModule {
+            &self.module
+        }
+
+        pub fn get_vertex_stage(&self) -> Option<&str> {
+            self.entry.vert()
+        }
+
+        pub fn get_fragment_stage(&self) -> Option<&str> {
+            self.entry.frag()
+        }
+
+        pub fn has_vertex_stage(&self) -> bool {
+            self.get_vertex_stage().is_some()
+        }
+
+        pub fn has_fragment_stage(&self) -> bool {
+            self.get_fragment_stage().is_some()
+        }
+
+        /// Comparison process follows the rules shown below,
+        /// - If adresses are the same, then returns true.
+        /// - If the two have builders that are the same, then returns true.
+        /// - Otherwise, returns false.
+        pub(crate) fn is_same(this: &Rc<Self>, other: &Rc<Self>) -> bool {
+            // Is the same address? Otherwise, is the same builder?
+            Rc::ptr_eq(this, other)
+                || matches!(
+                    (this.builder.as_ref(), other.builder.as_ref()),
+                    (Some(a), Some(b)) if a == b
+                )
+        }
+
+        pub(crate) fn hash(this: &Rc<Self>, hasher: &mut impl Hasher) {
+            this.builder.hash(hasher);
         }
     }
 
-    #[inline]
-    pub fn get_vertex_entry(&self) -> Option<&str> {
-        self.entry_point.vert()
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum EntryPoint {
+        Vert(String),
+        Frag(String),
+        VertFrag(String, String),
     }
 
-    #[inline]
-    pub fn has_vertex_stage(&self) -> bool {
-        self.get_vertex_entry().is_some()
-    }
-
-    #[inline]
-    pub fn get_fragment_entry(&self) -> Option<&str> {
-        self.entry_point.frag()
-    }
-
-    #[inline]
-    pub fn has_fragment_stage(&self) -> bool {
-        self.get_fragment_entry().is_some()
-    }
-}
-
-#[derive(Debug)]
-pub enum EntryPoint {
-    Vert(String),
-    Frag(String),
-    VertFrag(String, String),
-}
-
-impl EntryPoint {
-    pub fn vert(&self) -> Option<&str> {
-        match self {
-            Self::Vert(s) => Some(s),
-            Self::VertFrag(s, _) => Some(s),
-            _ => None,
+    impl EntryPoint {
+        pub fn vert(&self) -> Option<&str> {
+            match self {
+                Self::Vert(s) => Some(s),
+                Self::VertFrag(s, _) => Some(s),
+                _ => None,
+            }
         }
-    }
 
-    pub fn frag(&self) -> Option<&str> {
-        match self {
-            Self::Frag(s) => Some(s),
-            Self::VertFrag(_, s) => Some(s),
-            _ => None,
+        pub fn frag(&self) -> Option<&str> {
+            match self {
+                Self::Frag(s) => Some(s),
+                Self::VertFrag(_, s) => Some(s),
+                _ => None,
+            }
         }
     }
 }
@@ -147,7 +186,7 @@ impl EntryPoint {
 // ref: https://www.w3.org/TR/WGSL/#builtin-inputs-outputs
 /// Example of an input of vertex shader.
 #[wgsl_decl_struct]
-pub struct VertexInput {
+pub(crate) struct VertexInput {
     /// Built-in vertex index.
     /// Type must be u32.
     #[builtin(vertex_index)]
@@ -167,7 +206,7 @@ pub struct VertexInput {
     #[location(4)]
     color: vec4<f32>,
     #[location(5)]
-    joint: vec4<u16>,
+    joint: vec4<u32>,
     #[location(6)]
     weight: vec4<f32>,
     #[location(7)]
@@ -184,7 +223,7 @@ pub struct VertexInput {
 // ref: https://www.w3.org/TR/WGSL/#builtin-inputs-outputs
 /// Example of an output of vertex stage.
 #[wgsl_decl_struct]
-pub struct VertexOutput {
+pub(crate) struct VertexOutput {
     /// Built-in position.
     /// Type must be vec4<f32>.
     #[builtin(position)]
@@ -195,7 +234,7 @@ pub struct VertexOutput {
 // ref: https://www.w3.org/TR/WGSL/#builtin-inputs-outputs
 /// Example of an input of fragment stage.
 #[wgsl_decl_struct]
-pub struct FragmentInput {
+pub(crate) struct FragmentInput {
     /// Built-in position. This is transferred from vertex stage.
     /// Type must be vec4<f32>.
     #[builtin(position)]
@@ -218,7 +257,7 @@ pub struct FragmentInput {
 // ref: https://www.w3.org/TR/WGSL/#builtin-inputs-outputs
 /// Example of an output of fragment shader.
 #[wgsl_decl_struct]
-pub struct FragmentOutput {
+pub(crate) struct FragmentOutput {
     /// Built-in frag depth.
     /// Type must be f32.
     #[builtin(frag_depth)]
@@ -233,7 +272,7 @@ pub struct FragmentOutput {
 // ref: https://www.w3.org/TR/WGSL/#builtin-inputs-outputs
 /// Example of an input of compute shader.
 #[wgsl_decl_struct]
-pub struct ComputeInput {
+pub(crate) struct ComputeInput {
     /// Built-in local invocation id.
     /// Type must be vec3<u32>.
     #[builtin(local_invocation_id)]
