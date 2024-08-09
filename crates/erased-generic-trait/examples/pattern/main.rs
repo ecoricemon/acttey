@@ -139,7 +139,7 @@ impl Generic for Handler {
 }
 
 /// This is a literally function table.
-/// We can call a specific funtion using `TypeId` from the `dyn Any`.
+/// We can call a specific function using `TypeId` from the `dyn Any`.
 /// Each function in this table calls the real generic method.
 type FnTable = HashMap<TypeId, Box<dyn Fn(&mut Handler, &mut dyn Any)>, ahash::RandomState>;
 

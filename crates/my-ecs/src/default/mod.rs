@@ -1,5 +1,7 @@
-mod worker;
+pub mod resource;
+pub mod system;
+pub mod worker;
 
 pub mod prelude {
-    pub use super::worker::*;
+    pub use super::{system::*, worker::*};
 }

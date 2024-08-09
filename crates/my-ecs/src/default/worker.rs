@@ -26,13 +26,15 @@ mod non_wasm {
             }
         }
 
-        /// Unlike [`Self::spwan`], this returns concrete type.
+        /// Unlike [`Self::spwan`], this might return target specific error.
         pub fn spawn_concrete(self) -> Result<Worker, std::io::Error> {
             Worker::spawn(self)
         }
     }
 
     impl BuildWorker for WorkerBuilder {
+        type Output = Worker;
+
         fn new(name: String) -> Self {
             Self {
                 inner: Builder::new().name(name.clone()),
@@ -40,13 +42,13 @@ mod non_wasm {
             }
         }
 
-        fn spawn(self) -> impl Work {
-            Worker::spawn(self).unwrap()
+        fn spawn(self) -> Result<Self::Output, String> {
+            self.spawn_concrete().map_err(|err| err.to_string())
         }
     }
 
     pub struct Worker {
-        name: String,
+        name: Box<str>,
         tx: Sender<Option<ManagedConstPtr<Job>>>,
         join_handle: Option<JoinHandle<()>>,
     }
@@ -60,7 +62,7 @@ mod non_wasm {
                 }
             })?;
             Ok(Self {
-                name: builder.name,
+                name: builder.name.into(),
                 tx,
                 join_handle: Some(join_handle),
             })
@@ -90,43 +92,57 @@ mod non_wasm {
 #[cfg(target_arch = "wasm32")]
 mod wasm {
     use crate::{ds::prelude::*, ecs::prelude::*};
-    use once_cell::sync::OnceCell;
     use std::{
-        fmt::Debug,
+        fmt,
         sync::{
             atomic::{AtomicBool, Ordering},
-            Arc,
+            Arc, OnceLock,
         },
     };
     use wasm_bindgen::prelude::*;
 
     #[derive(Debug)]
-    pub struct WorkerBuilder<'a> {
+    pub struct WorkerBuilder<'s, 'l> {
         name: String,
-        script: Option<&'a str>,
+        script: Option<&'s str>,
+        listener: &'l str,
     }
 
-    impl<'a> WorkerBuilder<'a> {
-        pub fn script(self, script: &'a str) -> Self {
-            Self {
-                name: self.name,
-                script: Some(script),
-            }
+    impl<'s, 'l> WorkerBuilder<'s, 'l> {
+        /// Default message listener of the worker.
+        /// See [`worker_onmessage`].
+        const DEFAULT_LISTENER: &'static str = "workerOnMessage";
+
+        pub fn script(mut self, script: &'s str) -> Self {
+            self.script = Some(script);
+            self
         }
 
-        /// Unlike [`Self::spwan`], this returns concrete type.
+        pub fn listener(mut self, listener: &'l str) -> Self {
+            self.listener = listener;
+            self
+        }
+
+        /// Unlike [`Self::spwan`], this might return target specific error.
         pub fn spawn_concrete(self) -> Result<Worker, JsValue> {
             Worker::spawn(self)
         }
     }
 
-    impl<'a> BuildWorker for WorkerBuilder<'a> {
+    impl<'s, 'l> BuildWorker for WorkerBuilder<'s, 'l> {
+        type Output = Worker;
+
         fn new(name: String) -> Self {
-            Self { name, script: None }
+            Self {
+                name,
+                script: None,
+                listener: Self::DEFAULT_LISTENER,
+            }
         }
 
-        fn spawn(self) -> impl Work {
-            Worker::spawn(self).unwrap()
+        fn spawn(self) -> Result<Self::Output, String> {
+            self.spawn_concrete()
+                .map_err(|err| err.unchecked_into::<web_sys::DomException>().name())
         }
     }
 
@@ -135,7 +151,7 @@ mod wasm {
         handle: web_sys::Worker,
 
         /// Worker name. You can see this name in browser's dev tool.
-        name: String,
+        name: Box<str>,
 
         /// Callback for message from worker.
         callback: Closure<dyn FnMut(web_sys::MessageEvent)>,
@@ -144,8 +160,8 @@ mod wasm {
         ready: Arc<AtomicBool>,
     }
 
-    impl Debug for Worker {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    impl fmt::Debug for Worker {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             f.debug_struct("Worker")
                 .field("name", &self.name)
                 .field("ready", &self.ready.as_ref())
@@ -176,12 +192,13 @@ mod wasm {
             Reflect::set(&msg, &"module".into(), &wasm_bindgen::module())?;
             Reflect::set(&msg, &"memory".into(), &wasm_bindgen::memory())?;
             Reflect::set(&msg, &"import_url".into(), &IMPORT_META_URL.as_str().into())?;
-            Reflect::set(&msg, &"init_method".into(), &init_method.into())?;
+            Reflect::set(&msg, &"init_fn".into(), &init_method.into())?;
+            Reflect::set(&msg, &"listen_fn".into(), &builder.listener.into())?;
             handle.post_message(&msg)?;
 
             Ok(Self {
                 handle,
-                name: builder.name,
+                name: builder.name.into(),
                 callback,
                 ready,
             })
@@ -238,7 +255,7 @@ mod wasm {
     /// crate::WBG_INIT.set("_".to_owned()).unwrap();
     /// Worker::spawn("worker", 0).unwrap();
     /// ```
-    pub static WBG_INIT: OnceCell<String> = OnceCell::new();
+    pub static WBG_INIT: OnceLock<String> = OnceLock::new();
 
     pub const DEFAULT_WBG_INIT: &str = "__wbg_init";
 
@@ -247,7 +264,7 @@ mod wasm {
     // Some bundlers could warn about circular dependency caused by worker
     // such as "Rust wasm - (bind) -> worker.js -> (import) -> wasm".
     // We can avoid it by removing JS file although it requires other types of settings to bundler.
-    // For instance, In Vite(v5.1.6) conf, you may need 
+    // For instance, In Vite(v5.1.6) conf, you may need
     // - 'build.rollupOptions.output.manualChunks: [..]' for spliting wasm glue JS file.
     fn create_worker(name: &str, script: Option<&str>) -> Result<web_sys::Worker, JsValue> {
         web_sys::Worker::new_with_options(
@@ -289,7 +306,6 @@ mod wasm {
     /// Undefined behavior if the pointer is not valid or aliased.
     #[wasm_bindgen(js_name = workerOnMessage)]
     pub unsafe fn worker_onmessage(job: *const Job) {
-        // Safety: The crate guarantees that
         // - `job` is valid.
         // - `job` is not aliased, which means this function is where the `job` is only used at a time.
         let job = unsafe { job.as_ref().unwrap() };

@@ -11,6 +11,8 @@ use std::{
     thread,
 };
 
+pub type BorrowResult<B, A> = Result<Borrowed<B, A>, BorrowError>;
+
 #[derive(Debug)]
 pub enum BorrowError {
     /// Exclusive borrowing is only allowed when no one has borrowed it.
@@ -21,16 +23,19 @@ pub enum BorrowError {
 
     /// If someone tried to borrow with out of bound index.
     OutOfBound,
+
+    /// Failed to find the target.
+    NotFound,
 }
 
 /// A shallow wrapper of [`Holder`].
 #[derive(Debug)]
 pub struct SimpleHolder<V, A: Atomic<i32>>(Holder<V, V, V, A>);
 
-impl<V: Copy, A: Atomic<i32>> SimpleHolder<V, A> {
+impl<V: Clone, A: Atomic<i32>> SimpleHolder<V, A> {
     pub fn new(value: V) -> Self {
-        let fn_imm = |value: &V| -> V { *value };
-        let fn_mut = |value: &mut V| -> V { *value };
+        let fn_imm = |value: &V| -> V { value.clone() };
+        let fn_mut = |value: &mut V| -> V { value.clone() };
         let inner = Holder::new(value, fn_imm, fn_mut);
         Self(inner)
     }
@@ -86,7 +91,7 @@ impl<V, BI, BM, A: Atomic<i32>> Holder<V, BI, BM, A> {
         self.fn_mut
     }
 
-    pub fn borrow(&self) -> Result<Borrowed<BI, A>, BorrowError> {
+    pub fn borrow(&self) -> BorrowResult<BI, A> {
         self.count_ref()?;
         let value = (self.fn_imm)(&self.value);
         let exclusive = false;
@@ -94,7 +99,7 @@ impl<V, BI, BM, A: Atomic<i32>> Holder<V, BI, BM, A> {
         Ok(Borrowed::new(value, exclusive, atomic_cnt))
     }
 
-    pub fn borrow_mut(&mut self) -> Result<Borrowed<BM, A>, BorrowError> {
+    pub fn borrow_mut(&mut self) -> BorrowResult<BM, A> {
         self.count_mut()?;
         let value = (self.fn_mut)(&mut self.value);
         let exclusive = true;
@@ -102,7 +107,7 @@ impl<V, BI, BM, A: Atomic<i32>> Holder<V, BI, BM, A> {
         Ok(Borrowed::new(value, exclusive, atomic_cnt))
     }
 
-    pub fn get(&self) -> Result<Borrowed<&V, A>, BorrowError> {
+    pub fn get(&self) -> BorrowResult<&V, A> {
         self.count_ref()?;
         let value = &self.value;
         let exclusive = false;
@@ -110,7 +115,7 @@ impl<V, BI, BM, A: Atomic<i32>> Holder<V, BI, BM, A> {
         Ok(Borrowed::new(value, exclusive, atomic_cnt))
     }
 
-    pub fn get_mut(&mut self) -> Result<Borrowed<&mut V, A>, BorrowError> {
+    pub fn get_mut(&mut self) -> BorrowResult<&mut V, A> {
         self.count_mut()?;
         let value = &mut self.value;
         let exclusive = true;
@@ -184,7 +189,7 @@ struct BorrowedInner<B, A: Atomic<i32>> {
     atomic_cnt: Arc<A>,
 }
 
-unsafe impl<B, A: Atomic<i32>> Send for Borrowed<B, A> {}
+unsafe impl<B: Send, A: Atomic<i32> + Send> Send for Borrowed<B, A> {}
 
 impl<B, A: Atomic<i32>> Borrowed<B, A> {
     pub const fn new(value: B, exclusive: bool, atomic_cnt: Arc<A>) -> Self {

@@ -1,7 +1,11 @@
 use std::{
     any::{self, TypeId},
+    borrow, cmp, fmt,
+    hash::Hash,
     marker::PhantomData,
-    mem, ptr,
+    mem,
+    ops::Deref,
+    ptr,
 };
 
 pub type FnDropRaw = unsafe fn(*mut u8);
@@ -10,7 +14,7 @@ pub type FnCloneRaw = unsafe fn(*const u8, *mut u8);
 #[derive(Debug, Clone, Copy)]
 pub struct TypeInfo {
     /// Type id.
-    pub id: TypeId,
+    pub ty: TypeId,
 
     /// Type name.
     /// This field may differ from rust version to version.
@@ -44,7 +48,7 @@ impl<T: 'static> AsTypeInfo for T {
         }
 
         TypeInfo {
-            id: TypeId::of::<T>(),
+            ty: TypeId::of::<T>(),
             name: any::type_name::<T>(),
             size: mem::size_of::<T>(),
             align: mem::align_of::<T>(),
@@ -141,4 +145,207 @@ macro_rules! tinfo {
         info.name = $name;
         info
     }};
+}
+
+#[cfg_attr(not(debug_assertions), repr(transparent), derive(Debug))]
+pub struct TypeIdExt {
+    inner: TypeId,
+    #[cfg(debug_assertions)]
+    name: &'static str,
+}
+
+#[cfg(debug_assertions)]
+impl fmt::Debug for TypeIdExt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        #[cfg(not(debug_assertions))]
+        {
+            self.inner.fmt(f)
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            write!(f, "TypeIdExt({})", self.name)
+        }
+    }
+}
+
+impl TypeIdExt {
+    pub const fn new(ty: TypeId) -> Self {
+        Self {
+            inner: ty,
+            #[cfg(debug_assertions)]
+            name: "",
+        }
+    }
+
+    pub const fn with(mut self, name: &'static str) -> Self {
+        #[cfg(debug_assertions)]
+        {
+            self.name = name;
+        }
+        self
+    }
+
+    pub fn of<T: ?Sized + 'static>() -> Self {
+        Self {
+            inner: TypeId::of::<T>(),
+            #[cfg(debug_assertions)]
+            name: any::type_name::<T>(),
+        }
+    }
+}
+
+impl Deref for TypeIdExt {
+    type Target = TypeId;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl Clone for TypeIdExt {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl Copy for TypeIdExt {}
+
+impl PartialEq<Self> for TypeIdExt {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
+
+impl PartialEq<TypeId> for TypeIdExt {
+    fn eq(&self, other: &TypeId) -> bool {
+        &self.inner == other
+    }
+}
+
+impl Eq for TypeIdExt {}
+
+impl PartialOrd<Self> for TypeIdExt {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialOrd<TypeId> for TypeIdExt {
+    fn partial_cmp(&self, other: &TypeId) -> Option<cmp::Ordering> {
+        self.inner.partial_cmp(other)
+    }
+}
+
+impl Ord for TypeIdExt {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        self.inner.cmp(&other.inner)
+    }
+}
+
+impl Hash for TypeIdExt {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.inner.hash(state)
+    }
+}
+
+impl borrow::Borrow<TypeId> for TypeIdExt {
+    fn borrow(&self) -> &TypeId {
+        &self.inner
+    }
+}
+
+impl From<&TypeInfo> for TypeIdExt {
+    fn from(value: &TypeInfo) -> Self {
+        Self::new(value.ty).with(value.name)
+    }
+}
+
+/// [`TypeId`] with a salt type.
+/// Consider using this when you need new type for the `TypeId`.
+#[repr(transparent)]
+pub struct ATypeId<Salt> {
+    inner: TypeIdExt,
+    _marker: PhantomData<Salt>,
+}
+
+impl<Salt> fmt::Debug for ATypeId<Salt> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.inner.fmt(f)
+    }
+}
+
+impl<Salt> ATypeId<Salt> {
+    pub const fn new(ty: TypeIdExt) -> Self {
+        Self {
+            inner: ty,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn of<T: ?Sized + 'static>() -> Self {
+        Self {
+            inner: TypeIdExt::of::<T>(),
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn into_inner(self) -> TypeIdExt {
+        self.inner
+    }
+
+    pub fn get_inner(&self) -> &TypeIdExt {
+        &self.inner
+    }
+}
+
+impl<Salt> Deref for ATypeId<Salt> {
+    type Target = TypeIdExt;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<Salt> Clone for ATypeId<Salt> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<Salt> Copy for ATypeId<Salt> {}
+
+impl<Salt> PartialEq for ATypeId<Salt> {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.eq(&other.inner)
+    }
+}
+
+impl<Salt> Eq for ATypeId<Salt> {}
+
+impl<Salt> PartialOrd for ATypeId<Salt> {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl<Salt> Ord for ATypeId<Salt> {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        self.inner.cmp(&other.inner)
+    }
+}
+
+impl<Salt> Hash for ATypeId<Salt> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.inner.hash(state)
+    }
+}
+
+impl<Salt> From<&TypeInfo> for ATypeId<Salt> {
+    fn from(value: &TypeInfo) -> Self {
+        Self {
+            inner: TypeIdExt::from(value),
+            _marker: PhantomData,
+        }
+    }
 }

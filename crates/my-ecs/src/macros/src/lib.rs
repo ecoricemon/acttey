@@ -36,7 +36,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
 
     TokenStream::from(quote! {
         // Implements `Component` trait.
-        impl my_ecs::ecs::component::Component for #ident {}
+        impl my_ecs::ecs::ent::component::Component for #ident {}
     })
 }
 
@@ -72,7 +72,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
     // Validates that all fields implement `Compoenent` trait.
     let validate_impl_component = quote! {
         const _: () = {
-            const fn validate<T: my_ecs::ecs::component::Component>() {}
+            const fn validate<T: my_ecs::ecs::ent::component::Component>() {}
             #(
                 validate::<#field_types>();
             )*
@@ -96,12 +96,12 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
 
     // Implements `AsEntityDesc` trait.
     let impl_as_entity_desc = quote! {
-        impl my_ecs::ecs::entity::AsEntityDesc for #ident {
-            fn as_entity_descriptor() -> my_ecs::ecs::entity::EntityDesc {
+        impl my_ecs::ecs::ent::storage::AsEntityDesc for #ident {
+            fn as_entity_descriptor() -> my_ecs::ecs::ent::storage::EntityDesc {
                 let mut desc =
-                    my_ecs::ecs::entity::EntityDesc::new_with_default_container::<#hasher>(
-                    #ident_str.into(),
-                    Some(my_ecs::ecs::entity::EntityKeyType::new(std::any::TypeId::of::<#ident>())),
+                    my_ecs::ecs::ent::storage::EntityDesc::new_with_default_container::<#hasher>(
+                    my_ecs::ecs::ent::entity::EntityName::new(#ident_str.into()),
+                    Some(my_ecs::ecs::ent::entity::EntityTypeId::of::<#ident>()),
                 );
                 #(
                     desc.add_component(my_ecs::tinfo!(#field_types));
@@ -113,17 +113,17 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
 
     // Implements `Entity` trait.
     let num_fields = field_types.len();
-    let col_indices = 0..num_fields;
+    let col_idxs = 0..num_fields;
     let impl_as_entity = quote! {
-        impl my_ecs::ecs::entity::Entity for #ident {
-            fn move_to<T: my_ecs::ecs::entity::AddEntity + ?Sized>(mut self, cont: &mut T) -> usize {
+        impl my_ecs::ecs::ent::entity::Entity for #ident {
+            fn move_to<T: my_ecs::ecs::ent::entity::AddEntity + ?Sized>(mut self, cont: &mut T) -> usize {
                 cont.begin_add_row();
 
                 #(
                     // Safety: Infallible.
                     unsafe {
                         cont.add_value(
-                            #col_indices,
+                            #col_idxs,
                             std::ptr::NonNull::new_unchecked(
                                 (&mut self.#field_idents as *mut _ as *mut u8)
                             )

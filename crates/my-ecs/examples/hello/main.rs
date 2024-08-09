@@ -5,17 +5,17 @@ use std::{
 };
 
 fn main() {
-    let mut ecs = <EcsManager>::new();
+    let mut ecs = EcsManager::new::<Worker>();
 
     // Spawns workers.
     let num = thread::available_parallelism().unwrap().get();
     let mut workers = (0..num)
-        .map(|i| WorkerBuilder::new(format!("worker{i}")).spawn())
+        .map(|i| WorkerBuilder::new(format!("worker{i}")).spawn().unwrap())
         .collect::<Vec<_>>();
 
     // Appends system that takes 1 sec.
     for _ in 0..num {
-        let _ = ecs.append_system(system_1sec, NonZeroTick::MAX, false);
+        let _ = ecs.append_system(0, NonZeroTick::MAX, false, system_1sec);
     }
 
     // Run all systems.

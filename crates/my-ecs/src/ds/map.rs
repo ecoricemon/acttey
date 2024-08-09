@@ -156,15 +156,20 @@ where
     IK: Hash + Eq + Clone,
     S: BuildHasher + Default,
 {
-    /// # Panics
-    ///
-    /// - Panics if `desc` doesn't have item at all.
-    /// - Panics if the map has had group already.
-    pub fn add_group(&mut self, desc: impl DescribeGroup<GK, GV, IK, IV>) -> usize {
-        let (group_key, group_value, items) = desc.into_group_and_items();
+    pub fn add_group_from_desc(
+        &mut self,
+        desc: GroupDesc<GK, GV, IK, IV>,
+    ) -> Result<usize, GroupDesc<GK, GV, IK, IV>> {
+        // Validates the descriptor.
+        if desc.items.is_empty() || self.contains_group2(&desc.group_key) {
+            return Err(desc);
+        }
 
-        // Group must contain at least one item.
-        assert!(!items.is_empty());
+        let GroupDesc {
+            group_key,
+            group_value,
+            items,
+        } = desc;
 
         // Adds items.
         let item_indices = items
@@ -184,7 +189,7 @@ where
             .insert(group_key, (group_value, item_indices.clone()));
 
         // This method doesn't allow overwriting group.
-        assert!(old_group.is_none());
+        debug_assert!(old_group.is_none());
 
         // Updates items by adding new link to the group.
         for index in item_indices {
@@ -192,7 +197,14 @@ where
             links.insert(group_index);
         }
 
-        group_index
+        Ok(group_index)
+    }
+
+    pub fn add_group(
+        &mut self,
+        desc: impl DescribeGroup<GK, GV, IK, IV>,
+    ) -> Result<usize, GroupDesc<GK, GV, IK, IV>> {
+        self.add_group_from_desc(desc.into_group_and_items())
     }
 
     pub fn remove_group(&mut self, index: usize) -> Option<GV> {
@@ -232,7 +244,14 @@ where
 }
 
 pub trait DescribeGroup<GK, GV, IK, IV> {
-    fn into_group_and_items(self) -> (GK, GV, Vec<(IK, IV)>);
+    fn into_group_and_items(self) -> GroupDesc<GK, GV, IK, IV>;
+}
+
+#[derive(Debug)]
+pub struct GroupDesc<GK, GV, IK, IV> {
+    pub group_key: GK,
+    pub group_value: GV,
+    pub items: Vec<(IK, IV)>,
 }
 
 /// A hash-map with indexing.
@@ -317,7 +336,7 @@ where
         index < self.values.len() && self.values.is_occupied(index)
     }
 
-    /// Inserts `value` with `key`.  
+    /// Inserts `value` with `key`.
     /// If the map has had the `key`, value is changed while its index isn't.
     /// Then returns value's index and old value if it's changed.
     pub fn insert(&mut self, key: K, value: V) -> (usize, Option<V>) {
@@ -360,7 +379,7 @@ where
         self.map.get(key).cloned()
     }
 
-    /// Retrieves value corresponding to the `index`.  
+    /// Retrieves value corresponding to the `index`.
     /// It can be None if `index` is out of bound or points to a vacant slot.
     pub fn get(&self, index: usize) -> Option<&V> {
         self.values.get(index)
@@ -376,7 +395,7 @@ where
         self.get(index)
     }
 
-    /// Retrieves value corresponding to the `index`.  
+    /// Retrieves value corresponding to the `index`.
     /// It can be None if `index` is out of bound or points to a vacant slot.
     pub fn get_mut(&mut self, index: usize) -> Option<&mut V> {
         self.values.get_mut(index)

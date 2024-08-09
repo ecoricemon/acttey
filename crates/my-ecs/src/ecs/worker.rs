@@ -1,21 +1,22 @@
-use super::{
-    request::{RequestBuffer, RequestKey},
-    system::Invoke,
+use super::sys::{
+    request::RequestBuffer,
+    system::{Invoke, SystemId},
 };
-use crate::ds::ptr::ManagedConstPtr;
+use crate::ds::prelude::*;
 use std::{
-    fmt::{Debug, Display},
+    fmt,
     marker::PhantomPinned,
     ops::{AddAssign, Deref},
     pin::Pin,
-    ptr::NonNull,
     sync::mpsc::{self, Receiver, RecvError, SendError, Sender, TryRecvError},
     thread::Thread,
 };
 
 pub trait BuildWorker {
+    type Output: Work;
+
     fn new(name: String) -> Self;
-    fn spawn(self) -> impl Work;
+    fn spawn(self) -> Result<Self::Output, String>;
 }
 
 pub trait Work {
@@ -33,14 +34,14 @@ pub trait Work {
 
 #[derive(Hash, PartialEq, Eq, Clone, Copy, Debug)]
 #[repr(transparent)]
-pub struct WorkerIndex(usize);
+pub(crate) struct WorkerIndex(usize);
 
 impl WorkerIndex {
-    pub const fn new(index: usize) -> Self {
+    pub(crate) const fn new(index: usize) -> Self {
         Self(index)
     }
 
-    pub const fn into_inner(self) -> usize {
+    pub(crate) const fn into_inner(self) -> usize {
         self.0
     }
 }
@@ -51,16 +52,20 @@ impl AddAssign<usize> for WorkerIndex {
     }
 }
 
-impl Display for WorkerIndex {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for WorkerIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
     }
 }
 
-pub enum ChMsg {
+pub(crate) enum ChMsg {
     /// Main thread sends function pointer and its argument pointer to worker.
     /// Worker that received this message must call the function with the argument.
-    Task(NonNull<dyn Invoke>, NonNull<RequestBuffer>),
+    Task(
+        ManagedMutPtr<dyn Invoke>,
+        ManagedMutPtr<RequestBuffer>,
+        SystemId,
+    ),
 
     /// Main thread sends this message to notify end of the job.
     End,
@@ -68,14 +73,14 @@ pub enum ChMsg {
     /// When a worker finishes its task, it will send this message to the main thread.
     //
     // Channel is based on mpsc. So it's needed to include identification of sender.
-    Fin(WorkerIndex, RequestKey),
+    Fin(WorkerIndex, SystemId),
 }
 
-impl Debug for ChMsg {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for ChMsg {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Task(task_ptr, buf_ptr) => {
-                write!(f, "ChMsg::Task({task_ptr:?}, {buf_ptr:?})")
+            Self::Task(task_ptr, buf_ptr, sid) => {
+                write!(f, "ChMsg::Task({:?}, {:?}, {:?})", task_ptr, buf_ptr, sid)
             }
             Self::End => write!(f, "ChMsg::End"),
             Self::Fin(widx, rkey) => write!(f, "ChMsg::Fin({widx:?}, {rkey:?})"),
@@ -161,11 +166,19 @@ impl Job {
         while let Ok(msg) = self.ch.recv() {
             match msg {
                 // Worker received a task.
-                ChMsg::Task(mut task_ptr, mut buf_ptr) => {
-                    let task = unsafe { task_ptr.as_mut() };
-                    let buf = unsafe { buf_ptr.as_mut() };
-                    task.invoke(buf);
-                    self.ch.send(ChMsg::Fin(self.widx, task.rkey())).unwrap();
+                ChMsg::Task(mut task, mut buf, sid) => {
+                    task.invoke(&mut buf);
+
+                    // We need to drop `ManagedMutPtr` before we send Fin message.
+                    // In debug mode, `ManagedMutPtr` is checked whether it's unique or not.
+                    // If main thread is unparked before we drop those pointers,
+                    // main thread could create another `ManagedMutPtr`
+                    // that has the exact same address because it's pretended freed.
+                    // As a result, it causes panic.
+                    drop(task);
+                    drop(buf);
+
+                    self.ch.send(ChMsg::Fin(self.widx, sid)).unwrap();
                     self.ch.unpark_opposite();
                 }
 

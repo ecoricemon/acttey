@@ -214,7 +214,7 @@ impl Builder {
     }
 
     /// Determines if the structure exists.
-    pub fn has_structure(&self, ident: &str) -> bool {
+    pub fn contains_structure(&self, ident: &str) -> bool {
         self.find_structure(ident).is_some()
     }
 
@@ -372,7 +372,7 @@ impl Builder {
     }
 
     /// Determines if the global variable exists.
-    pub fn has_global_variable(&self, ident: &str) -> bool {
+    pub fn contains_global_variable(&self, ident: &str) -> bool {
         self.find_global_variable(ident).is_some()
     }
 
@@ -423,7 +423,7 @@ impl Builder {
     }
 
     /// Determines if the function exists.
-    pub fn has_function(&self, ident: &str) -> bool {
+    pub fn contains_function(&self, ident: &str) -> bool {
         self.find_function(ident).is_some()
     }
 
@@ -548,7 +548,7 @@ impl Builder {
     pub fn get_vertex_stage_ident(&self) -> Option<&String> {
         self.entries.iter().find_map(|entry| {
             if let ShaderEntry::Function(f) = entry {
-                if f.attrs.has_attribute(&Attribute::Vertex) {
+                if f.attrs.contains_attribute(&Attribute::Vertex) {
                     return Some(&f.ident);
                 }
             }
@@ -561,7 +561,7 @@ impl Builder {
     pub fn get_fragment_stage_ident(&self) -> Option<&String> {
         self.entries.iter().find_map(|entry| {
             if let ShaderEntry::Function(f) = entry {
-                if f.attrs.has_attribute(&Attribute::Fragment) {
+                if f.attrs.contains_attribute(&Attribute::Fragment) {
                     return Some(&f.ident);
                 }
             }
@@ -657,7 +657,7 @@ impl Structure {
     }
 
     /// Tests if there's the specified member.
-    pub fn has_member(&self, ident: &str) -> bool {
+    pub fn contains_member(&self, ident: &str) -> bool {
         self.find_member(ident).is_some()
     }
 
@@ -743,12 +743,12 @@ impl Structure {
         let num = self
             .members
             .iter()
-            .filter(|member| !rhs.has_member(member.ident.as_str()))
+            .filter(|member| !rhs.contains_member(member.ident.as_str()))
             .count()
             + rhs.members.len();
         let mut merged = Vec::with_capacity(num);
         for member in self.members.iter() {
-            if !rhs.has_member(member.ident.as_str()) {
+            if !rhs.contains_member(member.ident.as_str()) {
                 merged.push(member.clone());
             }
         }
@@ -1158,7 +1158,7 @@ impl CompoundStatement {
         let mut res = Vec::new();
         for stmt in self.stmts.iter() {
             if let Statement::Compound(comp_stmt) = stmt {
-                if comp_stmt.attrs.has_attribute_partial(outer, inner) {
+                if comp_stmt.attrs.contains_attribute_partial(outer, inner) {
                     // Captures only the most outer one.
                     res.push(comp_stmt);
                 } else {
@@ -1185,7 +1185,7 @@ impl CompoundStatement {
         let mut res = Vec::new();
         for stmt in self.stmts.iter_mut() {
             if let Statement::Compound(comp_stmt) = stmt {
-                if comp_stmt.attrs.has_attribute_partial(outer, inner) {
+                if comp_stmt.attrs.contains_attribute_partial(outer, inner) {
                     // Captures only the most outer one.
                     res.push(comp_stmt);
                 } else {
@@ -1213,7 +1213,7 @@ impl CompoundStatement {
         let mut removed = Vec::new();
         for i in (0..self.stmts.len()).rev() {
             if let Statement::Compound(comp_stmt) = &mut self.stmts[i] {
-                if comp_stmt.attrs.has_attribute_partial(outer, inner) {
+                if comp_stmt.attrs.contains_attribute_partial(outer, inner) {
                     if let Statement::Compound(removed_stat) = self.stmts.remove(i) {
                         removed.push(removed_stat);
                     }
@@ -1231,7 +1231,7 @@ impl CompoundStatement {
         for stmt in self.stmts.iter_mut() {
             match stmt {
                 Statement::Compound(comp_stmt) | Statement::BareCompound(comp_stmt) => {
-                    if comp_stmt.attrs.has_attribute_partial(outer, inner) {
+                    if comp_stmt.attrs.contains_attribute_partial(outer, inner) {
                         comp_stmt.into_bare_statements_recur(outer, inner);
                         let mut bare = Statement::BareCompound(comp_stmt.clone());
                         std::mem::swap(stmt, &mut bare);
@@ -1431,14 +1431,14 @@ impl Attributes {
     }
 
     /// Tests if there's an attribute that exactly matches with the given attribute.
-    pub fn has_attribute(&self, attr: &Attribute) -> bool {
+    pub fn contains_attribute(&self, attr: &Attribute) -> bool {
         self.find_attribute(attr).is_some()
     }
 
     /// Searches partially matched attribute.
     /// If `inner` is Some, it tries to find exactly matched one.
     /// Otherwise, it compares outer only.
-    pub fn has_attribute_partial(&self, outer: &str, inner: Option<&str>) -> bool {
+    pub fn contains_attribute_partial(&self, outer: &str, inner: Option<&str>) -> bool {
         self.find_attribute_partial(outer, inner).is_some()
     }
 

@@ -1,0 +1,62 @@
+[package]
+name = "acttey"
+description = "Graphics library for the web"
+repository = "https://github.com/ecoricemon/acttey"
+license = "Apache-2.0 OR MIT"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.80.0" # std::sync::LazyLock is stable since 1.80.0.
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+acttey-macros = { version = "0.0.1", path = "src/macros" }
+my-ecs = { version = "0.0.1", path = "../my-ecs" }
+my-wgsl = { version = "0.0.2", path = "../my-wgsl" }
+js-sys = { version = "0.3.69" }
+web-sys = { version = "0.3.69", features = [
+    "console",
+    "Node",
+    "Window",
+    "Navigator",
+    "Gpu",
+    "Document",
+    "Element",
+    "HtmlCanvasElement",
+    "OffscreenCanvas",
+    "DedicatedWorkerGlobalScope",
+    "WorkerGlobalScope",
+    "WorkerNavigator",
+    "Event",
+    "EventTarget",
+    "MessageEvent",
+    "MouseEvent",
+    "KeyboardEvent",
+    "CustomEvent",
+] }
+wasm-bindgen = { version = "0.2.92" }
+# Cargo issue (https://github.com/rustwasm/wasm-bindgen/issues/3830)
+wasm-bindgen-futures = { version = "=0.4.42" } 
+wgpu = { version = "0.19.3" }
+console_error_panic_hook = { version = "0.1.7" }
+bytemuck = { version = "1.14.0", features = [
+    "derive",
+    "min_const_generics",
+    "extern_crate_alloc"
+] }
+paste = { version = "1.0.14" }
+ahash = { version = "0.8.11" }
+# ahash depends on getrandom, and it warns you to put js feature for wasm build.
+getrandom = { version = "0.2", features = [ "js" ] }
+bitflags = { version = "2.4.2" }
+thiserror = { version = "1.0.57" }
+const-str = { version = "0.5.7" }
+
+[dev-dependencies]
+wasm-bindgen-test = { version = "0.3" }
+
+[features]
+# Enables wgpu's webgl feature.
+webgl = ["wgpu/webgl"]
+

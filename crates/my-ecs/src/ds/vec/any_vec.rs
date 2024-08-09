@@ -41,7 +41,7 @@ impl AnyVec {
     }
 
     pub const fn type_id(&self) -> TypeId {
-        self.tinfo.id
+        self.tinfo.ty
     }
 
     pub const fn type_name(&self) -> &'static str {
@@ -69,7 +69,7 @@ impl AnyVec {
     }
 
     pub fn is_type_of(&self, ty: &TypeId) -> bool {
-        &self.tinfo.id == ty
+        &self.tinfo.ty == ty
     }
 
     pub const fn len(&self) -> usize {

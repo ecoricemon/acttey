@@ -5,6 +5,7 @@ repository = "https://github.com/ecoricemon/acttey"
 license = "Apache-2.0 OR MIT"
 version = "0.0.1"
 edition = "2021"
+rust-version = "1.80" # std::sync::LazyLock is stable since 1.80.0.
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -13,10 +14,13 @@ crate-type = ["cdylib", "rlib"]
 my-ecs-macros = { version = "0.0.1", path = "src/macros" }
 paste = { version = "1.0.14" }
 thiserror = { version = "1.0.57" }
+# Debug mode only
+dashmap = { version = "6.0.1" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = { version = "0.3.69" }
 web-sys = { version = "0.3.69", features = [
+    "console",
     "Worker",
     "WorkerOptions",
     "WorkerType",
@@ -24,9 +28,11 @@ web-sys = { version = "0.3.69", features = [
     "BlobPropertyBag",
     "Url",
     "MessageEvent",
+    "DomException",
 ]}
 wasm-bindgen = { version = "0.2.92" }
-once_cell = { version = "1.19.0" }
+# Debug mode only, used by dashmap, needs to be add a feature for wasm32.
+parking_lot_core = { version = "0.9.8", features = ["nightly"] }
 
 [[example]]
 name = "hello"

@@ -14,10 +14,19 @@ if [ "$#" -ne 1 ]; then
     my_exit
 fi
 
-wasm_dirs=(
-    pkg
-    target
-)
+cargo_clean() {
+    # Clean by cargo
+    cargo clean
+
+    # Removes wasm directories
+    targets=(
+        pkg
+        target
+    )
+    for target in "${targets[@]}"; do
+        rm -rf $target
+    done
+}
 
 if [ "$1" = "build" ]; then
     wasm-pack build --dev
@@ -34,11 +43,8 @@ elif [ "$1" = "test" ]; then
         fi
     done
 elif [ "$1" = "clean" ]; then
-    # Direct cleaning
     echo "=== Cleaning root directory... ==="
-    for wasm_dir in "${wasm_dirs[@]}"; do
-        rm -rf $wasm_dir
-    done
+    cargo_clean
 
     # Clean other crates
     echo "=== Cleaning other crate directory... ==="
@@ -47,7 +53,7 @@ elif [ "$1" = "clean" ]; then
             echo "=== Cleaning $dir... ==="
             pushd .
             cd $dir
-            cargo clean
+            cargo_clean
             popd
         fi
     done

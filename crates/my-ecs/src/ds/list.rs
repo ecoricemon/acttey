@@ -103,8 +103,8 @@ where
 #[derive(Debug)]
 pub struct SetList<K, V, S> {
     nodes: OptVec<ListNode<V>, S>,
-    tail: usize,
-    map: HashMap<K, usize, S>,
+    tail: ListPos,
+    map: HashMap<K, ListPos, S>,
 }
 
 impl<K, V, S> SetList<K, V, S>
@@ -125,18 +125,21 @@ where
     /// Creates list with default head node using the `dummy` value.
     pub fn new(dummy: V) -> Self {
         let mut nodes = OptVec::new();
-        let head_index = nodes.add(ListNode {
-            prev: 0,
-            next: 0,
+        let dummy_head_idx = nodes.add(ListNode {
+            prev: ListPos::end(),
+            next: ListPos::end(),
             value: dummy,
         });
+        let tail = ListPos(dummy_head_idx);
 
-        // See ListPos::end().
-        debug_assert_eq!(0, head_index);
+        // Dummy node always occupies 0th slot in the OptVec.
+        // We consider that 0 is END index of the list.
+        // See [`ListPos::end`] together.
+        debug_assert_eq!(ListPos::end(), tail);
 
         Self {
             nodes,
-            tail: head_index,
+            tail,
             map: HashMap::default(),
         }
     }
@@ -161,28 +164,40 @@ where
 
     /// Returns true if there's no node in the graph.
     /// Note that default head node is not taken into account.
-    pub fn has_no_occupied(&self) -> bool {
+    pub fn is_occupied_empty(&self) -> bool {
         self.len_occupied() == 0
     }
 
     pub fn front(&self) -> Option<&V> {
-        // Safety: first index is valid.
-        unsafe { self.get_value(self.get_first_index()) }
+        let first_pos = self.get_first_position();
+
+        // Safety: The first poisition must be one of
+        // - Position pointing to actual value which is valid.
+        // - `ListPos::end()` which is valid.
+        unsafe { self.get_value_unchecked(first_pos) }
     }
 
     pub fn front_mut(&mut self) -> Option<&mut V> {
-        // Safety: first index is valid.
-        unsafe { self.get_value_mut(self.get_first_index()) }
+        let first_pos = self.get_first_position();
+
+        // Safety: The first poisition must be one of
+        // - Position pointing to actual value which is valid.
+        // - `ListPos::end()` which is valid.
+        unsafe { self.get_value_unchecked_mut(first_pos) }
     }
 
     pub fn back(&self) -> Option<&V> {
-        // Safety: tail index is valid.
-        unsafe { self.get_value(self.tail) }
+        // Safety: The tail poisition must be one of
+        // - Position pointing to actual value which is valid.
+        // - `ListPos::end()` which is valid.
+        unsafe { self.get_value_unchecked(self.tail) }
     }
 
     pub fn back_mut(&mut self) -> Option<&mut V> {
-        // Safety: tail index is valid.
-        unsafe { self.get_value_mut(self.tail) }
+        // Safety: The tail poisition must be one of
+        // - Position pointing to actual value which is valid.
+        // - `ListPos::end()` which is valid.
+        unsafe { self.get_value_unchecked_mut(self.tail) }
     }
 
     pub fn iter(&self) -> ListIter<V, S> {
@@ -201,7 +216,7 @@ where
     pub unsafe fn iter_from(&self, cur: ListPos) -> ListIter<V, S> {
         ListIter {
             nodes: &self.nodes,
-            cur: cur.0,
+            cur,
         }
     }
 
@@ -211,7 +226,7 @@ where
     pub unsafe fn iter_mut_from(&mut self, cur: ListPos) -> ListIterMut<V, S> {
         ListIterMut {
             nodes: &mut self.nodes,
-            cur: cur.0,
+            cur,
         }
     }
 
@@ -221,72 +236,85 @@ where
     pub unsafe fn iter_pos_from(&self, cur: ListPos) -> ListPosIter<V, S> {
         ListPosIter {
             nodes: &self.nodes,
-            cur: cur.0,
+            cur,
         }
     }
 
-    /// # Safety
-    ///
-    /// Undefined behavior if `cur` is invalid.
-    pub unsafe fn get_next_unchecked(&self, cur: ListPos) -> Option<(ListPos, &V)> {
-        if !cur.is_end() {
-            let cur_node = self.nodes.get_unchecked(cur.0);
-            let next = ListPos(cur_node.next);
-            Some((next, &cur_node.value))
-        } else {
-            None
+    /// Retrieves shared reference to the value at the given position
+    /// and the next position of it.
+    /// If the given position is unknown position like out of bounds,
+    /// Returns None.
+    pub fn iter_next(&self, cur: ListPos) -> Option<(ListPos, &V)> {
+        if cur.is_end() {
+            return None;
         }
+        self.nodes
+            .get(cur.into_inner())
+            .map(|cur_node| (cur_node.next, &cur_node.value))
     }
 
-    /// # Safety
-    ///
-    /// Undefined behavior if `cur` is invalid.
-    pub unsafe fn get_next_unchecked_mut(&mut self, cur: ListPos) -> Option<(ListPos, &mut V)> {
-        if !cur.is_end() {
-            let cur_node = self.nodes.get_unchecked_mut(cur.0);
-            let next = ListPos(cur_node.next);
-            Some((next, &mut cur_node.value))
-        } else {
-            None
+    /// Retrieves mutable reference to the value at the given position
+    /// and the next position of it.
+    /// If the given position is unknown position like out of bounds,
+    /// Returns None.
+    pub fn iter_next_mut(&mut self, cur: ListPos) -> Option<(ListPos, &mut V)> {
+        if cur.is_end() {
+            return None;
         }
+        self.nodes
+            .get_mut(cur.into_inner())
+            .map(|cur_node| (cur_node.next, &mut cur_node.value))
     }
 
+    /// Returns first position.
+    /// Note that the first position may be `ListPos::end()` if the list has no items in it.
+    /// Otherwise, it must be a valid position.
+    //
+    // Acturally, list must have dummy head even if it's just created.
     pub fn get_first_position(&self) -> ListPos {
-        ListPos(self.get_first_index())
+        // Safety: Dummy head occupies `ListPos::end()` so accessing it is safe.
+        // See constructor for more details.
+        let dummy_head_idx = ListPos::end().into_inner();
+        unsafe { self.nodes.get_unchecked(dummy_head_idx).next }
     }
 
+    /// Retrieves shared reference to the value at the given position
+    /// or returns None if the position is `ListPos::end()`.
+    ///
     /// # Safety
     ///
-    /// Undefined behavior if `index` is invalid.
-    unsafe fn get_value(&self, index: usize) -> Option<&V> {
-        if index != 0 {
-            let node = self.nodes.get_unchecked(index);
+    /// Undefined behavior if the position is not valid.
+    /// Valid position means position pointing to actual value or is `ListPos::end()`.
+    unsafe fn get_value_unchecked(&self, pos: ListPos) -> Option<&V> {
+        if !pos.is_end() {
+            let node = self.nodes.get_unchecked(pos.into_inner());
             Some(&node.value)
         } else {
             None
         }
     }
 
+    /// Retrieves mutable reference to the value at the given position
+    /// or returns None if the position is `ListPos::end()`.
+    ///
     /// # Safety
     ///
-    /// Undefined behavior if `index` is invalid.
-    unsafe fn get_value_mut(&mut self, index: usize) -> Option<&mut V> {
-        if index != 0 {
-            let node = self.nodes.get_unchecked_mut(index);
+    /// Undefined behavior if the position is not valid.
+    /// Valid position means position pointing to actual value or is `ListPos::end()`.
+    unsafe fn get_value_unchecked_mut(&mut self, pos: ListPos) -> Option<&mut V> {
+        if !pos.is_end() {
+            let node = self.nodes.get_unchecked_mut(pos.into_inner());
             Some(&mut node.value)
         } else {
             None
         }
     }
 
-    fn get_first_index(&self) -> usize {
-        // Safety: Default head node occupies 0-th slot.
-        unsafe { self.nodes.get_unchecked(0).next }
-    }
-
     fn get_default_head_node_mut(&mut self) -> &mut ListNode<V> {
-        // Safety: Default head node occupies 0-th slot.
-        unsafe { self.nodes.get_unchecked_mut(0) }
+        // Safety: Dummy head occupies `ListPos::end()` so accessing it is safe.
+        // See constructor for more details.
+        let dummy_head_idx = ListPos::end().into_inner();
+        unsafe { self.nodes.get_unchecked_mut(dummy_head_idx) }
     }
 }
 
@@ -308,7 +336,7 @@ where
         K: std::borrow::Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        self.map.get(key).map(|&index| ListPos(index))
+        self.map.get(key).copied()
     }
 
     pub fn get<Q>(&self, key: &Q) -> Option<&V>
@@ -333,7 +361,9 @@ where
         Q: Hash + Eq + ?Sized,
     {
         let node = self.get_node(key)?;
-        self.nodes.get(node.next).map(|node| &node.value)
+        self.nodes
+            .get(node.next.into_inner())
+            .map(|node| &node.value)
     }
 
     pub fn get_next_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
@@ -342,7 +372,9 @@ where
         Q: Hash + Eq + ?Sized,
     {
         let node = self.get_node(key)?;
-        self.nodes.get_mut(node.next).map(|node| &mut node.value)
+        self.nodes
+            .get_mut(node.next.into_inner())
+            .map(|node| &mut node.value)
     }
 
     /// Returns true if the value was successfully inserted.
@@ -354,18 +386,19 @@ where
         // Appends new tail node.
         let cur_index = self.nodes.add(ListNode {
             prev: self.tail,
-            next: 0,
+            next: ListPos::end(),
             value,
         });
+        let cur_pos = ListPos(cur_index);
 
         // Updates old tail node.
         // Safety: We control self.tail is always valid.
-        let old_tail = unsafe { self.nodes.get_unchecked_mut(self.tail) };
-        old_tail.next = cur_index;
-        self.tail = cur_index;
+        let old_tail = unsafe { self.nodes.get_unchecked_mut(self.tail.into_inner()) };
+        old_tail.next = cur_pos;
+        self.tail = cur_pos;
 
         // Updates imap.
-        self.map.insert(key, cur_index);
+        self.map.insert(key, cur_pos);
 
         true
     }
@@ -377,26 +410,27 @@ where
         }
 
         // Appends new first node (the next node of default head node).
-        let first_index = self.get_first_index();
+        let first_pos = self.get_first_position();
         let cur_index = self.nodes.add(ListNode {
-            prev: 0,
-            next: first_index,
+            prev: ListPos::end(),
+            next: first_pos,
             value,
         });
+        let cur_pos = ListPos(cur_index);
 
         // Updates old first node.
-        if first_index != 0 {
+        if !first_pos.is_end() {
             // Safety: first_index must be zero, which is default head node, or valid index.
-            let old_first = unsafe { self.nodes.get_unchecked_mut(first_index) };
-            old_first.prev = cur_index;
+            let old_first = unsafe { self.nodes.get_unchecked_mut(first_pos.into_inner()) };
+            old_first.prev = cur_pos;
         } else {
             // Current node may be the first tail node.
-            self.tail = cur_index;
+            self.tail = cur_pos;
         }
-        self.get_default_head_node_mut().next = cur_index;
+        self.get_default_head_node_mut().next = cur_pos;
 
         // Updates imap.
-        self.map.insert(key, cur_index);
+        self.map.insert(key, cur_pos);
 
         true
     }
@@ -413,29 +447,32 @@ where
             return false;
         }
 
-        if let Some(&after_index) = self.map.get(after) {
+        if let Some(&after_pos) = self.map.get(after) {
+            let after_idx = after_pos.into_inner();
+
             // Creates a new node.
             // Safety: Infallible.
-            let next_index = unsafe { self.nodes.get_unchecked_mut(after_index).next };
+            let next_pos = unsafe { self.nodes.get_unchecked_mut(after_idx).next };
             let cur_index = self.nodes.add(ListNode {
-                prev: after_index,
-                next: next_index,
+                prev: after_pos,
+                next: next_pos,
                 value,
             });
+            let cur_pos = ListPos(cur_index);
 
             // Updates links of `after` and `next` nodes.
             // Safety: Infallible.
             unsafe {
-                self.nodes.get_unchecked_mut(after_index).next = cur_index;
-                if next_index != 0 {
-                    self.nodes.get_unchecked_mut(next_index).prev = cur_index;
+                self.nodes.get_unchecked_mut(after_idx).next = cur_pos;
+                if !next_pos.is_end() {
+                    self.nodes.get_unchecked_mut(next_pos.into_inner()).prev = cur_pos;
                 } else {
-                    self.tail = cur_index;
+                    self.tail = cur_pos;
                 }
             }
 
             // Updates imap.
-            self.map.insert(key, cur_index);
+            self.map.insert(key, cur_pos);
 
             true
         } else {
@@ -488,16 +525,16 @@ where
         K: std::borrow::Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let (key, index) = self.map.remove_entry(key)?;
-        let old = unsafe { self.nodes.take(index).unwrap_unchecked() };
-        let prev_index = old.prev;
-        let next_index = old.next;
+        let (key, pos) = self.map.remove_entry(key)?;
+        let old = unsafe { self.nodes.take(pos.into_inner()).unwrap_unchecked() };
+        let prev_pos = old.prev;
+        let next_pos = old.next;
         unsafe {
-            self.nodes.get_unchecked_mut(prev_index).next = next_index;
-            if next_index != 0 {
-                self.nodes.get_unchecked_mut(next_index).prev = prev_index;
+            self.nodes.get_unchecked_mut(prev_pos.into_inner()).next = next_pos;
+            if !next_pos.is_end() {
+                self.nodes.get_unchecked_mut(next_pos.into_inner()).prev = prev_pos;
             } else {
-                self.tail = prev_index;
+                self.tail = prev_pos;
             }
         }
         Some((key, old.value))
@@ -508,8 +545,8 @@ where
         K: std::borrow::Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let index = self.map.get(key)?;
-        self.nodes.get(*index)
+        let pos = self.map.get(key)?;
+        self.nodes.get(pos.into_inner())
     }
 
     fn get_node_mut<Q>(&mut self, key: &Q) -> Option<&mut ListNode<V>>
@@ -517,8 +554,8 @@ where
         K: std::borrow::Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let index = self.map.get(key)?;
-        self.nodes.get_mut(*index)
+        let pos = self.map.get(key)?;
+        self.nodes.get_mut(pos.into_inner())
     }
 }
 
@@ -598,19 +635,23 @@ impl ListPos {
     pub const fn is_end(&self) -> bool {
         self.0 == 0
     }
+
+    pub const fn into_inner(self) -> usize {
+        self.0
+    }
 }
 
 #[derive(Debug, Clone)]
 struct ListNode<V> {
-    prev: usize,
-    next: usize,
+    prev: ListPos,
+    next: ListPos,
     value: V,
 }
 
 #[derive(Debug, Clone)]
 pub struct ListIter<'a, V, S> {
     nodes: &'a OptVec<ListNode<V>, S>,
-    cur: usize,
+    cur: ListPos,
 }
 
 impl<'a, V, S> Iterator for ListIter<'a, V, S>
@@ -620,9 +661,9 @@ where
     type Item = &'a V;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.cur != 0 {
+        if !self.cur.is_end() {
             // Safety: self.cur is always valid.
-            let node = unsafe { self.nodes.get_unchecked(self.cur) };
+            let node = unsafe { self.nodes.get_unchecked(self.cur.into_inner()) };
             self.cur = node.next;
             Some(&node.value)
         } else {
@@ -634,7 +675,7 @@ where
 #[derive(Debug)]
 pub struct ListIterMut<'a, V, S> {
     nodes: &'a mut OptVec<ListNode<V>, S>,
-    cur: usize,
+    cur: ListPos,
 }
 
 impl<'a, V, S> Iterator for ListIterMut<'a, V, S>
@@ -644,9 +685,9 @@ where
     type Item = &'a mut V;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.cur != 0 {
+        if !self.cur.is_end() {
             // Safety: self.cur is always valid.
-            let node = unsafe { self.nodes.get_unchecked_mut(self.cur) };
+            let node = unsafe { self.nodes.get_unchecked_mut(self.cur.into_inner()) };
             self.cur = node.next;
             let ptr = std::ptr::addr_of_mut!(node.value);
             // Safety: Infallible.
@@ -660,7 +701,7 @@ where
 #[derive(Debug, Clone)]
 pub struct ListPosIter<'a, V, S> {
     nodes: &'a OptVec<ListNode<V>, S>,
-    cur: usize,
+    cur: ListPos,
 }
 
 impl<'a, V, S> Iterator for ListPosIter<'a, V, S>
@@ -670,10 +711,10 @@ where
     type Item = ListPos;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.cur != 0 {
+        if !self.cur.is_end() {
             // Safety: self.cur is always valid.
-            let node = unsafe { self.nodes.get_unchecked(self.cur) };
-            let res = ListPos(self.cur);
+            let node = unsafe { self.nodes.get_unchecked(self.cur.into_inner()) };
+            let res = self.cur;
             self.cur = node.next;
             Some(res)
         } else {
@@ -741,7 +782,7 @@ mod tests {
         }
         // iterator from
         let cur = list.get_first_position();
-        let (next, v) = unsafe { list.get_next_unchecked_mut(cur).unwrap() };
+        let (next, v) = list.iter_next_mut(cur).unwrap();
         *v /= 2;
         for v in unsafe { list.iter_mut_from(next) } {
             *v /= 2;
