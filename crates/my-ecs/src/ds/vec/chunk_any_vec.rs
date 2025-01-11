@@ -1,10 +1,18 @@
 use super::{
-    super::types::{FnCloneRaw, FnDropRaw, TypeInfo},
+    super::{
+        raw::{
+            AsRawIter, FlatIter, FlatIterMut, FlatRawIter, ParFlatIter, ParFlatIterMut, RawIter,
+        },
+        types::{FnCloneRaw, FnDropRaw, TypeInfo},
+    },
     AnyVec,
 };
-use crate::util::PowerOfTwo;
+use crate::{
+    ds::raw::{AsFlatRawIter, ParFlatRawIter},
+    util::prelude::*,
+};
 use std::{
-    any::TypeId,
+    any::{self, TypeId},
     cmp, mem,
     ptr::{self, NonNull},
 };
@@ -28,7 +36,7 @@ pub struct ChunkAnyVec {
 
     /// If the type is zero sized, this value is 1 due to the first special chunk.
     /// Otherwise, this value is 0.
-    chunk_offset: u8,
+    chunk_offset: usize,
 
     /// Vector can grow as long as this value.
     max_cap: usize,
@@ -46,10 +54,7 @@ impl ChunkAnyVec {
             chunk_offset: 1,
         };
 
-        // Same limitation with `Vec` or `AnyVec`.
-        v.max_cap = isize::MAX as usize / v.chunks[0].padded_item_size();
-
-        // If the type is zero sized, we won't allocate any memory for the vector.
+        // If ZST, we won't allocate any memory for the vector.
         // But, adjust capacity like `Vec`.
         if v.is_zst() {
             v.chunk_len = PowerOfTwo::new(0).unwrap();
@@ -59,6 +64,9 @@ impl ChunkAnyVec {
         } else if v.chunk_len() > isize::MAX as usize {
             // We need to restrict isize::MAX + 1.
             panic!("chunk_len must be less than isize::MAX");
+        } else {
+            // Same limitation with `Vec` or `AnyVec`.
+            v.max_cap = isize::MAX as usize / v.chunks[0].item_size();
         }
 
         v
@@ -96,6 +104,18 @@ impl ChunkAnyVec {
         self.chunks[0].fn_clone()
     }
 
+    pub fn is_clone(&self) -> bool {
+        self.chunks[0].is_clone()
+    }
+
+    pub fn is_send(&self) -> bool {
+        self.chunks[0].is_send()
+    }
+
+    pub fn is_sync(&self) -> bool {
+        self.chunks[0].is_sync()
+    }
+
     pub fn is_type_of(&self, ty: &TypeId) -> bool {
         self.chunks[0].is_type_of(ty)
     }
@@ -116,6 +136,58 @@ impl ChunkAnyVec {
         self.chunk_len.get()
     }
 
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len() - self.chunk_offset
+    }
+
+    pub fn get_chunk(&self, ci: usize) -> Option<&AnyVec> {
+        self.chunks.get(ci + self.chunk_offset)
+    }
+
+    pub fn iter_of<T: 'static>(&self) -> FlatIter<'_, T> {
+        assert!(
+            self.is_type_of(&TypeId::of::<T>()),
+            "type doesn't match, contains {:?} but {:?} requested",
+            self.type_name(),
+            any::type_name::<T>()
+        );
+        // Safety: Vector contains type `T` data in it.
+        unsafe { AsFlatRawIter::iter_of(self) }
+    }
+
+    pub fn par_iter_of<T: 'static>(&self) -> ParFlatIter<'_, T> {
+        assert!(
+            self.is_type_of(&TypeId::of::<T>()),
+            "type doesn't match, contains {:?} but {:?} requested",
+            self.type_name(),
+            any::type_name::<T>()
+        );
+        // Safety: Vector contains type `T` data in it.
+        unsafe { AsFlatRawIter::par_iter_of(self) }
+    }
+
+    pub fn iter_mut_of<T: 'static>(&mut self) -> FlatIterMut<'_, T> {
+        assert!(
+            self.is_type_of(&TypeId::of::<T>()),
+            "type doesn't match, contains {:?} but {:?} requested",
+            self.type_name(),
+            any::type_name::<T>()
+        );
+        // Safety: Vector contains type `T` data in it.
+        unsafe { AsFlatRawIter::iter_mut_of(self) }
+    }
+
+    pub fn par_iter_mut_of<T: 'static>(&mut self) -> ParFlatIterMut<'_, T> {
+        assert!(
+            self.is_type_of(&TypeId::of::<T>()),
+            "type doesn't match, contains {:?} but {:?} requested",
+            self.type_name(),
+            any::type_name::<T>()
+        );
+        // Safety: Vector contains type `T` data in it.
+        unsafe { AsFlatRawIter::par_iter_mut_of(self) }
+    }
+
     pub fn reserve(&mut self, add_num: usize) {
         self.reserve_exact(add_num);
     }
@@ -124,17 +196,15 @@ impl ChunkAnyVec {
         let need_cap = self.len.saturating_add(add_num);
         if self.capacity() < need_cap {
             if need_cap > self.max_capacity() {
-                panic!(
-                    "can't allocate {need_cap} x {} bytes",
-                    self.padded_item_size()
-                );
+                panic!("can't allocate {need_cap} x {} bytes", self.item_size());
             }
 
             // Rounds up the target capacity to be a multiple of chunk length.
             // This operation doesn't overflow because cap and len are restricted.
             let new_cap = (need_cap + self.chunk_len() - 1) & !(self.chunk_len() - 1);
 
-            // If the new_cap is clamped by this operation, the last chunk length is same with the other length - 1.
+            // If the new_cap is clamped by this operation,
+            // the last chunk length will be the same as the others' - 1.
             let new_cap = cmp::min(new_cap, self.max_capacity());
 
             let mut remain = new_cap - self.capacity();
@@ -148,6 +218,45 @@ impl ChunkAnyVec {
 
             self.cap = new_cap;
         }
+    }
+
+    /// # Examples
+    ///
+    /// ```
+    /// # use my_ecs::prelude::*;
+    ///
+    /// let chunk_len = 4;
+    /// let mut v = ChunkAnyVec::new(tinfo!(i32), chunk_len);
+    /// assert_eq!(v.capacity(), 0);
+    ///
+    /// unsafe { v.push(1_i32) };
+    /// assert_eq!(v.capacity(), chunk_len);
+    ///
+    /// v.reserve(chunk_len);
+    /// assert_eq!(v.capacity(), chunk_len * 2);
+    ///
+    /// v.shrink_to_fit();
+    /// assert_eq!(v.capacity(), chunk_len);
+    ///
+    /// v.pop_drop();
+    /// v.shrink_to_fit();
+    /// assert_eq!(v.capacity(), 0);
+    /// ```
+    pub fn shrink_to_fit(&mut self) {
+        if self.is_zst() || self.len() == self.capacity() {
+            return;
+        }
+
+        let mut remain = self.capacity() - self.len();
+
+        unsafe {
+            while remain > 0 && remain >= self.chunks.last().unwrap_unchecked().capacity() {
+                let last = self.chunks.pop().unwrap_unchecked();
+                remain -= last.capacity();
+            }
+        }
+
+        self.cap = self.len() + remain;
     }
 
     /// # Safety
@@ -176,14 +285,30 @@ impl ChunkAnyVec {
         unsafe { self.set_len(self.len().checked_add(1).unwrap()) };
     }
 
-    pub fn push<T: 'static>(&mut self, mut value: T) {
+    /// # Safety
+    ///
+    /// `write` must write correct type on given buffer.
+    pub unsafe fn push_with<F>(&mut self, write: F)
+    where
+        F: FnOnce(*mut u8),
+    {
+        self.reserve(1);
+
+        let (ci, _) = self.index_2d(self.len());
+        self.chunks[ci].push_with(write);
+
+        // Safety: Infallible.
+        unsafe { self.set_len(self.len().checked_add(1).unwrap()) };
+    }
+
+    /// # Safety
+    ///
+    /// Type of the value `T` must be the same as the type the vector knows.
+    pub unsafe fn push<T: 'static>(&mut self, mut value: T) {
         debug_assert!(self.is_type_of(&TypeId::of::<T>()));
 
-        // Safety:: Infallible.
-        unsafe {
-            let ptr = NonNull::new_unchecked(&mut value as *mut T as *mut u8);
-            self.push_raw(ptr);
-        }
+        let ptr = NonNull::new_unchecked(&mut value as *mut T as *mut u8);
+        self.push_raw(ptr);
         mem::forget(value);
     }
 
@@ -199,11 +324,38 @@ impl ChunkAnyVec {
         self.chunks[ci].update_unchecked(ii, ptr);
     }
 
-    /// Don't forget to call destructor.
+    /// Removes the last item from the vector and writes it to the given
+    /// buffer, then returns `Some`.
+    ///
+    /// If removing is successful, caller becomes to own the item in the
+    /// buffer, so that caller must call `drop()` on it correctly.
+    /// Otherwise, returns `None` without change to the buffer.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use my_ecs::prelude::*;
+    ///
+    /// let chunk_len = 4;
+    /// let mut v = ChunkAnyVec::new(tinfo!(i32), chunk_len);
+    /// unsafe { v.push(42_i32) };
+    /// assert_eq!(v.len(), 1);
+    ///
+    /// let mut buf = 0_i32;
+    /// let res = unsafe { v.pop_raw(&mut buf as *mut i32 as *mut u8) };
+    /// assert!(res.is_some());
+    /// assert!(v.is_empty());
+    /// assert_eq!(buf, 42);
+    /// ```
     ///
     /// # Safety
     ///
-    /// `buf` must valid for writes of [`Self::item_size`] bytes.
+    /// Undefined behavior if conditions below are not met.
+    /// - `buf` must have enough size to be copied an item.
+    /// - When `Some` is returned, `buf` must be correctly handled as an item.
+    ///   For example, if an item should be dropped, caller must call drop() on
+    ///   it.
+    /// - When `None` is returned, `buf` must be correctly handled as it was.
     pub unsafe fn pop_raw(&mut self, buf: *mut u8) -> Option<()> {
         if self.is_empty() {
             None
@@ -215,7 +367,10 @@ impl ChunkAnyVec {
         }
     }
 
-    pub fn pop<T: 'static>(&mut self) -> Option<T> {
+    /// # Safety
+    ///
+    /// Type of the value `T` must be the same as the type the vector knows.
+    pub unsafe fn pop<T: 'static>(&mut self) -> Option<T> {
         if self.is_empty() {
             None
         } else {
@@ -235,6 +390,16 @@ impl ChunkAnyVec {
         }
     }
 
+    pub fn pop_forget(&mut self) -> Option<()> {
+        if self.is_empty() {
+            None
+        } else {
+            // Safety: Vector is not empty.
+            let chunk = unsafe { self._pop() };
+            chunk.pop_forget()
+        }
+    }
+
     /// Reduces length by 1 and returns the last chunk.
     /// Don't forget to call pop from the chunk.
     ///
@@ -251,34 +416,82 @@ impl ChunkAnyVec {
         unsafe { self.chunks.get_unchecked_mut(ci) }
     }
 
-    /// Don't forget to call destructor.
+    /// Removes an item at the given index from the vector and writes it to the
+    /// given buffer.
+    ///
+    /// Therefore the item is actually moved from the vector to the given
+    /// buffer. So caller must take care of calling drop on it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use my_ecs::prelude::*;
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    /// unsafe {
+    ///     v.push(0_i32);
+    ///     v.push(1_i32);
+    ///     v.push(2_i32);
+    /// }
+    /// assert_eq!(v.len(), 3);
+    ///
+    /// let mut buf = 3_i32;
+    /// unsafe { v.swap_remove_raw(0, &mut buf as *mut i32 as *mut u8) };
+    /// assert_eq!(buf, 0);
+    ///
+    /// unsafe {
+    ///     assert_eq!(v.pop::<i32>(), Some(1));
+    ///     assert_eq!(v.pop::<i32>(), Some(2));
+    /// }
+    /// ```
     ///
     /// # Panics
     ///
-    /// Panics if `index` is out of bound..
+    /// Panics if the given index is out of bounds.
     ///
     /// # Safety
     ///
-    /// `buf` must valid for writes of [`Self::item_size`] bytes.
+    /// Undefined behavior if conditions below are not met.
+    /// - `buf` must have enough size to be copied an item.
+    /// - When `Some` is returned, `buf` must be correctly handled as an item.
+    ///   For example, if an item should be dropped, caller must call drop() on
+    ///   it.
+    /// - When `None` is returned, `buf` must be correctly handled as it was.
     pub unsafe fn swap_remove_raw(&mut self, index: usize, buf: *mut u8) {
-        // len - 1 can overflow but it causes panic in swap().
-        self.swap(index, self.len() - 1);
+        // If index is out of bounds or len() - 1 overflows, swap() panics.
+        self.swap(index, self.len().wrapping_sub(1));
         self.pop_raw(buf);
     }
 
     /// # Panics
     ///
-    /// Panics if `index` is out of bound..
-    pub fn swap_remove<T: 'static>(&mut self, index: usize) -> T {
-        // len - 1 can overflow but it causes panic in swap().
-        self.swap(index, self.len() - 1);
+    /// Panics if `index` is out of bounds.
+    ///
+    /// # Safety
+    ///
+    /// Type of the value `T` must be the same as the type the vector knows.
+    pub unsafe fn swap_remove<T: 'static>(&mut self, index: usize) -> T {
+        // If index is out of bounds or len() - 1 overflows, swap() panics.
+        self.swap(index, self.len().wrapping_sub(1));
         self.pop().unwrap()
     }
 
+    /// # Panics
+    ///
+    /// Panics if `index` is out of bounds.
     pub fn swap_remove_drop(&mut self, index: usize) {
-        // len - 1 can overflow but it causes panic in swap().
-        self.swap(index, self.len() - 1);
+        // If index is out of bounds or len() - 1 overflows, swap() panics.
+        self.swap(index, self.len().wrapping_sub(1));
         self.pop_drop();
+    }
+
+    /// # Panics
+    ///
+    /// Panics if `index` is out of bounds.
+    pub fn swap_remove_forget(&mut self, index: usize) {
+        // If index is out of bounds or len() - 1 overflows, swap() panics.
+        self.swap(index, self.len().wrapping_sub(1));
+        self.pop_forget();
     }
 
     pub fn swap(&mut self, index0: usize, index1: usize) {
@@ -312,7 +525,10 @@ impl ChunkAnyVec {
         self.chunks[ci].get_raw_unchecked(ii)
     }
 
-    pub fn get<T: 'static>(&self, index: usize) -> Option<&T> {
+    /// # Safety
+    ///
+    /// Type of the value `T` must be the same as the type the vector knows.
+    pub unsafe fn get<T: 'static>(&self, index: usize) -> Option<&T> {
         if index < self.len() {
             let (ci, ii) = self.index_2d(index);
             // Type is checked here.
@@ -322,7 +538,10 @@ impl ChunkAnyVec {
         }
     }
 
-    pub fn get_mut<T: 'static>(&mut self, index: usize) -> Option<&mut T> {
+    /// # Safety
+    ///
+    /// Type of the value `T` must be the same as the type the vector knows.
+    pub unsafe fn get_mut<T: 'static>(&mut self, index: usize) -> Option<&mut T> {
         if index < self.len() {
             let (ci, ii) = self.index_2d(index);
             // Type is checked here.
@@ -332,7 +551,62 @@ impl ChunkAnyVec {
         }
     }
 
-    pub fn resize_with<T, F>(&mut self, new_len: usize, mut f: F)
+    /// # Safety
+    ///
+    /// Type of the value `T` must be the same as the type the vector knows.
+    pub unsafe fn resize<T>(&mut self, new_len: usize, value: T)
+    where
+        T: Clone + 'static,
+    {
+        self.resize_with(new_len, || value.clone());
+    }
+
+    /// # Safety
+    ///
+    /// Conditions below must be met.
+    /// - Type of value pointed by `ptr` must be the same as the type the vector
+    ///   knows.
+    /// - Type must implement [`Clone`].
+    pub unsafe fn resize_raw(&mut self, new_len: usize, val_ptr: NonNull<u8>) {
+        debug_assert!(self.is_clone());
+
+        if new_len > self.len() {
+            let mut remain = new_len - self.len();
+
+            self.reserve(remain);
+
+            let mut ci = if self.is_empty() {
+                self.chunk_offset
+            } else {
+                let (ci, _) = self.index_2d(self.len() - 1);
+                ci
+            };
+
+            while remain > 0 {
+                let clen = self.chunks[ci].len();
+                let partial = cmp::min(self.chunk_len() - clen, remain);
+                self.chunks[ci].resize_raw(clen + partial, val_ptr);
+
+                remain -= partial;
+                ci += 1;
+            }
+
+            unsafe {
+                self.set_len(new_len);
+            }
+        } else {
+            self.truncate(new_len);
+        }
+    }
+
+    /// Resizes the vector with values the given function generates.
+    ///
+    /// Generated values will be added in order.
+    ///
+    /// # Safety
+    ///
+    /// Type of the value `T` must be the same as the type the vector knows.
+    pub unsafe fn resize_with<T, F>(&mut self, new_len: usize, mut f: F)
     where
         T: 'static,
         F: FnMut() -> T,
@@ -344,13 +618,20 @@ impl ChunkAnyVec {
 
             self.reserve(remain);
 
-            while remain > 0 {
+            let mut ci = if self.is_empty() {
+                self.chunk_offset
+            } else {
                 let (ci, _) = self.index_2d(self.len() - 1);
+                ci
+            };
+
+            while remain > 0 {
                 let clen = self.chunks[ci].len();
                 let partial = cmp::min(self.chunk_len() - clen, remain);
                 self.chunks[ci].resize_with(clen + partial, &mut f);
 
                 remain -= partial;
+                ci += 1;
             }
 
             unsafe {
@@ -402,11 +683,6 @@ impl ChunkAnyVec {
         }
     }
 
-    /// See [`AnyVec::padded_item_size`].
-    pub(crate) fn padded_item_size(&self) -> usize {
-        self.chunks[0].padded_item_size()
-    }
-
     /// Creates a new chunk and allocate memory for the chunk.
     fn new_chunk(&self, cap: usize) -> AnyVec {
         let mut chunk = self.chunks[0].clone();
@@ -417,13 +693,71 @@ impl ChunkAnyVec {
     /// Converts 1D index into 2D index.
     const fn index_2d(&self, index: usize) -> (usize, usize) {
         (
-            self.chunk_len.quotient(index) + self.chunk_offset as usize,
+            self.chunk_len.quotient(index) + self.chunk_offset,
             self.chunk_len.remainder(index),
         )
     }
 
     const fn max_capacity(&self) -> usize {
         self.max_cap
+    }
+
+    #[inline]
+    unsafe fn fn_iter(this: NonNull<u8>, chunk_idx: usize) -> RawIter {
+        let this = this.cast::<ChunkAnyVec>().as_ref();
+        if let Some(chunk) = this.get_chunk(chunk_idx) {
+            chunk.iter()
+        } else {
+            RawIter::empty()
+        }
+    }
+
+    #[inline]
+    unsafe fn fn_find(this: NonNull<u8>, item_idx: usize) -> (RawIter, usize, usize) {
+        let this = this.cast::<ChunkAnyVec>().as_ref();
+        let (ci, ii) = this.index_2d(item_idx);
+        let iter = if let Some(chunk) = this.chunks.get(ci) {
+            chunk.iter()
+        } else {
+            RawIter::empty()
+        };
+        (iter, ci - this.chunk_offset, ii)
+    }
+}
+
+impl AsFlatRawIter for ChunkAnyVec {
+    /// # Safety
+    ///
+    /// Returned itereator is not bounded by lifetime.
+    /// But it actually relies on `&self`, so it must be used as if
+    /// it's borrowed.
+    unsafe fn iter(&self) -> FlatRawIter {
+        // Safety: Infallible.
+        let this = unsafe {
+            let ptr = self as *const _ as *const u8;
+            NonNull::new_unchecked(ptr.cast_mut())
+        };
+
+        let chunks = self.chunk_count();
+        let stride = self.item_size().max(self.align());
+
+        FlatRawIter::new(
+            this,
+            chunks,
+            Self::fn_iter,
+            Self::fn_find,
+            stride,
+            self.len(),
+        )
+    }
+
+    /// # Safety
+    ///
+    /// Returned itereator is not bounded by lifetime.
+    /// But it actually relies on `&self`, so it must be used as if
+    /// it's borrowed.
+    unsafe fn par_iter(&self) -> ParFlatRawIter {
+        ParFlatRawIter(self.iter())
     }
 }
 
@@ -434,85 +768,271 @@ mod tests {
 
     #[test]
     fn test_chunkanyvec_push_pop() {
-        let chunk_num = 4 * 4;
-        let chunk_len = 2;
-        let mut v = ChunkAnyVec::new(tinfo!(usize), chunk_len);
-        for r in 0..chunk_num {
-            for c in 0..chunk_len {
-                let index = r * chunk_len + c;
-                let value = r * chunk_len + c;
+        // Safety: Type is correct.
+        unsafe {
+            let chunk_num = 4 * 4;
+            let chunk_len = 2;
+            let mut v = ChunkAnyVec::new(tinfo!(usize), chunk_len);
+            for r in 0..chunk_num {
+                for c in 0..chunk_len {
+                    let index = r * chunk_len + c;
+                    let value = r * chunk_len + c;
 
-                v.push::<usize>(value);
+                    v.push::<usize>(value);
 
-                assert_eq!(index + 1, v.len());
-                assert_eq!(Some(&value), v.get(index));
-                assert_eq!((r + 1) * chunk_len, v.capacity());
+                    assert_eq!(index + 1, v.len());
+                    assert_eq!(Some(&value), v.get(index));
+                    assert_eq!((r + 1) * chunk_len, v.capacity());
+                }
             }
-        }
 
-        assert_eq!(chunk_num * chunk_len, v.capacity());
-        assert_eq!(
-            v.capacity(),
-            v.chunks.iter().map(|chunk| chunk.capacity()).sum()
-        );
+            assert_eq!(chunk_num * chunk_len, v.capacity());
+            assert_eq!(
+                v.capacity(),
+                v.chunks.iter().map(|chunk| chunk.capacity()).sum::<usize>()
+            );
 
-        for r in (chunk_num / 4..chunk_num).rev() {
-            for c in (0..chunk_len).rev() {
-                let value = r * chunk_len + c;
-                assert_eq!(Some(value), v.pop());
+            for r in (chunk_num / 4..chunk_num).rev() {
+                for c in (0..chunk_len).rev() {
+                    let value = r * chunk_len + c;
+                    assert_eq!(Some(value), v.pop());
+                }
             }
-        }
 
-        v.shrink();
-        assert_eq!(chunk_num / 4 * chunk_len, v.len());
-        assert_eq!(v.len() * 2, v.capacity());
+            v.shrink();
+            assert_eq!(chunk_num / 4 * chunk_len, v.len());
+            assert_eq!(v.len() * 2, v.capacity());
+        }
     }
 
     #[test]
     fn test_chunkanyvec_swapremove() {
-        let chunk_size = 8;
-        let item_num = 13;
-        let chunk_num = (item_num as f32 / chunk_size as f32).ceil() as usize;
-        let mut v = ChunkAnyVec::new(tinfo!(i32), chunk_size);
-        let mut expect = vec![];
-        for i in 0..item_num {
-            v.push(i);
-            expect.push(i);
+        // Safety: Type is correct.
+        unsafe {
+            let chunk_size = 8;
+            let item_num = 13;
+            let chunk_num = (item_num as f32 / chunk_size as f32).ceil() as usize;
+            let mut v = ChunkAnyVec::new(tinfo!(i32), chunk_size);
+            let mut expect = vec![];
+            for i in 0..item_num {
+                v.push(i);
+                expect.push(i);
+            }
+
+            enum Pos {
+                Start,
+                Middle,
+                End,
+            }
+
+            let mut pos = Pos::Start;
+            for _i in 0..item_num {
+                let index = match pos {
+                    Pos::Start => {
+                        pos = Pos::Middle;
+                        0
+                    }
+                    Pos::Middle => {
+                        pos = Pos::End;
+                        v.len() / 2
+                    }
+                    Pos::End => {
+                        pos = Pos::Start;
+                        v.len() - 1
+                    }
+                };
+                let expect_val = expect.swap_remove(index);
+                let popped_val: i32 = v.swap_remove(index);
+
+                assert_eq!(expect_val, popped_val);
+                assert_eq!(expect.len(), v.len());
+                for j in 0..v.len() {
+                    assert_eq!(expect.get(j), v.get(j));
+                }
+            }
+
+            assert!(v.is_empty());
+            assert_eq!(chunk_num * chunk_size, v.capacity());
         }
+    }
 
-        enum Pos {
-            Start,
-            Middle,
-            End,
+    #[test]
+    fn test_chunkanyvec_resize() {
+        // Safety: Type is correct.
+        unsafe {
+            // Tests resize().
+            let mut v = ChunkAnyVec::new(tinfo!(i32), 8);
+            assert!(v.is_empty());
+
+            // Resizes the vector.
+            v.resize(20, 42);
+            assert_eq!(v.len(), 20);
+            for val in v.iter_of::<i32>() {
+                assert_eq!(*val, 42);
+            }
+
+            // Tests resize_raw().
+            #[derive(Clone)]
+            struct Val(String);
+
+            let mut v = ChunkAnyVec::new(crate::tinfo!(Val), 8);
+
+            let val = Val("42".to_owned());
+            let val_ptr = NonNull::new(&val as *const Val as *mut Val as *mut u8).unwrap();
+            v.resize_raw(20, val_ptr);
+            assert_eq!(v.len(), 20);
+
+            for val in v.iter_of::<Val>() {
+                assert_eq!(val.0.as_str(), "42");
+            }
         }
+    }
 
-        let mut pos = Pos::Start;
-        for _i in 0..item_num {
-            let index = match pos {
-                Pos::Start => {
-                    pos = Pos::Middle;
-                    0
-                }
-                Pos::Middle => {
-                    pos = Pos::End;
-                    v.len() / 2
-                }
-                Pos::End => {
-                    pos = Pos::Start;
-                    v.len() - 1
-                }
-            };
-            let expect_val = expect.swap_remove(index);
-            let popped_val = v.swap_remove(index);
+    #[test]
+    fn test_chunkanyvec_iter() {
+        // Safety: Type is correct.
+        unsafe {
+            const CHUNK_SIZES: &[usize] = &[1, 2, 4, 8];
+            const CHUNK_COUNTS: &[usize] = &[1, 2, 3];
 
-            assert_eq!(expect_val, popped_val);
-            assert_eq!(expect.len(), v.len());
-            for j in 0..v.len() {
-                assert_eq!(expect.get(j), v.get(j));
+            for chunk_size in CHUNK_SIZES {
+                for chunk_count in CHUNK_COUNTS {
+                    let mut v = ChunkAnyVec::new(tinfo!(i32), *chunk_size);
+                    let num = (chunk_size * chunk_count) as i32;
+                    for i in 0..num {
+                        v.push(i);
+                    }
+
+                    test_iter(
+                        v.iter_of::<i32>(),
+                        (0..num).into_iter(),
+                        |l: &i32, r: i32| *l == r,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_chunkanyvec_iter_split() {
+        use rayon::iter::plumbing::Producer;
+        use std::collections::VecDeque;
+        use std::ops::Range;
+
+        // Safety: Type is correct.
+        unsafe {
+            const CHUNK_COUNTS: &[usize] = &[1, 2, 3];
+            const CHUNK_SIZES: &[usize] = &[1, 2, 4, 8];
+            const TARGET_CHUNK_LENS: &[usize] = &[1, 2, 3, 4];
+
+            for chunk_size in CHUNK_SIZES {
+                for chunk_count in CHUNK_COUNTS {
+                    let mut v = ChunkAnyVec::new(tinfo!(i32), *chunk_size);
+                    let num = (chunk_size * chunk_count) as i32;
+                    for i in 0..num {
+                        v.push(i);
+                    }
+
+                    let iter = v.par_iter_of::<i32>();
+                    let mut pieces = VecDeque::new();
+                    pieces.push_front((iter, 0..num));
+
+                    for target_chunk_len in TARGET_CHUNK_LENS {
+                        inner(pieces.clone(), *target_chunk_len);
+                    }
+                }
             }
         }
 
-        assert!(v.is_empty());
-        assert_eq!(chunk_num * chunk_size, v.capacity());
+        fn inner(mut pieces: VecDeque<(ParFlatIter<i32>, Range<i32>)>, target_chunk_len: usize) {
+            loop {
+                let (piece, range) = pieces.pop_front().unwrap();
+                if piece.len() <= target_chunk_len {
+                    break;
+                }
+
+                let mid = piece.len() / 2;
+                let (lpiece, rpiece) = piece.split_at(mid);
+
+                let mid = (range.start + range.end) / 2;
+                let lrange = range.start..mid;
+                let rrange = mid..range.end;
+
+                if lpiece.len() <= target_chunk_len {
+                    pieces.push_back((lpiece, lrange))
+                } else {
+                    pieces.push_front((lpiece, lrange));
+                }
+                if rpiece.len() <= target_chunk_len {
+                    pieces.push_back((rpiece, rrange));
+                } else {
+                    pieces.push_front((rpiece, rrange));
+                }
+            }
+
+            for (piece, range) in pieces {
+                test_iter(piece.into_seq(), range, |l: &i32, r: i32| *l == r)
+            }
+        }
+    }
+
+    #[test]
+    fn test_chunkanyvec_zst() {
+        // Safety: Type is correct.
+        unsafe {
+            let chunk_size = 8; // no effect.
+            let mut v = ChunkAnyVec::new(crate::tinfo!(()), chunk_size);
+            assert!(v.is_empty());
+            for i in 1..=chunk_size {
+                v.push(());
+                assert_eq!(v.len(), i);
+            }
+
+            // Not allocated.
+            assert_eq!(
+                v.get_chunk(0).unwrap().get_ptr(0),
+                AnyVec::aligned_dangling(crate::tinfo!(()).align).as_ptr()
+            );
+
+            for i in (1..=chunk_size).rev() {
+                v.pop_drop();
+                assert_eq!(v.len(), i - 1);
+            }
+        }
+    }
+
+    fn test_iter<I, J, II, JI, F>(iter: I, expect: J, eq: F)
+    where
+        I: Iterator<Item = II> + ExactSizeIterator + DoubleEndedIterator + Clone,
+        J: Iterator<Item = JI> + ExactSizeIterator + DoubleEndedIterator + Clone,
+        II: std::cmp::PartialEq + std::fmt::Debug,
+        JI: std::cmp::PartialEq + std::fmt::Debug,
+        F: Fn(II, JI) -> bool,
+    {
+        // `iter` and `expect` must have the same number of items.
+        assert_eq!(iter.len(), expect.len());
+
+        // Traverses forward.
+        let mut zipped = iter.clone().zip(expect.clone());
+        assert!(zipped.all(|(l, r)| eq(l, r)));
+
+        // Traverses backward.
+        let mut zipped = iter.clone().rev().zip(expect.clone().rev());
+        assert!(zipped.all(|(l, r)| eq(l, r)));
+
+        // Traverses forward and backward alternately.
+        let mut zipped = iter.zip(expect);
+        let mut forward = true;
+        let n = zipped.len();
+        for _ in 0..n {
+            let pair = if forward {
+                zipped.next()
+            } else {
+                zipped.next_back()
+            };
+            let (l, r) = pair.unwrap();
+            assert!(eq(l, r));
+            forward = !forward;
+        }
     }
 }

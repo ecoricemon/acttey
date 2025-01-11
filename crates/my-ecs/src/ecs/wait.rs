@@ -1,35 +1,36 @@
-use super::{component::ComponentKey, resource::ResourceKey};
-use crate::ds::{generational::GenQueue, vec::OptVec};
-use std::{fmt::Debug, hash::BuildHasher, ops::Deref, sync::Arc};
+use super::{ent::entity::EntityIndex, resource::ResourceIndex};
+use crate::ds::prelude::*;
+use std::{fmt::Debug, hash::BuildHasher, ops::Deref};
 
-/// A structure containing [`WaitQueue`]s for each component, resource, and entity.
+/// A struct containing [`WaitQueue`]s for each component, resource, and entity.
 /// Their indices are the same with the ones from the data containers.
-/// For instance, [`EntityDict`](super::entity::EntityDict) manages indices for each entity and component.
-/// This structure follows the exact same indices by taking them over.
 #[derive(Debug)]
-pub struct WaitQueuePack<S> {
+pub(super) struct WaitQueues<S> {
     ent_queues: OptVec<OptVec<WaitQueue, S>, S>,
     res_queues: OptVec<WaitQueue, S>,
+    gen: u64,
 }
 
-impl<S> WaitQueuePack<S>
+impl<S> WaitQueues<S>
 where
     S: Default,
 {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             ent_queues: OptVec::new(),
             res_queues: OptVec::new(),
+            gen: 0,
         }
     }
 }
 
-impl<S> WaitQueuePack<S>
+impl<S> WaitQueues<S>
 where
     S: BuildHasher,
 {
     /// Takes O(n) time.
-    pub fn is_all_queue_empty(&self) -> bool {
+    #[cfg(debug_assertions)]
+    pub(super) fn is_all_queue_empty(&self) -> bool {
         self.ent_queues
             .iter_occupied()
             .flat_map(|(_, cols)| cols.iter_occupied())
@@ -40,245 +41,313 @@ where
                 .all(|(_, col)| col.is_empty())
     }
 
-    pub fn initialize_resource_queue(&mut self, index: usize) {
+    pub(super) fn initialize_resource_queue(&mut self, index: usize) {
         self.res_queues.extend_set(index, WaitQueue::new());
     }
 
-    pub(super) fn enqueue(&mut self, wait: &mut WaitRequest) -> bool {
-        wait.clean = if wait.clean {
-            self.enqueue_begin(wait)
+    pub(super) fn enqueue(&mut self, wait: &WaitIndices, retry: &mut WaitRetryIndices) -> bool {
+        retry.clean = if retry.clean {
+            self._enqueue(wait, retry)
         } else {
-            self.enqueue_again(wait)
+            self._check_availability(retry)
         };
-        wait.clean
+        retry.clean
     }
 
-    pub(super) fn dequeue(&mut self, wait: &WaitRequest) {
-        // Pops from *read* or *write* wait queues.
-        fn inner_comp<S>(
-            ent_queues: &mut OptVec<OptVec<WaitQueue, S>, S>,
-            indices: &[(usize, usize)],
-        ) where
+    pub(super) fn dequeue(&mut self, wait: &WaitIndices) {
+        // Dequeues component read & write requests from their wait queues.
+        let wait_read_iter = wait.read.iter().map(|(ei, ci)| (ei.index(), *ci));
+        let wait_write_iter = wait.write.iter().map(|(ei, ci)| (ei.index(), *ci));
+        dequeue_comp(&mut self.ent_queues, wait_read_iter);
+        dequeue_comp(&mut self.ent_queues, wait_write_iter);
+
+        // Dequeues resource read & write requests from their wait queues.
+        dequeue_res(
+            &mut self.res_queues,
+            wait.res_read.iter().map(ResourceIndex::index),
+        );
+        dequeue_res(
+            &mut self.res_queues,
+            wait.res_write.iter().map(ResourceIndex::index),
+        );
+
+        // Dequeues entity write requests from their wait queues.
+        dequeue_ent(
+            &mut self.ent_queues,
+            wait.ent_write.iter().map(EntityIndex::index),
+        );
+
+        // Increases generation.
+        self.gen += 1;
+
+        // === Internal helper functions ===
+
+        /// Dequeues an item from componenet wait queues.
+        /// The component queues are picked up by `wait` indices.
+        fn dequeue_comp<S, I>(ent_queues: &mut OptVec<OptVec<WaitQueue, S>, S>, wait_iter: I)
+        where
             S: BuildHasher,
+            I: Iterator<Item = (usize, usize)>,
         {
-            for (enti, coli) in indices.iter().cloned() {
-                let comp_queues = ent_queues.get_mut(enti).unwrap();
-                let queue = comp_queues.get_mut(coli).unwrap();
+            for (ei, ci) in wait_iter {
+                let comp_queues = ent_queues.get_mut(ei).unwrap();
+                let queue = comp_queues.get_mut(ci).unwrap();
                 queue.pop();
             }
         }
 
-        // Pops from *res_read* or *res_write* wait queues.
-        fn inner_res<S>(res_queues: &mut OptVec<WaitQueue, S>, indices: &[usize])
+        /// Dequeues an item from resource wait queues.
+        /// The component queues are picked up by `wait` indices.
+        fn dequeue_res<S, I>(res_queues: &mut OptVec<WaitQueue, S>, wait_iter: I)
         where
             S: BuildHasher,
+            I: Iterator<Item = usize>,
         {
-            for resi in indices.iter().cloned() {
+            for resi in wait_iter {
                 let queue = res_queues.get_mut(resi).unwrap();
                 queue.pop();
             }
         }
 
-        // Pops from *ent_write* wait queues.
-        fn inner_ent<S>(ent_queues: &mut OptVec<OptVec<WaitQueue, S>, S>, indices: &[usize])
+        /// Dequeues an item from component wait queues.
+        /// The component queues are picked up by `wait` indices.
+        fn dequeue_ent<S, I>(ent_queues: &mut OptVec<OptVec<WaitQueue, S>, S>, wait_iter: I)
         where
             S: BuildHasher,
+            I: Iterator<Item = usize>,
         {
-            for enti in indices.iter().cloned() {
-                let comp_queues = ent_queues.get_mut(enti).unwrap();
+            for ei in wait_iter {
+                let comp_queues = ent_queues.get_mut(ei).unwrap();
                 for (_, queue) in comp_queues.iter_occupied_mut() {
                     queue.pop();
                 }
             }
         }
-
-        // Dequeues component read & write requests from their wait queues.
-        inner_comp(&mut self.ent_queues, &wait.read);
-        inner_comp(&mut self.ent_queues, &wait.write);
-
-        // Dequeues resource read & write requests from their wait queues.
-        inner_res(&mut self.res_queues, &wait.res_read);
-        inner_res(&mut self.res_queues, &wait.res_write);
-
-        // Dequeues entity write requests from their wait queues.
-        inner_ent(&mut self.ent_queues, &wait.ent_write);
     }
 
-    fn enqueue_begin(&mut self, wait: &mut WaitRequest) -> bool {
-        // Pushes *read* or *write* into their corresponding wait queues.
-        fn inner_comp<S>(
-            ent_queues: &mut OptVec<OptVec<WaitQueue, S>, S>,
-            indices: &[(usize, usize)],
-            rw: RW,
-            try_again: &mut Vec<(u64, usize, usize)>,
-        ) -> bool
-        where
-            S: BuildHasher,
-        {
-            let mut all_available = true;
-            for (enti, coli) in indices.iter().cloned() {
-                let comp_queues = ent_queues.get_mut(enti).unwrap();
-                let queue = comp_queues.get_mut(coli).unwrap();
-                let target_gen = queue.push(rw);
-                if target_gen != queue.gen() {
-                    try_again.push((target_gen, enti, coli));
-                    all_available = false;
-                }
-            }
-            all_available
-        }
-
-        // Pushes *res_read* or *res_write* into their corresponding wait queues.
-        fn inner_res<S>(
-            res_queues: &mut OptVec<WaitQueue, S>,
-            indices: &[usize],
-            rw: RW,
-            try_again: &mut Vec<(u64, usize)>,
-        ) -> bool
-        where
-            S: BuildHasher,
-        {
-            let mut all_available = true;
-            for resi in indices.iter().cloned() {
-                let queue = res_queues.get_mut(resi).unwrap();
-                let target_gen = queue.push(rw);
-                if target_gen != queue.gen() {
-                    try_again.push((target_gen, resi));
-                    all_available = false;
-                }
-            }
-            all_available
-        }
-
-        // Pushes *ent_write* into their corresponding wait queues.
-        fn inner_ent<S>(
-            ent_queues: &mut OptVec<OptVec<WaitQueue, S>, S>,
-            indices: &[usize],
-            try_again: &mut Vec<(u64, usize, usize)>,
-        ) -> bool
-        where
-            S: BuildHasher,
-        {
-            let mut all_available = true;
-            for enti in indices.iter().cloned() {
-                let comp_queues = ent_queues.get_mut(enti).unwrap();
-                for (coli, queue) in comp_queues.iter_occupied_mut() {
-                    let target_gen = queue.push(RW::Write);
-                    if target_gen != queue.gen() {
-                        try_again.push((target_gen, enti, coli));
-                        all_available = false;
-                    }
-                }
-            }
-            all_available
-        }
-
+    /// Enqueues requests for access authority of components or resources
+    /// according to `wait` indices.
+    /// If they're good to be accssed now, returns true.
+    /// Otherwise, returns false, and then failed indices will be inserted into `retry`.
+    fn _enqueue(&mut self, wait: &WaitIndices, retry: &mut WaitRetryIndices) -> bool {
         let mut res = true;
 
         // Enqueues component read & write requests into their wait queues.
-        res &= inner_comp(
+        let wait_read_iter = wait.read.iter().map(|(ei, ci)| (ei.index(), *ci));
+        let wait_write_iter = wait.write.iter().map(|(ei, ci)| (ei.index(), *ci));
+        res &= enqueue_comp(
             &mut self.ent_queues,
-            &wait.read,
             RW::Read,
-            &mut wait.read_again,
+            wait_read_iter,
+            &mut retry.read,
         );
-        res &= inner_comp(
+        res &= enqueue_comp(
             &mut self.ent_queues,
-            &wait.write,
             RW::Write,
-            &mut wait.write_again,
+            wait_write_iter,
+            &mut retry.write,
         );
 
         // Enqueues resource read & write requests into their wait queues.
-        res &= inner_res(
+        let wait_res_read_iter = wait.res_read.iter().map(ResourceIndex::index);
+        let wait_res_write_iter = wait.res_write.iter().map(ResourceIndex::index);
+        res &= enqueue_res(
             &mut self.res_queues,
-            &wait.res_read,
             RW::Read,
-            &mut wait.res_read_again,
+            wait_res_read_iter,
+            &mut retry.res_read,
         );
-        res &= inner_res(
+        res &= enqueue_res(
             &mut self.res_queues,
-            &wait.res_write,
             RW::Write,
-            &mut wait.res_write_again,
+            wait_res_write_iter,
+            &mut retry.res_write,
         );
 
         // Enqueues entity write requests into their wait queues.
-        res &= inner_ent(
+        res &= enqueue_ent(
             &mut self.ent_queues,
-            &wait.ent_write,
-            &mut wait.ent_write_again,
+            wait.ent_write.iter().map(EntityIndex::index),
+            &mut retry.ent_write,
         );
 
-        res
+        return res;
+
+        // === Internal helper functions ===
+
+        /// Enqueues waiting signal into component wait queues according to `wait` indices.
+        /// If all of them are positioned to the front of corresponding queues,
+        /// returns true, which means they're allowed to access corresponding components.
+        /// Otherwise, returns false and then indices needed to retry later
+        /// are pushed `retry`.
+        ///
+        /// # Panics
+        ///
+        /// Panics if any index in `wait` is out of bounds.
+        fn enqueue_comp<S, I>(
+            ent_queues: &mut OptVec<OptVec<WaitQueue, S>, S>,
+            rw: RW,
+            wait_iter: I,
+            retry: &mut Vec<(u64, usize, usize)>,
+        ) -> bool
+        where
+            S: BuildHasher,
+            I: Iterator<Item = (usize, usize)>,
+        {
+            debug_assert!(retry.is_empty());
+
+            let mut available = true;
+            for (ei, ci) in wait_iter {
+                let comp_queues = ent_queues.get_mut(ei).unwrap();
+                let queue = comp_queues.get_mut(ci).unwrap();
+                let target_gen = queue.push(rw);
+                if target_gen != queue.gen() {
+                    retry.push((target_gen, ei, ci));
+                    available = false;
+                }
+            }
+            available
+        }
+
+        /// Enqueues waiting signal into resource wait queues according to `wait` indices.
+        /// If all of them are positioned to the front of corresponding queues,
+        /// returns true, which means they're allowed to access corresponding resources.
+        /// Otherwise, returns false and then indices needed to retry later
+        /// are pushed `retry`.
+        ///
+        /// # Panics
+        ///
+        /// Panics if any index in `wait` is out of bounds.
+        fn enqueue_res<S, I>(
+            res_queues: &mut OptVec<WaitQueue, S>,
+            rw: RW,
+            wait_iter: I,
+            retry: &mut Vec<(u64, usize)>,
+        ) -> bool
+        where
+            S: BuildHasher,
+            I: Iterator<Item = usize>,
+        {
+            debug_assert!(retry.is_empty());
+
+            let mut available = true;
+            for ri in wait_iter {
+                let queue = res_queues.get_mut(ri).unwrap();
+                let target_gen = queue.push(rw);
+                if target_gen != queue.gen() {
+                    retry.push((target_gen, ri));
+                    available = false;
+                }
+            }
+            available
+        }
+
+        /// Enqueues waiting signal into component wait queues according to `wait` indices.
+        /// If all of them are positioned to the front of corresponding queues,
+        /// returns true, which means they're allowed to access corresponding components.
+        /// Otherwise, returns false and then indices needed to retry later
+        /// are pushed `retry`.
+        ///
+        /// # Panics
+        ///
+        /// Panics if any index in `wait` is out of bounds.
+        fn enqueue_ent<S, I>(
+            ent_queues: &mut OptVec<OptVec<WaitQueue, S>, S>,
+            wait_iter: I,
+            retry: &mut Vec<(u64, usize, usize)>,
+        ) -> bool
+        where
+            S: BuildHasher,
+            I: Iterator<Item = usize>,
+        {
+            debug_assert!(retry.is_empty());
+
+            let mut available = true;
+            for ei in wait_iter {
+                let comp_queues = ent_queues.get_mut(ei).unwrap();
+                for (ci, queue) in comp_queues.iter_occupied_mut() {
+                    let target_gen = queue.push(RW::Write);
+                    if target_gen != queue.gen() {
+                        retry.push((target_gen, ei, ci));
+                        available = false;
+                    }
+                }
+            }
+            available
+        }
     }
 
-    fn enqueue_again(&mut self, wait: &mut WaitRequest) -> bool {
-        // Checks *reads_again*, *writes_again*, or *ent_write* one more time.
-        fn inner_comp<S>(
+    fn _check_availability(&mut self, retry: &mut WaitRetryIndices) -> bool {
+        // Checks all requests once again.
+        return check_comp(&self.ent_queues, &mut retry.read)
+            && check_comp(&self.ent_queues, &mut retry.write)
+            && check_res(&self.res_queues, &mut retry.res_read)
+            && check_res(&self.res_queues, &mut retry.res_write)
+            && check_comp(&self.ent_queues, &mut retry.ent_write);
+
+        // === Internal helper functions ===
+
+        /// Checks component availability according to `retry` indices.
+        /// Passed items in `retry` will be removed, but the failed items
+        /// will be left, so they'll be checked again later.
+        /// If all items are ejected, returns true.
+        fn check_comp<S>(
             ent_queues: &OptVec<OptVec<WaitQueue, S>, S>,
-            try_again: &mut Vec<(u64, usize, usize)>,
+            retry: &mut Vec<(u64, usize, usize)>,
         ) -> bool
         where
             S: BuildHasher,
         {
-            while let Some((target_gen, enti, coli)) = try_again.pop() {
-                let comp_queues = ent_queues.get(enti).unwrap();
-                let queue = comp_queues.get(coli).unwrap();
+            while let Some((target_gen, ei, ci)) = retry.pop() {
+                let comp_queues = ent_queues.get(ei).unwrap();
+                let queue = comp_queues.get(ci).unwrap();
                 if target_gen != queue.gen() {
-                    try_again.push((target_gen, enti, coli));
+                    retry.push((target_gen, ei, ci));
                     return false;
                 }
             }
             true
         }
 
-        // Checks *res_reads_again* or *res_writes_again* one more time.
-        fn inner_res<S>(
-            res_queues: &OptVec<WaitQueue, S>,
-            try_again: &mut Vec<(u64, usize)>,
-        ) -> bool
+        /// Checks resource availability according to `retry` indices.
+        /// Passed items in `retry` will be removed, but the failed items
+        /// will be left, so they'll be checked again later.
+        /// If all items are ejected, returns true.
+        fn check_res<S>(res_queues: &OptVec<WaitQueue, S>, retry: &mut Vec<(u64, usize)>) -> bool
         where
             S: BuildHasher,
         {
-            while let Some((target_gen, resi)) = try_again.pop() {
+            while let Some((target_gen, resi)) = retry.pop() {
                 let queue = res_queues.get(resi).unwrap();
                 if target_gen != queue.gen() {
-                    try_again.push((target_gen, resi));
+                    retry.push((target_gen, resi));
                     return false;
                 }
             }
             true
         }
-
-        // Checks all requests once again.
-        inner_comp(&self.ent_queues, &mut wait.read_again)
-            && inner_comp(&self.ent_queues, &mut wait.write_again)
-            && inner_res(&self.res_queues, &mut wait.res_read_again)
-            && inner_res(&self.res_queues, &mut wait.res_write_again)
-            && inner_comp(&self.ent_queues, &mut wait.ent_write_again)
     }
 }
 
-impl<S> WaitQueuePack<S>
+impl<S> WaitQueues<S>
 where
     S: BuildHasher + Default,
 {
     /// Makes wait queues for an entity.
-    /// This makes a queue at the position `enti`.
+    /// This makes a queue at the position `ei`.
     /// Also, it makes inner queues for components of the entity as much as `ncol`.
     /// If there was a queue at the position, it will be dropped first.
-    pub fn initialize_entity_queue(&mut self, enti: usize, ncol: usize) {
+    pub(super) fn initialize_entity_queue(&mut self, ei: usize, ncol: usize) {
         // Prepares wait queues for columns.
         let mut cols = OptVec::new();
         for _ in 0..ncol {
             cols.push(Some(WaitQueue::new()));
         }
-        self.ent_queues.extend_set(enti, cols);
+        self.ent_queues.extend_set(ei, cols);
     }
 }
 
-impl<S> Default for WaitQueuePack<S>
+impl<S> Default for WaitQueues<S>
 where
     S: Default,
 {
@@ -289,7 +358,7 @@ where
 
 #[derive(Debug)]
 #[repr(transparent)]
-struct WaitQueue(GenQueue<(RW, usize)>);
+struct WaitQueue(GenQueue<(RW, u32)>);
 
 impl WaitQueue {
     const fn new() -> Self {
@@ -320,79 +389,71 @@ impl WaitQueue {
 }
 
 impl Deref for WaitQueue {
-    type Target = GenQueue<(RW, usize)>;
+    type Target = GenQueue<(RW, u32)>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
-pub enum WaitNotifyType {
-    Comp(ComponentKey),
-    Res(ResourceKey),
-    Ent(Arc<str>),
-}
-
 /// Read or write
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
-pub enum RW {
+pub(super) enum RW {
     Read,
     Write,
 }
 
 #[derive(Debug)]
-pub(super) struct WaitRequest {
-    /// *Sorted and deduplicated* wait queue indices to read-only components.
-    /// Tuple is an index pair of a specific entity-column pair.
-    pub(super) read: Vec<(usize, usize)>,
+pub(super) struct WaitIndices {
+    /// Wait queue index pairs to read-only components.
+    /// Each pair is the same as entity container index and a specific column index.
+    pub(super) read: DedupVec<(EntityIndex, usize), false>,
 
-    /// Not ready [`Self::read`] and their target generations.
-    pub(super) read_again: Vec<(u64, usize, usize)>,
+    /// Wait queue index pairs to writable components.
+    /// Each pair is the same as entity container index and a specific column index.
+    pub(super) write: DedupVec<(EntityIndex, usize), false>,
 
-    /// *Sorted and deduplicated* wait queue indices to writable components.
-    /// Tuple is an index pair of a specific entity-column pair.
-    pub(super) write: Vec<(usize, usize)>,
+    /// Wait queue indices to read-only resources.
+    pub(super) res_read: DedupVec<ResourceIndex, false>,
 
-    /// Not ready [`Self::write`] and their target generations.
-    pub(super) write_again: Vec<(u64, usize, usize)>,
+    /// Wait queue indices to writable resources.
+    pub(super) res_write: DedupVec<ResourceIndex, false>,
 
-    /// *Sorted and deduplicated* wait queue indices to read-only resources.
-    pub(super) res_read: Vec<usize>,
+    /// Wait queue indices to writable entity container.
+    /// Each index is the same as entity container index.
+    pub(super) ent_write: DedupVec<EntityIndex, false>,
+}
 
-    /// Not ready [`Self::res_read`] and their target generations.
-    pub(super) res_read_again: Vec<(u64, usize)>,
+#[derive(Debug)]
+pub(super) struct WaitRetryIndices {
+    /// Not ready [`WaitIndices::read`] and their target generations.
+    pub(super) read: Vec<(u64, usize, usize)>,
 
-    /// *Sorted and deduplicated* wait queue indices to writable resources.
-    pub(super) res_write: Vec<usize>,
+    /// Not ready [`WaitIndices::write`] and their target generations.
+    pub(super) write: Vec<(u64, usize, usize)>,
 
-    /// Not ready [`Self::res_write`] and their target generations.
-    pub(super) res_write_again: Vec<(u64, usize)>,
+    /// Not ready [`WaitIndices::res_read`] and their target generations.
+    pub(super) res_read: Vec<(u64, usize)>,
 
-    /// *Sorted and deduplicated* wait queue indices to writable entity container.
-    pub(super) ent_write: Vec<usize>,
+    /// Not ready [`WaitIndices::res_write`] and their target generations.
+    pub(super) res_write: Vec<(u64, usize)>,
 
-    /// Not ready [`Self::ent_write`] and their target generations.
-    pub(super) ent_write_again: Vec<(u64, usize, usize)>,
+    /// Not ready [`WaitIndices::ent_write`] and their target generations.
+    pub(super) ent_write: Vec<(u64, usize, usize)>,
 
     /// If it's not clean, that means it's in the middle of availability check.
     /// So we can continue the check rather than doing it from the beginning.
     pub(super) clean: bool,
 }
 
-impl WaitRequest {
+impl WaitRetryIndices {
     pub(super) const fn new() -> Self {
         Self {
             read: Vec::new(),
-            read_again: Vec::new(),
             write: Vec::new(),
-            write_again: Vec::new(),
             res_read: Vec::new(),
-            res_read_again: Vec::new(),
             res_write: Vec::new(),
-            res_write_again: Vec::new(),
             ent_write: Vec::new(),
-            ent_write_again: Vec::new(),
             clean: true,
         }
     }

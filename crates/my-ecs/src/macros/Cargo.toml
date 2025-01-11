@@ -3,7 +3,7 @@ name = "my-ecs-macros"
 description = "macros for my-ecs crate"
 repository = "https://github.com/ecoricemon/acttey"
 license = "Apache-2.0 OR MIT"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 
 [lib]
@@ -14,6 +14,7 @@ doctest = false
 quote = "1.0.33"
 syn = { version = "2.0.38", features = [
   "full",
+  "derive",
   "extra-traits"
 ]}
 proc-macro2 = "1.0.69"

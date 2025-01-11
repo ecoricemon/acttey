@@ -27,11 +27,9 @@ where
     }
 }
 
-impl<T, S> OptVec<T, S>
-where
-    S: BuildHasher,
-{
+impl<T, S> OptVec<T, S> {
     /// Gets total number of slots including vacant slot.
+    #[allow(clippy::len_without_is_empty)] // confusing
     pub fn len(&self) -> usize {
         self.values.len()
     }
@@ -45,11 +43,6 @@ where
     /// Gets number of vacant slots.
     pub fn len_vacant(&self) -> usize {
         self.vacancies.len()
-    }
-
-    /// Determines whether there's no slots at all.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 
     /// Retrieves inner vector's capacity.
@@ -120,54 +113,6 @@ where
             .unwrap_unchecked()
     }
 
-    /// Sets value wrapped with Option itself.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `index` is out of bound.
-    pub fn set(&mut self, index: usize, value: Option<T>) -> Option<T> {
-        if value.is_some() {
-            self.vacancies.remove(&index);
-        } else {
-            self.vacancies.insert(index);
-        }
-        mem::replace(&mut self.values[index], value)
-    }
-
-    /// Adds the value to a vacant slot if it's possible or put it at the end of vector.
-    /// Then returns its index.
-    pub fn add(&mut self, value: T) -> usize {
-        if let Some(index) = self.vacancies.iter().next() {
-            let index = *index;
-            self.vacancies.remove(&index);
-            self.values[index] = Some(value);
-            index
-        } else {
-            self.values.push(Some(value));
-            self.values.len() - 1
-        }
-    }
-
-    /// Appends the *Optional* value at the end of the vector.
-    pub fn push(&mut self, value: Option<T>) {
-        if value.is_none() {
-            self.vacancies.insert(self.values.len());
-        }
-        self.values.push(value);
-    }
-
-    /// Takes the value out from the slot located at index, then returns the value.  
-    /// It'd be None if the slot was vacant.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `index` is out of bound.
-    pub fn take(&mut self, index: usize) -> Option<T> {
-        let old = self.values[index].take()?;
-        self.vacancies.insert(index);
-        Some(old)
-    }
-
     /// Swaps two occupied items.
     ///
     /// # Panics
@@ -212,6 +157,69 @@ where
     pub fn values_occupied_mut(&mut self) -> impl Iterator<Item = &mut T> {
         self.values.iter_mut().filter_map(|v| v.as_mut())
     }
+}
+
+impl<T, S> OptVec<T, S>
+where
+    S: BuildHasher,
+{
+    /// Sets value wrapped with Option itself.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` is out of bound.
+    pub fn set(&mut self, index: usize, value: Option<T>) -> Option<T> {
+        if value.is_some() {
+            self.vacancies.remove(&index);
+        } else {
+            self.vacancies.insert(index);
+        }
+        mem::replace(&mut self.values[index], value)
+    }
+
+    /// Returns an index that will be returned when the next [`add`](Self::add)
+    /// is called.
+    pub fn next_index(&self) -> usize {
+        if let Some(index) = self.vacancies.iter().next() {
+            *index
+        } else {
+            self.values.len()
+        }
+    }
+
+    /// Adds the value to a vacant slot if it's possible or put it at the end of vector.
+    /// Then returns its index.
+    pub fn add(&mut self, value: T) -> usize {
+        if let Some(index) = self.vacancies.iter().next() {
+            let index = *index;
+            self.vacancies.remove(&index);
+            self.values[index] = Some(value);
+            index
+        } else {
+            self.values.push(Some(value));
+            self.values.len() - 1
+        }
+    }
+
+    /// Appends the *Optional* value at the end of the vector.
+    pub fn push(&mut self, value: Option<T>) {
+        if value.is_none() {
+            self.vacancies.insert(self.values.len());
+        }
+        self.values.push(value);
+    }
+
+    /// Takes the value out from the slot located at index, then returns the value.  
+    /// It'd be None if the slot was vacant.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index` is out of bound.
+    pub fn take(&mut self, index: usize) -> Option<T> {
+        let old = self.values[index].take()?;
+        self.vacancies.insert(index);
+        Some(old)
+    }
 
     /// Removes some slots from the end, so that `len` slots will remain after that.
     /// It does nothing if `len` is equal to or grater than currenet length.
@@ -240,11 +248,65 @@ where
     }
 }
 
-// Do not implement IndexMut because we need to modify vacancies if users take the value from the slot.
+// Do not implement IndexMut because we need to modify vacancies if users take
+// the value from the slot.
 impl<T, S> Index<usize> for OptVec<T, S> {
     type Output = Option<T>;
 
     fn index(&self, index: usize) -> &Self::Output {
         &self.values[index]
+    }
+}
+
+impl<T, S> IntoIterator for OptVec<T, S>
+where
+    S: BuildHasher,
+{
+    type Item = T;
+    type IntoIter = IntoIter<T, S>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        IntoIter::new(self)
+    }
+}
+
+impl<T, S> From<OptVec<T, S>> for Vec<T>
+where
+    S: BuildHasher,
+{
+    fn from(value: OptVec<T, S>) -> Self {
+        value.into_iter().collect()
+    }
+}
+
+#[derive(Debug)]
+pub struct IntoIter<T, S> {
+    vec: OptVec<T, S>,
+    cur: usize,
+}
+
+impl<T, S> IntoIter<T, S> {
+    fn new(vec: OptVec<T, S>) -> Self {
+        Self { vec, cur: 0 }
+    }
+}
+
+impl<T, S> Iterator for IntoIter<T, S>
+where
+    S: BuildHasher,
+{
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.vec.len_occupied() == 0 {
+            return None;
+        }
+
+        let mut output = None;
+        while output.is_none() {
+            output = self.vec.take(self.cur);
+            self.cur += 1;
+        }
+        output
     }
 }

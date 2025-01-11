@@ -1,0 +1,33 @@
+{
+  "type": "module",
+  "author": "ecoricemon",
+  "name": "example-web",
+  "version": "0.0.0",
+  "scripts": {
+    "css": "npx tailwindcss -o style.css",
+    "wasm-common": "cross-env RUSTFLAGS=\"-C target-feature=+atomics,+bulk-memory,+mutable-globals\" rustup run nightly-2024-06-20 wasm-pack build --target web --out-name wasm-index --out-dir pkg .",
+    "wasm-d": "npm run wasm-common -- --dev -Z build-std=panic_abort,std",
+    "wasm-r": "npm run wasm-common -- --release -Z build-std=panic_abort,std",
+    "bundle-d": "vite build --mode development",
+    "bundle-r": "vite build",
+    "clean": "rimraf --glob dist pkg",
+    "clean-all": "rimraf --glob dist pkg target node_modules package-lock.json style.css cert",
+    "build-d": "run-s clean css wasm-d bundle-d",
+    "build-r": "run-s clean css wasm-r bundle-r",
+    "start": "vite preview",
+    "start-ssl": "vite preview --config vite.config.ssl.js"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-basic-ssl": "^1.1.0",
+    "cross-env": "7.0.3",
+    "npm-run-all": "4.1.5",
+    "prettier": "3.3.3",
+    "rimraf": "6.0.1",
+    "rollup-plugin-copy": "3.5.0",
+    "tailwindcss": "^3.4.15",
+    "vite": "5.4.2",
+    "vite-plugin-cross-origin-isolation": "0.1.6",
+    "vite-plugin-top-level-await": "1.4.4",
+    "vite-plugin-wasm": "3.3.0"
+  }
+}

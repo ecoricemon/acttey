@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>acttey web example</title>
+    <script src="index.js" type="module"></script>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body
+    class="flex flex-col h-dvh bg-stone-100 dark:bg-stone-900 text-stone-900 dark:text-stone-100"
+  >
+    <h1 class="mt-4 ml-4 text-5xl font-medium">acttey demo</h1>
+
+    <p class="mt-4 ml-4 mb-4 font-light leading-relaxed">
+      This demo shows drawing
+      <a href="https://en.wikipedia.org/wiki/Mandelbrot_set"
+        >Mandelbrot fractal</a
+      >
+      structure using the rust crate <a href="https://crates.io/crates/acttey">acttey</a>.
+    </p>
+
+    <button
+      type="button"
+      id="btnSingle"
+      class="bg-indigo-500 disabled:bg-gray-700 text-white font-bold text-xs py-2"
+    >
+      Draw using single worker
+    </button>
+    <button
+      type="button"
+      id="btnMulti"
+      class="bg-indigo-500 disabled:bg-gray-700 text-white font-bold text-xs py-2"
+    >
+      Draw using multiple workers
+    </button>
+    <button
+      type="button"
+      id="btnGpu"
+      class="bg-indigo-500 disabled:bg-gray-700 text-white font-bold text-xs py-2"
+    >
+      Draw using GPU
+    </button>
+    <button
+      type="button"
+      id="btnStop"
+      class="bg-indigo-500 disabled:bg-gray-700 text-white font-bold text-xs py-2"
+    >
+      Stop
+    </button>
+
+    <div
+      class="flex justify-center relative mt-4 h-full max-h-[70dvh] bg-gradient-to-t from-gray-950 via-gray-900 to-gray-950"
+    >
+      <text id="fps" class="absolute text-xl text-white font-medium">fps</text>
+      <canvas id="canvas" class="aspect-square h-full"></canvas>
+    </div>
+  </body>
+</html>

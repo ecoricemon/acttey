@@ -3,31 +3,108 @@ name = "my-ecs"
 description = "Entity Component System implementation"
 repository = "https://github.com/ecoricemon/acttey"
 license = "Apache-2.0 OR MIT"
-version = "0.0.1"
+version = "0.0.3"
 edition = "2021"
+rust-version = "1.80" # std::sync::LazyLock is stable since 1.80.0.
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+# ================
+# === Features ===
+# ================
+
+[features]
+check = []
+stat = []
+
+# ====================
+# === Dependencies ===
+# ====================
+
 [dependencies]
-my-ecs-macros = { version = "0.0.1", path = "src/macros" }
+my-ecs-macros = { version = "0.0.2", path = "src/macros" }
 paste = { version = "1.0.14" }
-thiserror = { version = "1.0.57" }
+thiserror = { version = "2.0.3" }
+crossbeam-deque = { version = "0.8.5" }
+rayon = { version = "1.10.0" }
+bitflags = { version = "2.6.0" }
+dashmap = { version = "6.1.0" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-js-sys = { version = "0.3.69" }
-web-sys = { version = "0.3.69", features = [
-    "Worker",
-    "WorkerOptions",
-    "WorkerType",
-    "Blob",
-    "BlobPropertyBag",
-    "Url",
-    "MessageEvent",
-]}
-wasm-bindgen = { version = "0.2.92" }
-once_cell = { version = "1.19.0" }
+wasm-bindgen = { version = "0.2.97" }
+wasm-bindgen-futures = { version = "0.4.49" }
+js-sys = { version = "0.3.74" }
+web-sys = { version = "0.3.74", features = [
+  "Blob",
+  "BlobPropertyBag",
+  "console",
+  "DedicatedWorkerGlobalScope",
+  "DomException",
+  "MessageEvent",
+  "Navigator",
+  "Performance",
+  "Url",
+  "Window",
+  "Worker",
+  "WorkerGlobalScope",
+  "WorkerNavigator",
+  "WorkerOptions",
+  "WorkerType",
+] }
+# Debug mode only, used by dashmap, feature for wasm32-unknown-unknown target.
+parking_lot_core = { version = "0.9.10", features = ["nightly"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+async-io = { version = "2.3.4" }
+tide = { version = "0.16.0" }
+surf = { version = "2.3.2" }
+futures = { version = "0.3.31" }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = { version = "0.3.47" }
+console_error_panic_hook = { version = "0.1.7" }
+
+# =================
+# === Workspace ===
+# =================
+
+# [workspace]
+# members = ["test-web"] # To share output directory 'target'
+
+# =============
+# === Tests ===
+# =============
+
+[[test]]
+name = "test-web-on-host"
+path = "test-web/src/lib.rs"
+
+# ===========================
+# === Test with sanitizer ===
+# ===========================
+
+# On linux, there may be false-positive warning in rust test harness.
+[[example]]
+name = "tsan"
+path = "test-san/thread.rs"
+crate-type = ["bin"]
+
+# ================
+# === Examples ===
+# ================
 
 [[example]]
-name = "hello"
+name = "async"
+path = "examples/async.rs"
+crate-type = ["bin"]
+
+[[example]]
+name = "async_io"
+path = "examples/async_io.rs"
+crate-type = ["bin"]
+
+[[example]]
+name = "parallel"
+path = "examples/parallel.rs"
 crate-type = ["bin"]

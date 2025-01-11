@@ -1,34 +1,38 @@
 //! ref: https://www.w3.org/TR/WGSL/
 use my_wgsl::*;
 
-#[wgsl_decl_struct]
+#[wgsl_struct]
 pub struct PointLight {
     position: vec3f,
     color: vec3f,
 }
 
-#[wgsl_decl_struct]
+#[wgsl_struct]
 pub struct LightStorage {
     pointCount: u32,
     point: array<PointLight>,
 }
 
 fn main() {
-    let mut builder = Builder::new();
+    let mut builder = WgslBuilder::new();
 
-    wgsl_structs![builder, PointLight, LightStorage];
+    builder.push_struct_of::<PointLight>();
+    builder.push_struct_of::<LightStorage>();
 
-    wgsl_bind!(
-        builder, group(0) binding(0) var<storage> lights : LightStorage
+    let gvar = wgsl_global_var!(
+        group(0) binding(0) var<storage> lights : LightStorage
     );
-    wgsl_bind!(
-        builder, group(1) binding(0) var baseColorSampler : sampler
+    builder.push_global_variable(gvar);
+    let gvar = wgsl_global_var!(
+        group(1) binding(0) var baseColorSampler : sampler
     );
-    wgsl_bind!(
-        builder, group(1) binding(1) var baseColorTexture : texture_2d<f32>
+    builder.push_global_variable(gvar);
+    let gvar = wgsl_global_var!(
+        group(1) binding(1) var baseColorTexture : texture_2d<f32>
     );
+    builder.push_global_variable(gvar);
 
-    wgsl_fn!(builder,
+    let f = wgsl_fn!(
         #[fragment]
         fn fragmentMain(#[location(0)] worldPos : vec3f,
                         #[location(1)] normal : vec3f,
@@ -57,6 +61,7 @@ fn main() {
             return vec4(surfaceColor, baseColor.a);
         }
     );
+    builder.push_function(f);
 
     let wgsl: String = builder.build_pretty();
     println!("{wgsl}");

@@ -9,15 +9,19 @@ You can construct your WGSL code like below,
 let mut builder = Builder::new();
 
 // Appends a struct.
-#[my_wgsl_decl_struct]
+#[wgsl_struct]
 struct VertexInput {...}
-wgsl_structs!(builder, VertexInput);
+builder.push_struct_of::<VertexInput>();
 
 // Appends a binding.
-wgsl_bind!(builder, group(0) binding(0) var<storage> ...);
+builder.push_global_variable(
+    wgsl_global_var!(group(0) binding(0) var<storage> ...)
+);
 
 // Appends a function.
-wgsl_fn!(builder, fn foo(...) {...});
+builder.push_function(
+    wgsl_fn!(fn foo(...) {...})
+);
 ```
 
 Almost every field is public and deriving Debug for now.

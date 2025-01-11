@@ -15,29 +15,29 @@ use syn::{
     Type, TypeArray,
 };
 
-// TODO: if the structure contain runtime sized array, we can't convert the structure into &[u8].
+// TODO: if the struct contain runtime sized array, we can't convert the struct into &[u8].
 #[proc_macro_attribute]
-pub fn wgsl_struct(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn as_wgsl(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Parses token streams.
     let attr = parse_macro_input!(attr as StructAttribute);
     let addr_space = AddressSpace::from(&attr);
     let mut item_struct = parse_macro_input!(item as ItemStruct);
     let st_ident = &item_struct.ident;
 
-    // We're going to put some pad fields in the structure silently.
+    // We're going to put some pad fields in the struct silently.
     // In order for hiding those pad fields from users, we need named field.
     match &item_struct.fields {
         Fields::Named(_) => {}
         _ => panic!("tuple or unit struct are not allowed"),
     }
 
-    // Each field in the structure must have its own size and alignment.
+    // Each field in the struct must have its own size and alignment.
     // so blocks both #[repr(align(n))] and #[repr(packed)] which could conflict.
     let repr = Repr::from(&item_struct.attrs);
     assert!(repr.align.is_none(), "#[repr(align(n))] is not allowed");
     assert!(repr.packed.is_none(), "#[repr(packed)] is not allowed");
 
-    // Let's put some pad fields in the structure.
+    // Let's put some pad fields in the struct.
     assert!(
         !item_struct.fields.is_empty(),
         "empty struct is not allowed"
@@ -80,7 +80,7 @@ pub fn wgsl_struct(attr: TokenStream, item: TokenStream) -> TokenStream {
         padded_fields.push(field);
     }
 
-    // Calculates structure align.
+    // Calculates struct align.
     // ref: https://www.w3.org/TR/WGSL/#address-space-layout-constraints
     let mut st_align = finfos.iter().map(|finfo| finfo.align.get()).max().unwrap();
     if addr_space == AddressSpace::Uniform {
@@ -94,11 +94,11 @@ pub fn wgsl_struct(attr: TokenStream, item: TokenStream) -> TokenStream {
         push_pad_field(&mut padded_fields, pad_size);
     }
 
-    // Replaces fields to padded fields in the structure.
+    // Replaces fields to padded fields in the struct.
     let new_fields: FieldsNamed = parse_quote! { { #(#padded_fields),* } };
     item_struct.fields = Fields::Named(new_fields);
 
-    // Adds #[repr(C)] if the structure doesn't have it.
+    // Adds #[repr(C)] if the struct doesn't have it.
     // It helps us put in padding fields easily.
     if repr.c.is_none() {
         let attr: Attribute = parse_quote! { #[repr(C)] };
@@ -110,10 +110,10 @@ pub fn wgsl_struct(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr: Attribute = parse_quote! { #[repr(align(#align))] };
     item_struct.attrs.push(attr);
 
-    // Implements `my_wgsl::AsStructure`
-    let impl_as_structure = impl_as_structure(st_ident, &finfos);
+    // Implements `my_wgsl::AsStruct`
+    let impl_as_struct = impl_as_struct(st_ident, &finfos);
 
-    // Implements `From` for &[u8] if the structure doesn't contain runtime sized field.
+    // Implements `From` for &[u8] if the struct doesn't contain runtime sized field.
     let is_last_zero_sized = finfos
         .iter()
         .last()
@@ -125,12 +125,12 @@ pub fn wgsl_struct(attr: TokenStream, item: TokenStream) -> TokenStream {
         TokenStream2::new()
     };
 
-    // Validates the structure.
+    // Validates the struct.
     let validate = validate_wgsl_struct(&finfos, st_ident, st_size, st_align, &offsets);
 
     TokenStream::from(quote! {
         #item_struct
-        #impl_as_structure
+        #impl_as_struct
         #impl_from_for_u8_slice
         #validate
     })
@@ -143,7 +143,7 @@ fn push_pad_field(fields: &mut Vec<Field>, pad_size: u32) {
     fields.push(pad_field);
 }
 
-fn impl_as_structure(st_ident: &Ident, finfos: &[FieldInfo]) -> TokenStream2 {
+fn impl_as_struct(st_ident: &Ident, finfos: &[FieldInfo]) -> TokenStream2 {
     // For example, #[ignore] field is supposed to be hidden from WGSL.
     let finfos = finfos.iter().filter(|finfo| !finfo.is_wgsl_hidden());
 
@@ -161,12 +161,12 @@ fn impl_as_structure(st_ident: &Ident, finfos: &[FieldInfo]) -> TokenStream2 {
             }
         }
 
-        impl my_wgsl::AsStructure for #st_ident {
-            fn as_structure() -> my_wgsl::Structure {
-                my_wgsl::Structure {
+        impl my_wgsl::AsStruct for #st_ident {
+            fn as_struct() -> my_wgsl::Struct {
+                my_wgsl::Struct {
                     ident: <Self as my_wgsl::ToIdent>::to_ident(),
                     members: vec![#(
-                        my_wgsl::StructureMember {
+                        my_wgsl::StructMember {
                             attrs: my_wgsl::Attributes(vec![#(
                                 my_wgsl::Attribute::from(
                                     (#field_attr_outers, #field_attr_inners)
@@ -250,11 +250,7 @@ fn validate_wgsl_struct(
         .collect();
     let st_size_str = st_size.to_string(); // Removes suffix from something like 16u32.
     let st_align_str = st_align.to_string(); // Same as above.
-    let is_last_zero_sized = finfos
-        .iter()
-        .last()
-        .map(|finfo| finfo.size.is_none())
-        .unwrap();
+    let is_last_zero_sized = finfos.iter().last().unwrap().size.is_none();
     quote! {
         const _: () = {
             // Validates offset of each field.
@@ -265,19 +261,19 @@ fn validate_wgsl_struct(
                 );
             )*
 
-            // Validates the whole structure's size
-            // when we know the exact size of the structure.
+            // Validates the whole struct's size
+            // when we know the exact size of the struct.
             if !#is_last_zero_sized {
                 assert!(
                     #st_size as usize == std::mem::size_of::<#st_ident>(),
-                    concat!("calculated structure size(", #st_size_str, ") doesn't match")
+                    concat!("calculated struct size(", #st_size_str, ") doesn't match")
                 );
             }
 
-            // Validates the whole structure's alignment.
+            // Validates the whole struct's alignment.
             assert!(
                 #st_align as usize == std::mem::align_of::<#st_ident>(),
-                concat!("calculated structure alignment(", #st_align_str, ") doesn't match")
+                concat!("calculated struct alignment(", #st_align_str, ") doesn't match")
             );
         };
     }
@@ -290,7 +286,7 @@ enum AddressSpace {
 }
 
 impl AddressSpace {
-    /// If the structure attribute doesn't have anything in it,
+    /// If the struct attribute doesn't have anything in it,
     /// [`Self::Storage`] is chosen as default.
     fn from(value: &StructAttribute) -> Self {
         let s;
@@ -679,7 +675,7 @@ impl NestedType {
                 (None, elem_ty.align)
             }
         }
-        // Unknown type like structure.
+        // Unknown type like struct.
         else {
             // Unknown size and alignment.
             (None, None)
@@ -924,7 +920,7 @@ fn round_up_by_align(align: u32, value: u32) -> u32 {
     (value + mask) & (!mask)
 }
 
-/// Implements `my_wgsl::ToIdent` and `my_wgsl::AsStructure` from literal struct.
+/// Implements `my_wgsl::ToIdent` and `my_wgsl::AsStruct` from literal struct.
 ///
 /// # Examples
 ///
@@ -932,8 +928,8 @@ fn round_up_by_align(align: u32, value: u32) -> u32 {
 /// use my_wgsl::*;
 ///
 /// fn foo() {
-///     let mut builder = Builder::new();
-///     wgsl_decl_struct_from_str!(
+///     let mut builder = WgslBuilder::new();
+///     wgsl_struct_from_str!(
 ///         "
 ///         struct PointLight {
 ///             position: vec3f,
@@ -941,33 +937,33 @@ fn round_up_by_align(align: u32, value: u32) -> u32 {
 ///         }
 ///         "
 ///     );
-///     wgsl_structs!(builder, PointLight);
+///     builder.push_struct_of::<PointLight>();
 /// }
 /// ```
 #[proc_macro]
-pub fn wgsl_decl_struct_from_str(item: TokenStream) -> TokenStream {
+pub fn wgsl_struct_from_str(item: TokenStream) -> TokenStream {
     let item_lit = parse_macro_input!(item as LitStr);
     let value = item_lit.value();
     let item: TokenStream2 = value.parse().unwrap();
     let item: TokenStream = item.into();
-    wgsl_decl_struct(TokenStream::new(), item)
+    wgsl_struct(TokenStream::new(), item)
 }
 
-/// Implements `my_wgsl::ToIdent` and `my_wgsl::AsStructure` for the struct.
+/// Implements `my_wgsl::ToIdent` and `my_wgsl::AsStruct` for the struct.
 ///
 /// # Examples
 ///
 /// ```
 /// use my_wgsl::*;
 ///
-/// #[wgsl_decl_struct]
+/// #[wgsl_struct]
 /// struct PointLight {
 ///     position: vec3f,
 ///     color: vec3f,
 /// }
 /// ```
 #[proc_macro_attribute]
-pub fn wgsl_decl_struct(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn wgsl_struct(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Doesn't allow any attributes.
     assert!(attr.is_empty(), "use this macro without attributes");
 
@@ -982,15 +978,15 @@ pub fn wgsl_decl_struct(attr: TokenStream, item: TokenStream) -> TokenStream {
         field.attrs.clear();
     }
 
-    // Implements `my_wgsl::AsStructure`
-    let impl_as_structure = impl_as_structure(st_ident, &finfos);
+    // Implements `my_wgsl::AsStruct`
+    let impl_as_struct = impl_as_struct(st_ident, &finfos);
 
     TokenStream::from(quote! {
         #[allow(dead_code)] // Allows dead_code because we actually don't use this.
         #[allow(non_snake_case)] // Allows non snake case.
         #item_struct
 
-        #impl_as_structure
+        #impl_as_struct
     })
 }
 
@@ -1001,8 +997,8 @@ pub fn wgsl_decl_struct(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```
 /// use my_wgsl::*;
 ///
-/// let mut builder = Builder::new();
-/// let f = wgsl_decl_fn_from_str!(
+/// let mut builder = WgslBuilder::new();
+/// let f = wgsl_fn_from_str!(
 ///     "
 ///     #[fragment]
 ///     fn fragmentMain(#[location(0)] worldPos : vec3f,
@@ -1016,12 +1012,12 @@ pub fn wgsl_decl_struct(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// builder.push_function(f);
 /// ```
 #[proc_macro]
-pub fn wgsl_decl_fn_from_str(item: TokenStream) -> TokenStream {
+pub fn wgsl_fn_from_str(item: TokenStream) -> TokenStream {
     let item_lit = parse_macro_input!(item as LitStr);
     let value = item_lit.value();
     let item: TokenStream2 = value.parse().unwrap();
     let item: TokenStream = item.into();
-    wgsl_decl_fn(item)
+    wgsl_fn(item)
 }
 
 /// Generates `my_wgsl::Function` from the given code.
@@ -1031,8 +1027,8 @@ pub fn wgsl_decl_fn_from_str(item: TokenStream) -> TokenStream {
 /// ```
 /// use my_wgsl::*;
 ///
-/// let mut builder = Builder::new();
-/// let f = wgsl_decl_fn!(
+/// let mut builder = WgslBuilder::new();
+/// let f = wgsl_fn!(
 ///     #[fragment]
 ///     fn fragmentMain(#[location(0)] worldPos : vec3f,
 ///                     #[location(1)] normal : vec3f,
@@ -1044,7 +1040,7 @@ pub fn wgsl_decl_fn_from_str(item: TokenStream) -> TokenStream {
 /// builder.push_function(f);
 /// ```
 #[proc_macro]
-pub fn wgsl_decl_fn(item: TokenStream) -> TokenStream {
+pub fn wgsl_fn(item: TokenStream) -> TokenStream {
     let item_fn = parse_macro_input!(item as Function);
     let ident = &item_fn.ident;
 

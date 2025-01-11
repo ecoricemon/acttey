@@ -3,6 +3,9 @@ pub mod ds;
 pub mod ecs;
 pub mod util;
 
-// Each moudle provides its own prelude, which could be imported separately.
-// But they are not included in the whole prelude
-// because they don't share common concepts and responsibilities.
+pub mod prelude {
+    pub use super::{default::prelude::*, ds::prelude::*, ecs::prelude::*, util::prelude::*};
+    pub use rayon::prelude::*;
+}
+
+pub(crate) type DefaultHasher = std::hash::RandomState;

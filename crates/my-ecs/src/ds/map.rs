@@ -156,15 +156,39 @@ where
     IK: Hash + Eq + Clone,
     S: BuildHasher + Default,
 {
-    /// # Panics
-    ///
-    /// - Panics if `desc` doesn't have item at all.
-    /// - Panics if the map has had group already.
-    pub fn add_group(&mut self, desc: impl DescribeGroup<GK, GV, IK, IV>) -> usize {
-        let (group_key, group_value, items) = desc.into_group_and_items();
+    /// Returns an index that will be returned when the next
+    /// [`add_group`](Self::add_group) or
+    /// [`add_group_from_desc`](Self::add_group_from_desc) is called.
+    pub fn next_index<Q>(&self, key: &Q) -> usize
+    where
+        GK: std::borrow::Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.groups.next_index(key)
+    }
 
-        // Group must contain at least one item.
-        assert!(!items.is_empty());
+    pub fn add_group(
+        &mut self,
+        desc: impl DescribeGroup<GK, GV, IK, IV>,
+    ) -> Result<usize, GroupDesc<GK, GV, IK, IV>> {
+        self.add_group_from_desc(desc.into_group_and_items())
+    }
+
+    pub fn add_group_from_desc(
+        &mut self,
+        desc: GroupDesc<GK, GV, IK, IV>,
+    ) -> Result<usize, GroupDesc<GK, GV, IK, IV>> {
+        // Validates the descriptor.
+        assert!(!desc.items.is_empty());
+        if self.contains_group2(&desc.group_key) {
+            return Err(desc);
+        }
+
+        let GroupDesc {
+            group_key,
+            group_value,
+            items,
+        } = desc;
 
         // Adds items.
         let item_indices = items
@@ -184,7 +208,7 @@ where
             .insert(group_key, (group_value, item_indices.clone()));
 
         // This method doesn't allow overwriting group.
-        assert!(old_group.is_none());
+        debug_assert!(old_group.is_none());
 
         // Updates items by adding new link to the group.
         for index in item_indices {
@@ -192,13 +216,13 @@ where
             links.insert(group_index);
         }
 
-        group_index
+        Ok(group_index)
     }
 
-    pub fn remove_group(&mut self, index: usize) -> Option<GV> {
+    pub fn remove_group(&mut self, index: usize) -> Option<(GK, GV)> {
         // Removes group.
         let group_index = index;
-        let (old_group, item_indices) = self.groups.remove(group_index)?;
+        let (group_key, (old_group, item_indices)) = self.groups.remove_entry(group_index)?;
 
         // Removes corresponding items if it's possible.
         for item_index in item_indices.iter().cloned() {
@@ -209,10 +233,10 @@ where
             }
         }
 
-        Some(old_group)
+        Some((group_key, old_group))
     }
 
-    pub fn remove_group2<Q>(&mut self, key: &Q) -> Option<GV>
+    pub fn remove_group2<Q>(&mut self, key: &Q) -> Option<(GK, GV)>
     where
         GK: std::borrow::Borrow<Q>,
         Q: Hash + Eq + ?Sized,
@@ -232,7 +256,14 @@ where
 }
 
 pub trait DescribeGroup<GK, GV, IK, IV> {
-    fn into_group_and_items(self) -> (GK, GV, Vec<(IK, IV)>);
+    fn into_group_and_items(self) -> GroupDesc<GK, GV, IK, IV>;
+}
+
+#[derive(Debug)]
+pub struct GroupDesc<GK, GV, IK, IV> {
+    pub group_key: GK,
+    pub group_value: GV,
+    pub items: Vec<(IK, IV)>,
 }
 
 /// A hash-map with indexing.
@@ -272,10 +303,19 @@ where
 {
     /// Removes index from the map and returns its corresponding value.
     pub fn remove(&mut self, index: usize) -> Option<V> {
+        self.remove_entry(index).map(|(_key, value)| value)
+    }
+
+    pub fn remove_entry(&mut self, index: usize) -> Option<(K, V)> {
         let key = self.imap.get(index)?;
-        self.map.remove(key);
-        self.imap.take(index);
-        self.values.take(index)
+        let must_some = self.map.remove(key);
+        debug_assert!(must_some.is_some());
+        // Safety: The entry exists, checked by `?` above.
+        unsafe {
+            let key = self.imap.take(index).unwrap_unchecked();
+            let value = self.values.take(index).unwrap_unchecked();
+            Some((key, value))
+        }
     }
 }
 
@@ -317,7 +357,21 @@ where
         index < self.values.len() && self.values.is_occupied(index)
     }
 
-    /// Inserts `value` with `key`.  
+    /// Returns an index that will be returned when the next
+    /// [`insert`](Self::insert) is called.
+    pub fn next_index<Q>(&self, key: &Q) -> usize
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        if let Some(index) = self.map.get(key) {
+            *index
+        } else {
+            self.values.next_index()
+        }
+    }
+
+    /// Inserts `value` with `key`.
     /// If the map has had the `key`, value is changed while its index isn't.
     /// Then returns value's index and old value if it's changed.
     pub fn insert(&mut self, key: K, value: V) -> (usize, Option<V>) {
@@ -330,7 +384,7 @@ where
             Entry::Vacant(vacant) => {
                 let index = self.values.add(value);
                 if IMAP {
-                    self.imap.add(vacant.key().clone());
+                    self.imap.extend_set(index, vacant.key().clone());
                 }
                 vacant.insert(index);
                 (index, None)
@@ -344,11 +398,23 @@ where
         K: std::borrow::Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let index = self.map.remove(key)?;
+        self.remove_entry2(key).map(|(_key, value)| value)
+    }
+
+    pub fn remove_entry2<Q>(&mut self, key: &Q) -> Option<(K, V)>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let (key, index) = self.map.remove_entry(key)?;
         if IMAP {
-            self.imap.take(index);
+            let must_some = self.imap.take(index);
+            debug_assert!(must_some.is_some());
         }
-        self.values.take(index)
+        // Safety: We got `index` from `self.map`, which guarantees that the
+        // slot must be occupied.
+        let value = unsafe { self.values.take(index).unwrap_unchecked() };
+        Some((key, value))
     }
 
     /// Retrieves index corresponding to the `key`.
@@ -360,7 +426,7 @@ where
         self.map.get(key).cloned()
     }
 
-    /// Retrieves value corresponding to the `index`.  
+    /// Retrieves value corresponding to the `index`.
     /// It can be None if `index` is out of bound or points to a vacant slot.
     pub fn get(&self, index: usize) -> Option<&V> {
         self.values.get(index)
@@ -376,7 +442,7 @@ where
         self.get(index)
     }
 
-    /// Retrieves value corresponding to the `index`.  
+    /// Retrieves value corresponding to the `index`.
     /// It can be None if `index` is out of bound or points to a vacant slot.
     pub fn get_mut(&mut self, index: usize) -> Option<&mut V> {
         self.values.get_mut(index)
