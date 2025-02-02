@@ -1,4 +1,11 @@
-use crate::{ds::prelude::*, ecs::EcsError, util::prelude::*};
+use crate::{
+    ds::{
+        ATypeId, BorrowError, BorrowResult, ManagedConstPtr, ManagedMutPtr, NonNullExt, OptVec,
+        SimpleHolder,
+    },
+    ecs::EcsError,
+    util::{macros::debug_format, Or, With},
+};
 use std::{
     any::Any,
     collections::HashMap,
@@ -7,7 +14,11 @@ use std::{
     ptr::NonNull,
 };
 
-/// Unique data over entire application.
+pub mod prelude {
+    pub use super::{Resource, ResourceDesc, ResourceId, ResourceIndex};
+}
+
+/// Unique data in the entire ecs instance.
 #[allow(private_interfaces)]
 pub trait Resource: Send + 'static {
     #[doc(hidden)]
@@ -19,7 +30,7 @@ pub trait Resource: Send + 'static {
 /// There are two types of resources.
 /// First one is static resource which is defined internally.
 /// The other one is user resource which is defined by users.
-/// This struct has pointers to those resources and dosen't update it once it's set.
+/// This struct has pointers to those resources and doesn't update it once it's set.
 /// Because, resource is a kind of unique data storage, so it makes sense.
 #[derive(Debug)]
 pub(super) struct ResourceStorage<S> {
@@ -47,7 +58,7 @@ pub(super) struct ResourceStorage<S> {
     res_gens: Vec<u64>,
 
     /// Generation that will be assigned to the next registered resource.
-    gen: u64,
+    generation: u64,
 }
 
 impl<S> ResourceStorage<S>
@@ -61,7 +72,7 @@ where
             imap: HashMap::default(),
             is_dedi: Vec::new(),
             res_gens: Vec::new(),
-            gen: 1,
+            generation: 1,
         }
     }
 }
@@ -70,11 +81,11 @@ impl<S> ResourceStorage<S>
 where
     S: BuildHasher + Default,
 {
-    /// Registers a resource.
+    /// Adds a resource.
     ///
     /// If it succeeded, returns resource index for the resource. Otherwise,
     /// nothing takes place and returns error with the descriptor.
-    pub(super) fn register(
+    pub(super) fn add(
         &mut self,
         desc: ResourceDesc,
     ) -> Result<ResourceIndex, EcsError<ResourceDesc>> {
@@ -107,8 +118,8 @@ where
         // Adds the pointer.
         let holder = SimpleHolder::new(ptr);
         let index = self.ptrs.add(holder);
-        let ri = ResourceIndex::new(index, self.gen);
-        self.gen += 1;
+        let ri = ResourceIndex::new(index, self.generation);
+        self.generation += 1;
         while self.res_gens.len() <= index {
             self.res_gens.push(0);
         }
@@ -126,10 +137,7 @@ where
         Ok(ri)
     }
 
-    pub(super) fn unregister(
-        &mut self,
-        rkey: &ResourceKey,
-    ) -> Option<Or<Box<dyn Any>, NonNull<u8>>> {
+    pub(super) fn remove(&mut self, rkey: &ResourceKey) -> Option<Or<Box<dyn Any>, NonNull<u8>>> {
         // Removes the resource from `self.owned`, `self.ptrs`, and `self.imap`.
         // But we don't have to remove `self.is_dedi`.
         if let Some(ri) = self.imap.remove(rkey) {
@@ -233,7 +241,7 @@ where
 
     /// # Safety
     ///
-    /// Undefine behavior if exclusive borrow happend before.
+    /// Undefined behavior if exclusive borrow happened before.
     //
     // Allows dead_code for test.
     #[cfg(test)]
@@ -248,8 +256,8 @@ where
     }
 
     fn is_valid_index(&self, ri: &ResourceIndex) -> bool {
-        if let Some(gen) = self.res_gens.get(ri.index()).cloned() {
-            gen == ri.generation()
+        if let Some(generation) = self.res_gens.get(ri.index()).cloned() {
+            generation == ri.generation()
         } else {
             false
         }
@@ -265,6 +273,12 @@ where
     }
 }
 
+/// A descriptor for registration of a resource.
+///
+/// Normally, resource is owned by an ECS instance, but type-erased raw pointer
+/// can also be considered as a resource. In that case, clients must guarantee
+/// safety about the pointer. [`ResourceDesc::with_owned`] and
+/// [`ResourceDesc::with_ptr`] are methods about the ownership.
 #[derive(Debug)]
 pub struct ResourceDesc {
     pub dedicated: bool,
@@ -273,6 +287,15 @@ pub struct ResourceDesc {
 }
 
 impl ResourceDesc {
+    /// Creates a new empty [`ResourceDesc`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::prelude::ResourceDesc;
+    ///
+    /// let desc = ResourceDesc::new();
+    /// ```
     pub fn new() -> Self {
         struct Dummy;
         impl Resource for Dummy {}
@@ -284,21 +307,59 @@ impl ResourceDesc {
         }
     }
 
+    /// Sets whether the resource is dedicated to the descriptor then returns
+    /// the result.
+    ///
+    /// Dedicated resource is only accessable from main worker for now.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::prelude::ResourceDesc;
+    ///
+    /// let desc = ResourceDesc::new().with_dedicated(true);
+    /// ```
     pub fn with_dedicated(mut self, is_dedicated: bool) -> Self {
         self.dedicated = is_dedicated;
         self
     }
 
+    /// Sets the given owned resource to the descriptor then returns the result.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::prelude::*;
+    ///
+    /// #[derive(Resource)] struct R(i32);
+    ///
+    /// let desc = ResourceDesc::new().with_owned(R(0));
+    /// ```
     pub fn with_owned<R: Resource>(mut self, data: R) -> Self {
         self.key = R::key();
         self.data = Or::A(Box::new(data));
         self
     }
 
+    /// Sets the given pointer as a resource to the descriptor then returns the
+    /// result.
+    ///
     /// # Safety
     ///
-    /// If caller registered the resource to ecs and accesses memory at the data
-    /// address while ecs is working, it's undefined behavior.
+    /// After registration the descriptor to an ECS instance, owner of the data
+    /// must not access the data while the ECS instance is running because the
+    /// ECS instance may read or write something on the data.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::prelude::*;
+    ///
+    /// #[derive(Resource)] struct R(i32);
+    ///
+    /// let mut r = R(0);
+    /// let desc = unsafe { ResourceDesc::new().with_ptr(&mut r as *mut R) };
+    /// ```
     pub unsafe fn with_ptr<R: Resource>(mut self, data: *mut R) -> Self {
         self.key = R::key();
         self.data = Or::B(NonNull::new(data as *mut u8).unwrap());
@@ -322,36 +383,51 @@ impl<R: Resource> From<R> for ResourceDesc {
 pub(crate) type ResourceKey = ATypeId<ResourceKey_>;
 pub(crate) struct ResourceKey_;
 
-/// A specific resource item identifier.
+/// A unique identifier for a resource **item**.
+///
+/// A unique resource is usually identified by [`ResourceIndex`], but if you
+/// need to have a resource container for a resource type then identify each
+/// item in the container, this would be useful. This resource item identifier
+/// is composed of the `ResourceIndex` and **item index** as well. The item
+/// index is a pair of index(usize) and generation(u64) so that you can use it
+/// for most cases.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ResourceId {
-    /// Index to a specific resource.
+    /// Index to a specific resource container.
+    ///
+    /// Resource container is just a resource but a container type like vector.
     ri: ResourceIndex,
 
-    /// Index to a resource item in a type of resource container.
-    ///
-    /// To store resources of the same type, clients need to register a resource
-    /// container for the type and then put resource items in it. Here, index to
-    /// a resource item points to a specific item in the container by `usize`
-    /// index and additional `u64` generation like [`ResourceIndex`].
+    /// Pair of index and generation for an item in the resource container.
     ii: With<usize, u64>,
 }
 
 impl ResourceId {
+    /// Creates a new [`ResourceId`] with the given resource index and item
+    /// index.
     pub const fn new(ri: ResourceIndex, ii: With<usize, u64>) -> Self {
         Self { ri, ii }
     }
 
+    /// Returns resource index.
     pub const fn resource_index(&self) -> ResourceIndex {
         self.ri
     }
 
+    /// Returns item index.
+    ///
+    /// Item index consists of an index(usize) and a generation(u64), but
+    /// the generation may not be used. It depends.
     pub const fn item_index(&self) -> With<usize, u64> {
         self.ii
     }
 }
 
-/// Index to a specific resource.
+/// A unique resource identifier.
+///
+/// Resource index is composed of index(usize) and generation(u64). The
+/// generation is determined when the resource is registered to an ECS instance.
+/// The generation help us detect stale resource identifiers.
 #[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug)]
 #[repr(transparent)]
 pub struct ResourceIndex(With<usize, u64>);
@@ -359,22 +435,27 @@ pub struct ResourceIndex(With<usize, u64>);
 impl ResourceIndex {
     const DUMMY: Self = Self(With::new(usize::MAX, u64::MAX));
 
-    pub const fn new(index: usize, gen: u64) -> Self {
-        Self(With::new(index, gen))
+    /// Creates a new [`ResourceIndex`] with the given index and generation.
+    pub const fn new(index: usize, generation: u64) -> Self {
+        Self(With::new(index, generation))
     }
 
+    /// Creates a dummy [`ResourceIndex`].
     pub const fn dummy() -> Self {
         Self::DUMMY
     }
 
+    /// Returns true if the resource index is dummy.
     pub fn is_dummy(&self) -> bool {
         *self == Self::dummy()
     }
 
+    /// Returns inner index.
     pub fn index(&self) -> usize {
         self.0.value
     }
 
+    /// Returns inner generation.
     pub fn generation(&self) -> u64 {
         self.0.with
     }

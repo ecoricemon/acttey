@@ -1,4 +1,4 @@
-use my_ecs::prelude::*;
+use my_ecs::ds::{ReadyFuture, UnsafeFuture, WakeSend};
 use std::{
     future::Future,
     pin::Pin,
@@ -12,12 +12,12 @@ use std::{
 };
 
 fn main() {
-    call_with_name(test_unsafefuture);
+    call_with_name(test_unsafe_future);
 }
 
 fn call_with_name(f: fn()) {
-    print!("{} ... ", my_ecs::type_name!(test_unsafefuture));
-    (f)();
+    print!("{} ... ", my_ecs::type_name!(test_unsafe_future));
+    f();
     println!("finished");
 }
 
@@ -35,7 +35,7 @@ fn call_with_name(f: fn()) {
 ///
 /// `beholder` must be able to see what `Main` have done to the `fut`. This
 /// test will fail if data race occurs.
-fn test_unsafefuture() {
+fn test_unsafe_future() {
     let state = Arc::new(Mutex::new(0));
 
     let (tx, rx) = mpsc::channel::<UnsafeFuture>();

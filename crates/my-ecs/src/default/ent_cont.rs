@@ -1,29 +1,37 @@
-use crate::ds::prelude::*;
-use crate::ecs::ent::entity::{AddEntity, BorrowComponent, ContainEntity, RegisterComponent};
+//! Provides [`ContainEntity`] implementations.
+//!
+//! Currently, there are two options.
+//!
+//! - [`SparseSet`] based on [`AnyVec`], which stores data serially. It's good
+//!   for traversing items, but requires copy when the vector needs to extend
+//!   its capacity.
+//!
+//! - [`ChunkSparseSet`] based on [`ChunkAnyVec`], which stores data in chunks.
+//!   Chunk is a fixed sized memory, and the vector appends a chunk when it
+//!   needs more capacity. Therefore, `ChunkSparseSet` is good for frequent
+//!   insertion or removal, but not good as mush as `SparseSet` in terms of
+//!   traversing items.
+
+use crate::{
+    ds::{
+        AnyVec, AsFlatRawIter, BorrowError, BorrowResult, ChunkAnyVec, FlatRawIter, Holder, OptVec,
+        RawGetter, TypeInfo,
+    },
+    ecs::ent::entity::{AddEntity, BorrowComponent, ContainEntity, RegisterComponent},
+};
 use std::{
     any::TypeId, cmp, collections::HashMap, fmt::Debug, hash::BuildHasher, mem, ptr::NonNull,
 };
 
-/// Two dimensional storage containing heterogeneous types of data.
+/// Two-dimensional storage containing heterogeneous data types based on
+/// [`ChunkAnyVec`].
 ///
-/// This struct is composed of "Sparse" and "Dense" layers. Sparse layer is
-/// literally sparse, so it has vacant slots in it, while dense layer doesn't.
-/// Dense layer contains real items and the items can be accessed through the
-/// sparse layer. Each dense is identified by its item's [`TypeId`]. But you
-/// are encouraged to access each dense by its index, not `TypeId` for the
-/// performance.
+/// Unlike `SparseSet`, this struct stores data in chunks. Chunk is a fixed
+/// sized memory, and it's appended when extra capacity is needed. This chunk
+/// based capacity control removes data copy that is seen from normal vector,
+/// but note that it brings inefficiency in terms of iteration.
 ///
-/// We call each dense layer a column, and all columns have the same length.
-/// So it looks like a 2D matrix as shown below.
-///
-/// ```text
-/// Index  Sparse  Dense  Dense
-///                  A      B
-///   0      0 _____ .      .
-///   1      2 _   _ .      .
-///   2      x  \_/_ .      .
-///   3      1 __/   
-/// ```
+/// See [`SparseSet`] for more details.
 #[derive(Debug)]
 pub struct ChunkSparseSet<S> {
     sparse: OptVec<usize, S>,
@@ -39,6 +47,15 @@ where
     const CHUNK_SIZE: usize = 4 * 1024;
     const MIN_CHUNK_LEN: usize = 8;
 
+    /// Creates a new empty [`ChunkSparseSet`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use my_ecs::prelude::*;
+    ///
+    /// let mut cont = ChunkSparseSet::<std::hash::RandomState>::new();
+    /// ```
     pub fn new() -> Self {
         Self {
             sparse: OptVec::new(),
@@ -61,8 +78,10 @@ where
             .map(|col| {
                 let (fn_imm, fn_mut) = (col.get_fn_imm(), col.get_fn_mut());
                 let col = col.get().unwrap();
-                let value = ChunkAnyVec::new(*col.type_info(), col.chunk_len());
-                Holder::new(value, fn_imm, fn_mut)
+                let value = ChunkAnyVec::new(*col.type_info(), col.default_chunk_capacity());
+                // Safety: It's safe to create the same `Holder`. The safety
+                // must have been guaranteed by source `Holder`.
+                unsafe { Holder::new(value, fn_imm, fn_mut) }
             })
             .collect::<Vec<_>>();
 
@@ -119,7 +138,7 @@ where
     unsafe fn resize_column(&mut self, ci: usize, new_len: usize, val_ptr: NonNull<u8>) {
         let mut col = self.cols[ci].get_mut().unwrap();
         assert!(col.is_clone());
-        col.resize_raw(new_len, val_ptr);
+        unsafe { col.resize_raw(new_len, val_ptr) }
     }
 }
 
@@ -140,10 +159,10 @@ where
             let this = unsafe { NonNull::new_unchecked((col as *const _ as *const u8).cast_mut()) };
             let len = col.len();
             unsafe fn fn_get(this: NonNull<u8>, index: usize) -> NonNull<u8> {
-                this.cast::<ChunkAnyVec>().as_ref().get_raw_unchecked(index)
+                unsafe { this.cast::<ChunkAnyVec>().as_ref().get_raw_unchecked(index) }
             }
             unsafe fn fn_iter(this: NonNull<u8>) -> FlatRawIter {
-                this.cast::<ChunkAnyVec>().as_ref().iter()
+                unsafe { this.cast::<ChunkAnyVec>().as_ref().iter() }
             }
             // Safety: The pointer is valid.
             let getter = unsafe { RawGetter::new(this, len, fn_get) };
@@ -165,7 +184,8 @@ where
             0 // Has no effect
         };
         let value = ChunkAnyVec::new(tinfo, chunk_len);
-        let holder = Holder::new(value, fn_imm, fn_mut);
+        // Safety: `fn_imm` and `fn_mut` don't return lifetime-constrained type.
+        let holder = unsafe { Holder::new(value, fn_imm, fn_mut) };
         self.cols.push(holder);
 
         let ci = self.cols.len() - 1;
@@ -272,7 +292,7 @@ where
     }
 
     unsafe fn get_column(&self, ci: usize) -> Option<NonNull<u8>> {
-        self.cols.get(ci).map(|col| {
+        self.cols.get(ci).map(|col| unsafe {
             let ptr = col.get_unchecked() as *const _ as *const u8;
             NonNull::new_unchecked(ptr.cast_mut())
         })
@@ -293,9 +313,11 @@ where
 
     unsafe fn add_value(&mut self, ci: usize, val_ptr: NonNull<u8>) {
         // Panics if holder has been borrowed and not returned yet.
-        let holder = self.cols.get_unchecked_mut(ci);
-        let mut col = holder.get_mut().unwrap_unchecked();
-        col.push_raw(val_ptr);
+        unsafe {
+            let holder = self.cols.get_unchecked_mut(ci);
+            let mut col = holder.get_mut().unwrap_unchecked();
+            col.push_raw(val_ptr);
+        }
     }
 
     unsafe fn end_add_row(&mut self) -> usize {
@@ -335,19 +357,19 @@ where
     }
 
     unsafe fn remove_value_by_value_index(&mut self, ci: usize, vi: usize, buf: NonNull<u8>) {
-        let holder = self.cols.get_unchecked_mut(ci);
+        let holder = unsafe { self.cols.get_unchecked_mut(ci) };
         let mut col = holder.get_mut().unwrap();
-        col.swap_remove_raw(vi, buf.as_ptr());
+        unsafe { col.swap_remove_raw(vi, buf.as_ptr()) };
     }
 
     unsafe fn drop_value_by_value_index(&mut self, ci: usize, vi: usize) {
-        let holder = self.cols.get_unchecked_mut(ci);
+        let holder = unsafe { self.cols.get_unchecked_mut(ci) };
         let mut col = holder.get_mut().unwrap();
         col.swap_remove_drop(vi);
     }
 
     unsafe fn forget_value_by_value_index(&mut self, ci: usize, vi: usize) {
-        let holder = self.cols.get_unchecked_mut(ci);
+        let holder = unsafe { self.cols.get_unchecked_mut(ci) };
         let mut col = holder.get_mut().unwrap();
         col.swap_remove_forget(vi);
     }
@@ -372,6 +394,29 @@ where
     }
 }
 
+/// Two-dimensional storage containing heterogeneous data types based on
+/// [`AnyVec`].
+///
+/// This struct is composed of "Sparse" and "Dense" layers. Sparse layer is
+/// literally sparse, so it can contain vacant slots in it, while dense layer
+/// doesn't. Dense layer contains real items and the items can be accessed
+/// through the sparse layer. Each dense is identified by its item's [`TypeId`].
+/// But you are encouraged to access each dense by its index, not `TypeId` for
+/// the performance.
+///
+/// We call each dense layer a column, and all columns have the same length.
+/// So it looks like a 2D matrix as shown below.
+///
+/// ```text
+/// Index  Sparse  Dense  Dense
+///                  A      B
+///   0      0 _____ .      .
+///   1      2 _   _ .      .
+///   2      x  \_/_ .      .
+///   3      1 __/   
+///
+/// , where '.' is item and 'x' is vacant slot.
+/// ```
 #[derive(Debug)]
 pub struct SparseSet<S> {
     sparse: OptVec<usize, S>,
@@ -384,6 +429,15 @@ impl<S> SparseSet<S>
 where
     S: Default,
 {
+    /// Creates a new empty [`SparseSet`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use my_ecs::prelude::*;
+    ///
+    /// let mut cont = SparseSet::<std::hash::RandomState>::new();
+    /// ```
     pub fn new() -> Self {
         Self {
             sparse: OptVec::new(),
@@ -407,7 +461,9 @@ where
                 let (fn_imm, fn_mut) = (col.get_fn_imm(), col.get_fn_mut());
                 let col = col.get().unwrap();
                 let value = AnyVec::new(*col.type_info());
-                Holder::new(value, fn_imm, fn_mut)
+                // Safety: It's safe to create the same `Holder`. The safety
+                // must have been guaranteed by source `Holder`.
+                unsafe { Holder::new(value, fn_imm, fn_mut) }
             })
             .collect::<Vec<_>>();
 
@@ -464,7 +520,7 @@ where
     unsafe fn resize_column(&mut self, ci: usize, new_len: usize, val_ptr: NonNull<u8>) {
         let mut col = self.cols[ci].get_mut().unwrap();
         assert!(col.is_clone());
-        col.resize_raw(new_len, val_ptr);
+        unsafe { col.resize_raw(new_len, val_ptr) };
     }
 }
 
@@ -484,10 +540,11 @@ where
             let this = unsafe { NonNull::new_unchecked((col as *const _ as *const u8).cast_mut()) };
             let len = col.len();
             unsafe fn fn_get(this: NonNull<u8>, index: usize) -> NonNull<u8> {
-                this.cast::<AnyVec>().as_ref().get_raw_unchecked(index)
+                unsafe { this.cast::<AnyVec>().as_ref().get_raw_unchecked(index) }
             }
             unsafe fn fn_iter(this: NonNull<u8>) -> FlatRawIter {
-                this.cast::<AnyVec>().as_ref().iter2()
+                let this = unsafe { this.cast::<AnyVec>().as_ref() };
+                this.iter2()
             }
             // Safety: The pointer is valid.
             let getter = unsafe { RawGetter::new(this, len, fn_get) };
@@ -501,7 +558,8 @@ where
 
         // Adds column wrapped with Holder.
         let value = AnyVec::new(tinfo);
-        let holder = Holder::new(value, fn_imm, fn_mut);
+        // Safety: `fn_imm` and `fn_mut` don't return lifetime-constrained type.
+        let holder = unsafe { Holder::new(value, fn_imm, fn_mut) };
         self.cols.push(holder);
 
         let ci = self.cols.len() - 1;
@@ -608,7 +666,7 @@ where
     }
 
     unsafe fn get_column(&self, ci: usize) -> Option<NonNull<u8>> {
-        self.cols.get(ci).map(|col| {
+        self.cols.get(ci).map(|col| unsafe {
             let ptr = col.get_unchecked() as *const _ as *const u8;
             NonNull::new_unchecked(ptr.cast_mut())
         })
@@ -628,10 +686,12 @@ where
     fn begin_add_row(&mut self) {}
 
     unsafe fn add_value(&mut self, ci: usize, val_ptr: NonNull<u8>) {
-        // Panics if holder has been borrowed and not returned yet.
-        let holder = self.cols.get_unchecked_mut(ci);
-        let mut col = holder.get_mut().unwrap_unchecked();
-        col.push_raw(val_ptr);
+        unsafe {
+            // Panics if holder has been borrowed and not returned yet.
+            let holder = self.cols.get_unchecked_mut(ci);
+            let mut col = holder.get_mut().unwrap_unchecked();
+            col.push_raw(val_ptr);
+        }
     }
 
     unsafe fn end_add_row(&mut self) -> usize {
@@ -671,19 +731,21 @@ where
     }
 
     unsafe fn remove_value_by_value_index(&mut self, ci: usize, vi: usize, buf: NonNull<u8>) {
-        let holder = self.cols.get_unchecked_mut(ci);
-        let mut col = holder.get_mut().unwrap();
-        col.swap_remove_raw(vi, buf.as_ptr());
+        unsafe {
+            let holder = self.cols.get_unchecked_mut(ci);
+            let mut col = holder.get_mut().unwrap();
+            col.swap_remove_raw(vi, buf.as_ptr());
+        }
     }
 
     unsafe fn drop_value_by_value_index(&mut self, ci: usize, vi: usize) {
-        let holder = self.cols.get_unchecked_mut(ci);
+        let holder = unsafe { self.cols.get_unchecked_mut(ci) };
         let mut col = holder.get_mut().unwrap();
         col.swap_remove_drop(vi);
     }
 
     unsafe fn forget_value_by_value_index(&mut self, ci: usize, vi: usize) {
-        let holder = self.cols.get_unchecked_mut(ci);
+        let holder = unsafe { self.cols.get_unchecked_mut(ci) };
         let mut col = holder.get_mut().unwrap();
         col.swap_remove_forget(vi);
     }

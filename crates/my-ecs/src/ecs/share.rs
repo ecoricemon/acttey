@@ -1,6 +1,5 @@
 use crate::{
-    debug_format,
-    ds::vec::AnyVec,
+    ds::AnyVec,
     ecs::{
         ent::{
             component::{Component, ComponentKey},
@@ -10,6 +9,7 @@ use crate::{
         entry::{Ecs, EcsEntry},
         sched::ctrl::SUB_CONTEXT,
     },
+    util::macros::debug_format,
 };
 use std::{
     cmp,
@@ -67,10 +67,10 @@ pub(crate) struct EntMoveStorage {
     /// Operations on entities whether to add or remove components.
     ops: Vec<Operation>,
 
-    /// Lenghts of commands.
+    /// Lengths of commands.
     ///
     /// A command is composed of a set of operations. Length of it is number
-    /// of operations of the set.  
+    /// of operations of the set.
     /// In other words, `lens.iter().sum() == ops.len()`.
     lens: Vec<usize>,
 
@@ -148,7 +148,7 @@ impl EntMoveStorage {
         let Some(mut src_cont) = ecs.entity_container_ptr(src_ekey) else {
             return;
         };
-        // Safety: We got the poiner from Ecs right before.
+        // Safety: We got the pointer from Ecs right before.
         let src_cont_mut = unsafe { src_cont.as_mut() };
 
         // Gets dst entity container.
@@ -156,7 +156,7 @@ impl EntMoveStorage {
         let mut dst_cont = self.find_dst_cont(src_cont_mut, ecs);
         debug_assert_ne!(src_cont, dst_cont);
 
-        // Safety: We got the poiner from Ecs right before.
+        // Safety: We got the pointer from Ecs right before.
         let dst_cont_mut = unsafe { dst_cont.as_mut() };
 
         // Moves an entity from src to dst.
@@ -192,30 +192,30 @@ impl EntMoveStorage {
         {
             match dir {
                 Direction::Add => {
-                    let errmsg = debug_format!(
+                    let reason = debug_format!(
                         "adding component({:?}) to entity({:?}) failed. it already belongs to the entity",
                         target,
                         _from
                     );
-                    assert!(!contains_src(target), "{errmsg}");
+                    assert!(!contains_src(target), "{}", reason);
                     self.ckey_buf.push(*target);
                 }
                 Direction::Remove => {
-                    let errmsg = debug_format!(
+                    let reason = debug_format!(
                         "removing component({:?}) from entity({:?}) failed. it doesn't belong to the entity",
                         target,
                         _from
                     );
-                    assert!(contains_src(target), "{errmsg}");
+                    assert!(contains_src(target), "{}", reason);
 
-                    let errmsg =
+                    let reason =
                         debug_format!("removing the same component more than once is not allowed");
                     let (i, _) = self
                         .ckey_buf
                         .iter()
                         .enumerate()
                         .find(|(_, ckey)| *ckey == target)
-                        .expect(&errmsg);
+                        .expect(&reason);
                     self.ckey_buf.swap_remove(i);
                 }
             }
@@ -324,11 +324,13 @@ impl EntMoveStorage {
             src_vi: usize,
             dst_ci: usize,
         ) {
-            let src_ptr = src_cont
-                .value_ptr_by_value_index(src_ci, src_vi)
-                .unwrap_unchecked();
-            dst_cont.add_value(dst_ci, src_ptr);
-            src_cont.forget_value_by_value_index(src_ci, src_vi);
+            unsafe {
+                let src_ptr = src_cont
+                    .value_ptr_by_value_index(src_ci, src_vi)
+                    .unwrap_unchecked();
+                dst_cont.add_value(dst_ci, src_ptr);
+                src_cont.forget_value_by_value_index(src_ci, src_vi);
+            }
         }
 
         #[inline]
@@ -338,12 +340,15 @@ impl EntMoveStorage {
             dst_ckey: &ComponentKey,
             dst_ci: usize,
         ) {
-            let buf = bufs
-                .get_mut(dst_ckey)
-                .unwrap_unchecked();
-            let buf_ptr = buf
-                .get_raw_unchecked(buf.len() - 1); // Infallible
-            dst_cont.add_value(dst_ci, buf_ptr);
+            let buf = unsafe {
+                let buf = bufs
+                    .get_mut(dst_ckey)
+                    .unwrap_unchecked();
+                let buf_ptr = buf
+                    .get_raw_unchecked(buf.len() - 1); // Infallible
+                dst_cont.add_value(dst_ci, buf_ptr);
+                buf
+            };
             buf.pop_forget();
         }
     }
@@ -365,7 +370,7 @@ struct Operation {
     /// The operation's target component.
     target: ComponentKey,
 
-    /// Whether be added to the enitty or removed from the entity.
+    /// Whether be added to the entity or removed from the entity.
     dir: Direction,
 }
 
@@ -379,104 +384,88 @@ enum Direction {
 mod tests {
     #[test]
     #[should_panic]
+    #[rustfmt::skip]
     fn test_add_existing_component_panic() {
         use crate as my_ecs;
         use my_ecs::prelude::*;
 
         #[derive(Entity)]
-        struct Ea {
-            ca: Ca,
-        }
-        #[derive(Component)]
-        struct Ca;
+        struct Ea { ca: Ca }
+        #[derive(Component)] struct Ca;
 
-        let mut ecs = Ecs::default(WorkerPool::with_len(1), [1]);
-        ecs.register_entity_of::<Ea>().unwrap();
-        ecs.add_system(SystemDesc::new().with_once(|ew: EntWrite<Ea>| {
-            let eid = ew.take_recur().unwrap().add(Ea { ca: Ca });
-            // `Ea` contains `Ca`, so clients cannot add `Ca` again.
-            cmd::entity(eid).attach(Ca);
-        }))
-        .unwrap();
-        ecs.run().schedule_all();
+        Ecs::default(WorkerPool::with_len(1), [1])
+            .register_entity_of::<Ea>()
+            .add_system(SystemDesc::new().with_once(|ew: EntWrite<Ea>| {
+                let eid = ew.take_recur().add(Ea { ca: Ca });
+                // `Ea` contains `Ca`, so clients cannot add `Ca` again.
+                global::entity(eid).attach(Ca);
+            }))
+            .step();
     }
 
     #[test]
     #[should_panic]
+    #[rustfmt::skip]
     fn test_add_duplicated_components_panic() {
         use crate as my_ecs;
         use my_ecs::prelude::*;
 
         #[derive(Entity)]
-        struct Ea {
-            ca: Ca,
-        }
-        #[derive(Component)]
-        struct Ca;
-        #[derive(Component)]
-        struct Cb;
+        struct Ea { ca: Ca }
+        #[derive(Component)] struct Ca;
+        #[derive(Component)] struct Cb;
 
-        let mut ecs = Ecs::default(WorkerPool::with_len(1), [1]);
-        ecs.register_entity_of::<Ea>().unwrap();
-        ecs.add_system(SystemDesc::new().with_once(|ew: EntWrite<Ea>| {
-            let eid = ew.take_recur().unwrap().add(Ea { ca: Ca });
-            // Duplicated components are not allowed.
-            cmd::entity(eid).attach(Cb).attach(Cb);
-        }))
-        .unwrap();
-        ecs.run().schedule_all();
+        Ecs::default(WorkerPool::with_len(1), [1])
+            .register_entity_of::<Ea>()
+            .add_system(SystemDesc::new().with_once(|ew: EntWrite<Ea>| {
+                let eid = ew.take_recur().add(Ea { ca: Ca });
+                // Duplicated components are not allowed.
+                global::entity(eid).attach(Cb).attach(Cb);
+            }))
+            .step();
     }
 
     #[test]
     #[should_panic]
-    fn test_remove_unknonw_component_panic() {
+    #[rustfmt::skip]
+    fn test_remove_unknown_component_panic() {
         use crate as my_ecs;
         use my_ecs::prelude::*;
 
         #[derive(Entity)]
-        struct Ea {
-            ca: Ca,
-        }
-        #[derive(Component)]
-        struct Ca;
-        #[derive(Component)]
-        struct Cb;
+        struct Ea { ca: Ca }
+        #[derive(Component)] struct Ca;
+        #[derive(Component)] struct Cb;
 
-        let mut ecs = Ecs::default(WorkerPool::with_len(1), [1]);
-        ecs.register_entity_of::<Ea>().unwrap();
-        ecs.add_system(SystemDesc::new().with_once(|ew: EntWrite<Ea>| {
-            let eid = ew.take_recur().unwrap().add(Ea { ca: Ca });
-            // `Ea` doesn't contain `Cb`, so clients cannot remove `Cb`.
-            cmd::entity(eid).detach::<Cb>();
-        }))
-        .unwrap();
-        ecs.run().schedule_all();
+        Ecs::default(WorkerPool::with_len(1), [1])
+            .register_entity_of::<Ea>()
+            .add_system(SystemDesc::new().with_once(|ew: EntWrite<Ea>| {
+                let eid = ew.take_recur().add(Ea { ca: Ca });
+                // `Ea` doesn't contain `Cb`, so clients cannot remove `Cb`.
+                global::entity(eid).detach::<Cb>();
+            }))
+            .step();
     }
 
     #[test]
     #[should_panic]
+    #[rustfmt::skip]
     fn test_remove_the_same_component_many_panic() {
         use crate as my_ecs;
         use my_ecs::prelude::*;
 
         #[derive(Entity)]
-        struct Ea {
-            ca: Ca,
-            cb: Cb,
-        }
-        #[derive(Component)]
-        struct Ca;
-        #[derive(Component)]
-        struct Cb;
+        struct Ea { ca: Ca, cb: Cb }
+        #[derive(Component)] struct Ca;
+        #[derive(Component)] struct Cb;
 
-        let mut ecs = Ecs::default(WorkerPool::with_len(1), [1]);
-        ecs.register_entity_of::<Ea>().unwrap();
-        ecs.add_system(SystemDesc::new().with_once(|ew: EntWrite<Ea>| {
-            let eid = ew.take_recur().unwrap().add(Ea { ca: Ca, cb: Cb });
-            // Removing the same component multiple times is not allowed.
-            cmd::entity(eid).detach::<Cb>().detach::<Cb>();
-        }))
-        .unwrap();
-        ecs.run().schedule_all();
+        Ecs::default(WorkerPool::with_len(1), [1])
+            .register_entity_of::<Ea>()
+            .add_system(SystemDesc::new().with_once(|ew: EntWrite<Ea>| {
+                let eid = ew.take_recur().add(Ea { ca: Ca, cb: Cb });
+                // Removing the same component multiple times is not allowed.
+                global::entity(eid).detach::<Cb>().detach::<Cb>();
+            }))
+            .step();
     }
 }

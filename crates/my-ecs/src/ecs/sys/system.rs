@@ -1,13 +1,14 @@
 use super::{
-    query::{
-        EntQueryMut, EntWrite, Query, QueryMut, Read, ResQuery, ResQueryMut, ResRead, ResWrite,
-        Write,
-    },
+    query::{EntQueryMut, Query, QueryMut, ResQuery, ResQueryMut},
     request::{
         Request, RequestInfo, RequestKey, Response, StoreRequestInfo, SystemBuffer, RINFO_STOR,
     },
 };
-use crate::{debug_format, ds::prelude::*, ecs::EcsError, util::Or};
+use crate::{
+    ds::{ATypeId, ListPos, ManagedMutPtr, NonNullExt, SetList, SimpleVecPool},
+    ecs::EcsError,
+    util::{macros::debug_format, Or},
+};
 use std::{
     any::{self, Any},
     borrow,
@@ -23,6 +24,90 @@ use std::{
 
 use SystemState::*;
 
+/// System is a type that accesses components, entities, or resoruces.
+///
+/// [`Fn`], [`FnMut`], and [`FnOnce`] with certain parameters implement this
+/// trait by the crate. Of course `struct` also can implement this trait. It's
+/// useful when you need some data for a system.
+///
+/// # Examples
+///
+/// Here's an example of system declaration.
+/// ```
+/// # use my_ecs::prelude::*;
+///
+/// #[derive(Component)] struct Ca;
+/// #[derive(Component)] struct Cb;
+/// #[derive(Component)] struct Cc;
+/// #[derive(Component)] struct Cd;
+/// #[derive(Resource)] struct Ra(i32);
+/// #[derive(Resource)] struct Rb(i32);
+/// #[derive(Resource)] struct Rc(i32);
+/// #[derive(Resource)] struct Rd(i32);
+///
+/// filter!(Fa, Target = Ca); // All, Any, None are ommited for simplicity.
+/// filter!(Fb, Target = Cb);
+/// filter!(Fc, Target = Cc);
+/// filter!(Fd, Target = Cd);
+/// filter!(Fe, All = (Ca, Cb)); // Any and None are ommited for simplicity.
+/// filter!(Ff, All = (Cc, Cd)); // Any and None are ommited for simplicity.
+///
+/// // Function system declaration.
+///
+/// fn system_a(
+///     r: Read<(Fa, Fb)>, // Read request for the filters.
+///     w: Write<(Fc, Fd)>, // Write request for the filters.
+///     rr: ResRead<(Ra, Rb)>, // Read request for the resources.
+///     rw: ResWrite<(Rc, Rd)>, // Write request for the resources.
+///     ew: EntWrite<(Fe, Ff)>, // Write request for the filters.
+/// ) { /* ... */ }
+///
+/// // Struct system declaration.
+///
+/// request!(Req,
+///     Read = (Fa, Fb),
+///     Write = (Fc, Fd),
+///     ResRead = (Ra, Rb),
+///     ResWrite = (Rc, Rd),
+///     EntWrite = (Fe, Ff)
+/// );
+///
+/// struct SystemB;
+///
+/// impl System for SystemB {
+///     type Request = Req;
+///     fn run(&mut self, resp: Response<'_, Self::Request>) { /* ... */ }
+/// }
+/// ```
+///
+/// ---
+///
+/// This is another example to show how to add systems to an ECS instance.
+/// ```
+/// use my_ecs::prelude::*;
+///
+/// // Systems do nothing for simplicity.
+///
+/// struct StructSystem {
+///     data: String,
+/// }
+///
+/// impl System for StructSystem {
+///     type Request = ();
+///     fn run(&mut self, resp: Response<'_, Self::Request>) { /* ... */ }
+/// }
+///
+/// let struct_system = StructSystem { data: "".to_owned() };
+/// let fn_system = || {};
+/// let s: String = "".to_owned();
+/// let fn_once_system = move || { drop(s); };
+///
+/// Ecs::default(WorkerPool::new(), [])
+///     .add_systems((struct_system, fn_system))
+///     .add_once_system(fn_once_system)
+///     .unwrap();
+/// ```
+//
 // Clients can define their systems with some data. And we're going to send
 // those systems to other workers, so it's good to add `Send` bound to the trait
 // for safety.
@@ -30,17 +115,20 @@ use SystemState::*;
 pub trait System: Send + 'static {
     type Request: Request;
 
+    /// Runs the system with the response corresponding to its request.
     fn run(&mut self, resp: Response<'_, Self::Request>);
 
     #[doc(hidden)]
     #[allow(unused_variables)]
     fn run_private(&mut self, sid: SystemId, buf: ManagedMutPtr<SystemBuffer>) {}
 
+    /// Does a certain behavior on transitions of system state.
+    ///
+    /// See [`SystemState`] for more details.
     #[allow(unused_variables)]
     fn on_transition(&mut self, from: SystemState, to: SystemState) {}
 
-    /// This name may change in the future.
-    /// Use this name as debugging information only.
+    /// Returns system name.
     fn name() -> &'static str {
         any::type_name::<Self>()
     }
@@ -208,20 +296,18 @@ where
         self.active.contains(sid)
     }
 
-    /// Determines whether or not a system for the given id is in [`Active`] or
+    /// Determines whether a system for the given id is in [`Active`] or
     /// [`Inactive`] states.
     pub(crate) fn contains(&self, sid: &SystemId) -> bool {
         self.contains_active(sid) || self.contains_inactive(sid)
     }
 
-    /// Determines whether or not a system for the given id is in [`Active`]
-    /// state.
+    /// Determines whether a system for the given id is in [`Active`] state.
     pub(crate) fn contains_active(&self, sid: &SystemId) -> bool {
         self.active.contains(sid)
     }
 
-    /// Determines whether or not a system for the given id is in [`Inactive`]
-    /// state.
+    /// Determines whether a system for the given id is in [`Inactive`] state.
     pub(crate) fn contains_inactive(&self, sid: &SystemId) -> bool {
         self.inactive.contains(sid)
     }
@@ -284,10 +370,9 @@ where
     /// Activates a system for the given id.
     ///
     /// Cases below are considered ok.
-    /// - If the system was already in [`Active`] state.
     /// - No error
     ///
-    /// Then the system state transitions from [`Inactive`] to `Active`.
+    /// Then the system state transitions from [`Inactive`] to [`Active`].
     ///
     /// Whereas cases below are considered error.
     /// - If the system was not in `Inactive` state.
@@ -308,9 +393,6 @@ where
                 return Err(EcsError::UnknownSystem(reason, ()));
             }
         }
-        if self.is_active(target) {
-            return Ok(());
-        }
 
         if let Some(mut sdata) = self.inactive.take(target) {
             debug_assert_eq!(sdata.id(), *target);
@@ -323,8 +405,7 @@ where
             self.lifetime.register(*target, live);
             Ok(())
         } else {
-            // Unknown `target system.
-            let reason = debug_format!("tried to activate a not inactive system");
+            let reason = debug_format!("system activation is allowed for inactive systems only");
             Err(EcsError::UnknownSystem(reason, ()))
         }
     }
@@ -458,18 +539,31 @@ where
     }
 }
 
+/// State of a system.
+///
+/// * Active - The system can be run.
+/// * Inactive - The system cannot be run, but it can be reactivated.
+/// * Dead - The system has been completely consumed. It cannot be reactivated.
+/// * Poisoned - The system has panicked. It cannot be reactivated.
+///
+/// System state transitions are as follows.
+///
+/// | From         | To           | Input action                          |
+/// | ---          | ---          | ---                                   |
+/// |              | [`Inactive`] | A system is registered                |
+/// | [`Inactive`] | [`Active`]   | A system is activated                 |
+/// | [`Inactive`] | [`Dead`]     | A system is unregistered              |
+/// | [`Inactive`] | [`Poisoned`] | Not allowed                           |
+/// | [`Active`]   | [`Inactive`] | A system is inactivated or expired    |
+/// | [`Active`]   | [`Dead`]     | A system is expired and it's volatile |
+/// | [`Active`]   | [`Poisoned`] | A system panicked                     |
+/// | [`Dead`]     |              | A system is removed by client         |
+/// | [`Poisoned`] |              | A system is removed by client         |
 #[derive(Debug)]
 pub enum SystemState {
-    /// A system state meaning ready to be run.
     Active,
-
-    /// A system state meaning not ready to be run.
     Inactive,
-
-    /// A system state meaning dead. Dead systems cannot be reborn.
     Dead,
-
-    /// A system state meaning panicked. Poisoned systems cannot be reborn.
     Poisoned,
 }
 
@@ -488,7 +582,7 @@ where
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.0.len_occupied()
+        self.0.len()
     }
 
     pub(crate) fn contains(&self, sid: &SystemId) -> bool {
@@ -597,7 +691,7 @@ where
     S: BuildHasher,
 {
     pub(crate) fn new(systems: &mut SetList<SystemId, SystemData, S>) -> Self {
-        let cur_pos = systems.get_first_position();
+        let cur_pos = systems.first_position();
         // Safety: Infallible.
         let systems = unsafe { NonNull::new_unchecked(systems as *mut _) };
 
@@ -606,22 +700,21 @@ where
 
     /// Moves system position on to the next.
     pub(crate) unsafe fn next(&mut self) {
-        if let Some((next, _sdata)) = self.systems.as_ref().iter_next(self.cur_pos) {
+        let systems = unsafe { self.systems.as_ref() };
+        if let Some((next, _sdata)) = systems.iter_next(self.cur_pos) {
             self.cur_pos = next;
         }
     }
 
     /// Returns system to be run this time.
     pub(crate) unsafe fn get(&mut self) -> Option<&mut SystemData> {
-        self.get_at(self.cur_pos)
+        unsafe { self.get_at(self.cur_pos) }
     }
 
     /// Returns system at the given position.
     pub(crate) unsafe fn get_at(&mut self, pos: ListPos) -> Option<&mut SystemData> {
-        self.systems
-            .as_mut()
-            .iter_next_mut(pos)
-            .map(|(_, sdata)| sdata)
+        let systems = unsafe { self.systems.as_mut() };
+        systems.iter_next_mut(pos).map(|(_, sdata)| sdata)
     }
 }
 
@@ -633,6 +726,14 @@ impl<S> Clone for RawSystemCycleIter<S> {
 
 impl<S> Copy for RawSystemCycleIter<S> {}
 
+/// A position to insert a system into system scheduling list.
+///
+/// * Front - Inserts a system to the beginning of the system scheduling list.
+///   The system will be run first on the next scheduling.
+/// * Back - Inserts a system to the end of the system scheduling list. The
+///   system will be run last on the next scheduling.
+/// * After - Inserts a system after a specific system in the system scheduling
+///   list. The system will be run after the designated system.
 #[derive(Debug, Clone, Copy)]
 pub enum InsertPos {
     Back,
@@ -642,10 +743,10 @@ pub enum InsertPos {
 
 #[derive(Debug)]
 struct SystemLifetime<S> {
-    /// Monotonically increasing counter.
+    /// Monotonically increasing count.
     tick: Tick,
 
-    /// [`Tick`] -> [`Self::pool`] index.
+    /// [`Tick`] -> An index to [`Self::pool`].
     lives: HashMap<Tick, usize, S>,
 
     /// Vector contains system ids to be dead at a specific time.
@@ -668,22 +769,17 @@ where
         debug_assert!(live > 0);
 
         let end = self.tick.saturating_add(live);
-        let index = if let Some(index) = self.lives.get(&end) {
-            *index
-        } else {
-            let index = self.pool.request();
-            self.lives.insert(end, index);
-            index
-        };
+        let index = *self.lives.entry(end).or_insert(self.pool.request());
         let vec = self.pool.get(index);
         vec.push(sid);
     }
 
     fn tick(&mut self) -> Option<&mut Vec<SystemId>> {
         self.tick += 1;
-        self.lives
-            .remove(&self.tick)
-            .map(|index| self.pool.get_release(index))
+        self.lives.remove(&self.tick).map(|index| {
+            self.pool.release(index);
+            self.pool.get(index)
+        })
     }
 }
 
@@ -697,7 +793,7 @@ impl System for () {
 pub(crate) type SystemKey = ATypeId<SystemKey_>;
 pub(crate) struct SystemKey_;
 
-/// Globally unique system identification determined by [`SystemGroup`].
+/// Unique system identifier consisting of group index and system index.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Clone, Copy)]
 pub struct SystemId {
     group_index: u16,
@@ -728,10 +824,6 @@ impl SystemId {
 
     pub(crate) const fn group_index(&self) -> u16 {
         self.group_index
-    }
-
-    pub(crate) const fn max_group_index() -> u16 {
-        Self::MAX
     }
 
     pub(crate) const fn max_system_index() -> u16 {
@@ -771,7 +863,7 @@ pub(crate) struct SystemData {
     /// System data and its entry point.
     invoker: NonNull<(dyn Invoke + Send)>,
 
-    /// Infrequently accssed information such as system's name or request.
+    /// Infrequently accessed information such as system's name or request.
     //
     // * Why Arc
     // - In order to share `SystemInfo` with others.
@@ -878,7 +970,11 @@ impl SystemData {
     }
 
     pub(crate) unsafe fn task_ptr(&mut self) -> ManagedMutPtr<dyn Invoke + Send> {
-        ManagedMutPtr::new(NonNullExt::new_unchecked(self.invoker.as_ptr()))
+        unsafe {
+            let ptr = self.invoker.as_ptr();
+            let ptr = NonNullExt::new_unchecked(ptr);
+            ManagedMutPtr::new(ptr)
+        }
     }
 }
 
@@ -978,7 +1074,7 @@ impl SystemFlags {
 }
 
 pub(crate) struct SystemInfo {
-    /// System name basically determined by [`std::any::type_name`].
+    /// System name basically determined by [`any::type_name`].
     name: &'static str,
 
     _skey: SystemKey,
@@ -1032,6 +1128,7 @@ impl Drop for SystemInfo {
     }
 }
 
+/// A descriptor for a [`System`].
 pub struct SystemDesc<Sys> {
     /// System itself. Clients cannot put `SystemData` in, which is only allowed
     /// to the crate.
@@ -1204,13 +1301,18 @@ impl<S: System> Invoke for S {
     }
 }
 
-/// This struct helps a function implements [`System`].
-/// Because we can't use blanket impl for the `System`, due to confliction to other impls,
-/// We put this helper between function and `System`.
-/// That means a function can become `FnSystem` which implements `System`.
+/// A system that is [`FnMut`].
 ///
-/// * Req - Arbitrary length of arguments of F.
-/// * F - function.
+/// The purpose of this type is to remove boilerplate code related to system
+/// declaration when clients make systems using functions. Unlike types like
+/// `struct` or `enum`, functions have parameters which explains what types the
+/// functions need. The crate exploits the information then makes boilerplate
+/// code for clients.
+///
+/// Plus, there is [`FnOnceSystem`] for [`FnOnce`].
+///
+/// * Req - Arbitrary length of parameters of `F`.
+/// * F - Function.
 #[repr(transparent)]
 pub struct FnSystem<Req, F> {
     run: F,
@@ -1228,8 +1330,18 @@ where
     }
 }
 
-/// * Req - Arbitrary length of arguments of F.
-/// * F - Sendable function.
+/// A system that is [`FnOnce`].
+///
+/// The purpose of this type is to remove boilerplate code related to system
+/// declaration when clients make systems using functions. Unlike types like
+/// `struct` or `enum`, functions have parameters which explains what types the
+/// functions need. The crate exploits the information then makes boilerplate
+/// code for clients.
+///
+/// Plus, there is [`FnSystem`] for [`FnMut`].
+///
+/// * Req - Arbitrary length of parameters of `F`.
+/// * F - Function.
 #[repr(transparent)]
 pub struct FnOnceSystem<Req, F> {
     run: Option<F>,
@@ -1247,14 +1359,18 @@ where
     }
 }
 
-/// Placeholder for the [`FnSystem`]'s generic parameter.
-/// This helps us avoid impl confliction.
+/// Placeholder for implementation of [`FnSystem`] and [`FnOnceSystem`].
+///
+/// This is only used internally.
+//
+// This helps us avoid implementation conflicts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ph;
 
 #[rustfmt::skip]
 mod impl_for_fn_system {
     use super::*;
+    use crate::ecs::sys::query::{Read, Write, ResRead, ResWrite, EntWrite};
 
     macro_rules! _impl {
         (
@@ -1481,10 +1597,9 @@ mod impl_for_fn_system {
     _impl!((R,  W,  RR, RW, EW), (R,  W,  RR, RW, EW), r=R, w=W, rr=RR, rw=RW, ew=EW);
 }
 
-/// A system wrapper to help functions to accept various types of systems.
-/// This type doesn't do anything rather than becoming inner system.
+/// A internal type for support flexible APIs.
 //
-// When it come to use cases,
+// When it comes to use cases,
 // imagine that we'd like to accept 'struct' or 'closure' systems
 // in a function like this,
 // - fn register<S: System>(s: s) {}
@@ -1514,8 +1629,9 @@ impl<S: System> From<S> for SystemBond<S> {
     }
 }
 
-/// Monotonically increasing counter. When scheduling occurs, this counter
-/// increases by 1.
+/// Monotonically increasing count over scheduling.
+///
+/// When scheduling occurs, this counter increases by 1.
 pub type Tick = u64;
 
 #[cfg(test)]
@@ -1524,7 +1640,7 @@ mod tests {
 
     #[test]
     fn test_systemgroup_unregister_volatile() {
-        let mut sgroup = SystemGroup::<std::hash::RandomState>::new(0);
+        let mut sgroup = SystemGroup::<hash::RandomState>::new(0);
 
         // Registers an inactive & volatile system.
         // Active: 0, Inactive: 1, Volatile: 1
@@ -1543,9 +1659,9 @@ mod tests {
 
     #[test]
     fn test_systemgroup_mixed_operations() {
-        let mut sgroup = SystemGroup::<std::hash::RandomState>::new(0);
+        let mut sgroup = SystemGroup::<hash::RandomState>::new(0);
 
-        // Registers an inactive & non-volitile system.
+        // Registers an inactive & non-volatile system.
         // Active: 0, Inactive: 1, Volatile: 0
         let mut sdata: SystemData = ().into_data();
         let sid_a = sgroup.next_system_id();

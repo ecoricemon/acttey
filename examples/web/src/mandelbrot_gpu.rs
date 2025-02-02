@@ -1,11 +1,13 @@
-use super::mandelbrot::*;
+use super::share::*;
 use acttey::prelude::*;
+use std::slice;
 use wasm_bindgen::prelude::*;
 
 const GPU_SHADER_NAME: &str = "shader";
 const GPU_WRITE_BUF_NAME: &str = "write-buffer";
 const GPU_READ_BUF_NAME: &str = "read-buffer";
 const GPU_ARGS_BUF_NAME: &str = "args-buffer";
+const GPU_PALETTE_BUF_NAME: &str = "palette-buffer";
 const GPU_BIND_GROUP_LAYOUT_NAME: &str = "bind-group-layout";
 const GPU_BIND_GROUP_NAME: &str = "bind-group";
 const GPU_PIPELINE_LAYOUT_NAME: &str = "pipeline-layout";
@@ -28,14 +30,13 @@ pub(super) fn init_gpu_resources(
         rw.take();
 
     create_shader(shader_stor);
-    let (width, height) = ARGS.lock().unwrap().size;
-    create_read_write_buffer(buf_stor, (width * height * 4) as u64);
-    create_args_buffer(buf_stor);
+    create_buffer(buf_stor);
     create_bind_group_layout(bind_layout_stor);
     let bind_layout = bind_layout_stor.get(GPU_BIND_GROUP_LAYOUT_NAME).unwrap();
     let write_buf = buf_stor.get(GPU_WRITE_BUF_NAME).unwrap();
     let args_buf = buf_stor.get(GPU_ARGS_BUF_NAME).unwrap();
-    create_bind_group(bind_stor, bind_layout, write_buf, args_buf);
+    let palette_buf = buf_stor.get(GPU_PALETTE_BUF_NAME).unwrap();
+    create_bind_group(bind_stor, bind_layout, write_buf, args_buf, palette_buf);
     create_pipeline_layout(pipe_layout_stor, bind_layout);
     let shader = shader_stor.get(GPU_SHADER_NAME).unwrap();
     let pipe_layout = pipe_layout_stor.get(GPU_PIPELINE_LAYOUT_NAME).unwrap();
@@ -47,57 +48,13 @@ pub(super) fn init_gpu_resources(
     create_encoder(enc_stor, pipe, bind, write_buf, read_buf);
 }
 
-pub(super) fn on_resize(
-    rw: ResWrite<(
-        GpuBufferStorage,
-        BindGroupLayoutStorage,
-        BindGroupStorage,
-        ComputePipelineStorage,
-        CommandEncoderStorage,
-    )>,
-) {
-    let (buf_stor, bind_layout_stor, bind_stor, pipe_stor, enc_stor) = rw.take();
-
-    // Do we need to update the GPU buffer?
-    let (width, height) = ARGS.lock().unwrap().size;
-    let need_size = (width * height * 4) as u64;
-    let cur_size = buf_stor
-        .get(GPU_WRITE_BUF_NAME)
-        .map(|buf| buf.size())
-        .unwrap_or_default();
-    if cur_size >= need_size {
-        return;
-    }
-
-    // Replaces buffer.
-    buf_stor.remove(GPU_WRITE_BUF_NAME);
-    buf_stor.remove(GPU_READ_BUF_NAME);
-    create_read_write_buffer(buf_stor, need_size);
-
-    // Replaces bind group.
-    bind_stor.remove(GPU_BIND_GROUP_NAME);
-    let bind_layout = bind_layout_stor.get(GPU_BIND_GROUP_LAYOUT_NAME).unwrap();
-    let write_buf = buf_stor.get(GPU_WRITE_BUF_NAME).unwrap();
-    let args_buf = buf_stor.get(GPU_ARGS_BUF_NAME).unwrap();
-    create_bind_group(bind_stor, bind_layout, write_buf, args_buf);
-
-    // Replaces command encoder.
-    enc_stor.remove(GPU_COMMAND_ENCODER_NAME);
-    let pipe = pipe_stor.get(GPU_PIPELINE_NAME).unwrap().clone();
-    let bind = bind_stor.get(GPU_BIND_GROUP_NAME).unwrap().clone();
-    let write_buf = write_buf.clone();
-    let read_buf = buf_stor.get(GPU_READ_BUF_NAME).unwrap().clone();
-    create_encoder(enc_stor, pipe, bind, write_buf, read_buf);
-}
-
 pub(super) fn submit(rw: ResWrite<(Gpu, GpuBufferStorage, CommandEncoderStorage)>) {
     let (gpu, buf_stor, enc_stor) = rw.take();
 
-    // Writes 'size', 'x_range', and 'y_range' on arguments buffer.
     let args_buf = buf_stor.get(GPU_ARGS_BUF_NAME).unwrap();
-    let args = ARGS.lock().unwrap();
-    let (offset, data) = args.size_xrange_yrange();
-    gpu.queue().write_buffer(args_buf, offset as u64, data);
+    let data = gpu_slot();
+    gpu.queue()
+        .write_buffer(args_buf, 0, data.args.as_u8_slice());
 
     let enc = enc_stor.get(GPU_COMMAND_ENCODER_NAME).unwrap();
     let cmd_buf = enc.encode();
@@ -113,9 +70,13 @@ pub(super) fn read(rw: ResWrite<GpuBufferStorage>) {
         .slice(..)
         .map_async(wgpu::MapMode::Read, move |res| {
             assert!(res.is_ok());
-            BUF.lock()
-                .unwrap()
+
+            let mut data = gpu_slot();
+            data.buf
                 .copy_from_slice(&c_read_buf.slice(..).get_mapped_range());
+            drop(data);
+            unload_from_gpu_slot();
+
             c_read_buf.unmap();
             web_util::worker_post_message(&JsValue::undefined()).unwrap();
         });
@@ -131,39 +92,45 @@ fn create_shader(stor: &mut ShaderStorage) {
     stor.create_then_add(desc, entry).unwrap();
 }
 
-fn create_read_write_buffer(stor: &mut GpuBufferStorage, size: u64) {
-    // Write buffer
-    let desc = wgpu::BufferDescriptor {
+fn create_buffer(stor: &mut GpuBufferStorage) {
+    let size = (canvas_width() * canvas_height() * 4) as wgpu::BufferAddress;
+
+    let write_buf_desc = wgpu::BufferDescriptor {
         label: Some(GPU_WRITE_BUF_NAME),
         size,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         mapped_at_creation: false,
     };
-    stor.create_then_add(&desc).unwrap();
+    stor.create_then_add(&write_buf_desc).unwrap();
 
-    // Read buffer
-    let desc = wgpu::BufferDescriptor {
+    let read_buf_desc = wgpu::BufferDescriptor {
         label: Some(GPU_READ_BUF_NAME),
         size,
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     };
-    stor.create_then_add(&desc).unwrap();
-}
+    stor.create_then_add(&read_buf_desc).unwrap();
 
-fn create_args_buffer(stor: &mut GpuBufferStorage) {
-    let args = ARGS.lock().unwrap();
-    let contents = args.as_u8_slice();
-    let desc = wgpu::util::BufferInitDescriptor {
+    let data = gpu_slot();
+    let args_buf_desc = wgpu::util::BufferInitDescriptor {
         label: Some(GPU_ARGS_BUF_NAME),
-        contents,
+        contents: data.args.as_u8_slice(),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     };
-    stor.create_then_add(&desc).unwrap();
+    stor.create_then_add(&args_buf_desc).unwrap();
+
+    let ptr = PALETTE.as_slice().as_ptr() as *const u8;
+    let len = PALETTE.as_slice().len() * 4;
+    let contents = unsafe { slice::from_raw_parts(ptr, len) };
+    let palette_buf_desc = wgpu::util::BufferInitDescriptor {
+        label: Some(GPU_PALETTE_BUF_NAME),
+        contents,
+        usage: wgpu::BufferUsages::UNIFORM,
+    };
+    stor.create_then_add(&palette_buf_desc).unwrap();
 }
 
 fn create_bind_group_layout(stor: &mut BindGroupLayoutStorage) {
-    // Write buffer entry
     let write_buf_entry = wgpu::BindGroupLayoutEntry {
         binding: 0,
         visibility: wgpu::ShaderStages::COMPUTE,
@@ -175,9 +142,19 @@ fn create_bind_group_layout(stor: &mut BindGroupLayoutStorage) {
         count: None,
     };
 
-    // Palette buffer entry
-    let palette_buf_entry = wgpu::BindGroupLayoutEntry {
+    let args_buf_entry = wgpu::BindGroupLayoutEntry {
         binding: 1,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    };
+
+    let palette_buf_entry = wgpu::BindGroupLayoutEntry {
+        binding: 2,
         visibility: wgpu::ShaderStages::COMPUTE,
         ty: wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Uniform,
@@ -189,7 +166,7 @@ fn create_bind_group_layout(stor: &mut BindGroupLayoutStorage) {
 
     let desc = wgpu::BindGroupLayoutDescriptor {
         label: Some(GPU_BIND_GROUP_LAYOUT_NAME),
-        entries: &[write_buf_entry, palette_buf_entry],
+        entries: &[write_buf_entry, args_buf_entry, palette_buf_entry],
     };
     stor.create_then_add(&desc).unwrap();
 }
@@ -198,9 +175,9 @@ fn create_bind_group(
     stor: &mut BindGroupStorage,
     layout: &wgpu::BindGroupLayout,
     write_buf: &wgpu::Buffer,
+    args_buf: &wgpu::Buffer,
     palette_buf: &wgpu::Buffer,
 ) {
-    // Write buffer entry
     let write_buf_entry = wgpu::BindGroupEntry {
         binding: 0,
         resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
@@ -210,9 +187,17 @@ fn create_bind_group(
         }),
     };
 
-    // Arguments buffer entry
     let args_buf_entry = wgpu::BindGroupEntry {
         binding: 1,
+        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+            buffer: args_buf,
+            offset: 0,
+            size: None,
+        }),
+    };
+
+    let palette_buf_entry = wgpu::BindGroupEntry {
+        binding: 2,
         resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
             buffer: palette_buf,
             offset: 0,
@@ -223,7 +208,7 @@ fn create_bind_group(
     let desc = wgpu::BindGroupDescriptor {
         label: Some("bind-group"),
         layout,
-        entries: &[write_buf_entry, args_buf_entry],
+        entries: &[write_buf_entry, args_buf_entry, palette_buf_entry],
     };
     stor.create_then_add(&desc).unwrap();
 }
@@ -271,7 +256,7 @@ fn create_encoder(
         timestamp_writes: None,
     });
 
-    let (width, height) = ARGS.lock().unwrap().size;
+    let (width, height) = gpu_slot().args.size;
     pass.set_pipeline(pipe)
         .set_bind_group(0, bind)
         .dispatch_workgroups(width.div_ceil(64), height, 1);
@@ -289,7 +274,6 @@ fn shader_code() -> String {
         const N: u32 = MAX_ITER / 4;
 
         struct Arguments {{
-            palette: array<vec4u, N>,
             size: vec2u,
             x_range: vec2f,
             y_range: vec2f,
@@ -297,6 +281,7 @@ fn shader_code() -> String {
 
         @group(0) @binding(0) var<storage, read_write> data: array<u32>;
         @group(0) @binding(1) var<uniform> args: Arguments;
+        @group(0) @binding(2) var<uniform> palette: array<vec4u, N>;
 
         @compute @workgroup_size(64)
         fn compute(@builtin(global_invocation_id) gid: vec3u) {{
@@ -304,7 +289,7 @@ fn shader_code() -> String {
             if (all(xy < args.size)) {{
                 let di = xy.y * args.size.x + xy.x;
                 let iter = calc_pixel(xy.x, xy.y);
-                data[di] = args.palette[iter / 4][iter % 4];
+                data[di] = palette[iter / 4][iter % 4];
             }}
         }}
 

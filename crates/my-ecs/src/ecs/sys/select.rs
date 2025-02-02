@@ -1,12 +1,19 @@
 use crate::{
-    ds::prelude::*,
+    ds::{
+        ATypeId, Borrowed, FlatIter, FlatIterMut, Getter, GetterMut, ManagedConstPtr, NonNullExt,
+        ParFlatIter, ParFlatIterMut, RawGetter, SendSyncPtr,
+    },
     ecs::ent::{
         component::{Component, ComponentKey, Components},
         entity::{ContainEntity, Entity, EntityIndex, EntityName, EntityTag},
         storage::EntityContainerRef,
     },
-    impl_into_iterator_for_parallel, impl_parallel_iterator, impl_unindexed_producer,
-    util::TakeRecur,
+    util::{
+        macros::{
+            impl_into_iterator_for_parallel, impl_parallel_iterator, impl_unindexed_producer,
+        },
+        TakeRecur,
+    },
 };
 use rayon::iter::{plumbing::Producer, IntoParallelIterator};
 use std::{
@@ -257,7 +264,7 @@ impl SelectInfo {
     ///
     /// Disjoint filters mean that two filters don't overlap at all.
     /// Table below shows the disjoint conditions.
-    /// - Two have diffrent targets.
+    /// - Two have different targets.
     /// - Two are disjoint filters.
     pub(crate) fn is_disjoint(&self, rhs: &Self) -> bool {
         (self.target != rhs.target) || self.finfo.is_disjoint(&rhs.finfo)
@@ -369,17 +376,17 @@ impl FilterInfo {
     /// - X's All intersects Y's None or vice versa.
     /// - X's Any is a subset of Y's None or vice versa.
     ///
-    /// | Filter | All   | None     | Any   |
-    /// | :---:  | :---: | :---:    | :---: |
-    /// | FA     | A, B  | C, D     | E, F  |
-    /// | FB     | ..    | A, ..    | ..    | 1. FA::All intersects FB::None
-    /// | FB     | ..    | B, ..    | ..    | 1. FA::All intersects FB::None
-    /// | FB     | C, .. | ..       | ..    | 2. FA::None intersects FB::All
-    /// | FB     | D, .. | ..       | ..    | 2. FA::None intersects FB::All
-    /// | FB     | ..    | ..       | C     | 3. FB::Any is a subset of FA::None
-    /// | FB     | ..    | ..       | D     | 3. FB::Any is a subset of FA::None
-    /// | FB     | ..    | ..       | C, D  | 3. FB::Any is a subset of FA::None
-    /// | FB     | ..    | E, F, .. | ..    | 4. FA::Any is a subset of FB::None
+    /// | Filter | All    | None      | Any    |
+    /// | :---:  | :---:  | :---:     | :---:  |
+    /// | FA     | A, B   | C, D      | E, F   |
+    /// | FB     | ...    | A, ...    | ...    | 1. A.All intersects B.None
+    /// | FB     | ...    | B, ...    | ...    | 1. A.All intersects B.None
+    /// | FB     | C, ... | ...       | ...    | 2. A.None intersects B.All
+    /// | FB     | D, ... | ...       | ...    | 2. A.None intersects B.All
+    /// | FB     | ...    | ...       | C      | 3. B.Any is a subset of A.None
+    /// | FB     | ...    | ...       | D      | 3. B.Any is a subset of A.None
+    /// | FB     | ...    | ...       | C, D   | 3. B.Any is a subset of A.None
+    /// | FB     | ...    | E, F, ... | ...    | 4. A.Any is a subset of B.None
     fn is_disjoint_general_general(&self, rhs: &Self) -> bool {
         let (a_all, a_any, a_none) = (&self.all, &self.any, &self.none);
         let (b_all, b_any, b_none) = (&rhs.all, &rhs.any, &rhs.none);
@@ -432,17 +439,17 @@ impl FilterInfo {
         let (a_all, a_any, a_none) = (&self.all, &self.any, &self.none);
         let b_exact = &rhs.exact;
 
-        // Case 1. `FB` includes one not beloning `FA's All`.
+        // Case 1. `B` includes one not belonging `A.All`.
         if b_exact.iter().any(|b| !a_all.contains(b)) {
             return true;
         }
 
-        // Case 2. `FB` includes one of `FA's None`.
+        // Case 2. `B` includes one of `A.None`.
         if b_exact.iter().any(|b| a_none.contains(b)) {
             return true;
         }
 
-        // Case 3. `FB` doesn't include any of `FA's Any`.
+        // Case 3. `B` doesn't include any of `A.Any`.
         if a_any.iter().all(|a| !b_exact.contains(a)) {
             return true;
         }
@@ -451,7 +458,7 @@ impl FilterInfo {
     }
 }
 
-/// Shared references to [`Select::Target`] componenet arrays from multiple
+/// Shared references to [`Select::Target`] component arrays from multiple
 /// entities. You can get an iterator traversing over each component array via
 /// [`iter`](Self::iter). A component array belongs to a specific entity.
 #[derive(Debug)]
@@ -545,17 +552,21 @@ impl<'stor, T: 'stor> FilteredMut<'stor, T> {
 }
 
 impl<'stor, T: Entity + 'stor> TakeRecur for FilteredMut<'stor, T> {
-    type Inner = Option<EntityContainerRef<'stor, T>>;
+    type Inner = EntityContainerRef<'stor, T>;
 
     fn take_recur(mut self) -> Self::Inner {
-        self.iter_mut().next()
+        if let Some(cont) = self.iter_mut().next() {
+            cont
+        } else {
+            panic!("have you registered `{}`?", any::type_name::<T>());
+        }
     }
 }
 
-/// Selected component arryas by a [`Select`].  
+/// Selected component arrays by a [`Select`].
 ///
 // This struct contains borrowed `Select::Target` arrays. But, this struct
-// doesn't bring lifetime constraint into inside the struct although it
+// doesn't bring lifetime constraint into inside the struct, although it
 // borrows component arrays. Instead, borrowed data are encapsulated by
 // `Borrowed`, which is a run-time borrow checker. In other words, component
 // arrays must be borrowed and released everytime.
@@ -790,12 +801,16 @@ impl<'cont, Comp: 'cont> SelectedIter<'cont, Comp> {
         getter: SendSyncPtr<Borrowed<RawGetter>>,
         etag: SendSyncPtr<Arc<EntityTag>>,
     ) -> TaggedGetter<'cont, Comp> {
-        let raw = **getter.as_ref();
-        let getter = Getter::from_raw(raw);
+        let getter = unsafe {
+            let raw = **getter.as_ref();
+            Getter::from_raw(raw)
+        };
 
-        let etag = Arc::as_ptr(etag.as_ref()).cast_mut();
-        let etag = NonNullExt::new(etag).unwrap_unchecked();
-        let etag = ManagedConstPtr::new(etag);
+        let etag = unsafe {
+            let etag = Arc::as_ptr(etag.as_ref()).cast_mut();
+            let etag = NonNullExt::new(etag).unwrap_unchecked();
+            ManagedConstPtr::new(etag)
+        };
 
         TaggedGetter { getter, etag }
     }
@@ -902,7 +917,7 @@ impl_unindexed_producer!(
     "for" = ParSelectedIter; "item" = TaggedGetter<'cont, Comp>;
 );
 
-// Mutable iterator is not clonable.
+// Mutable iterator is not cloneable.
 #[derive(Debug)]
 #[repr(transparent)]
 pub struct SelectedIterMut<'cont, Comp>(pub SelectedIter<'cont, Comp>);
@@ -1075,8 +1090,9 @@ impl<'stor, T: 'stor> FilteredIterMut<'stor, T> {
         mut cont: NonNull<Borrowed<NonNull<dyn ContainEntity>>>,
         etag: NonNull<Arc<EntityTag>>,
     ) -> EntityContainerRef<'stor, T> {
-        let etag = &**etag.as_ref();
-        let cont = cont.as_mut().as_mut();
+        let etag = unsafe { etag.as_ref() };
+        let etag = &**etag;
+        let cont = unsafe { cont.as_mut().as_mut() };
         EntityContainerRef::new(etag, cont)
     }
 }
@@ -1170,8 +1186,8 @@ impl<'cont, Comp> IntoIterator for TaggedGetter<'cont, Comp> {
 }
 
 impl<'cont, Comp: Send + Sync> IntoParallelIterator for TaggedGetter<'cont, Comp> {
-    type Item = &'cont Comp;
     type Iter = ParFlatIter<'cont, Comp>;
+    type Item = &'cont Comp;
 
     fn into_par_iter(self) -> Self::Iter {
         self.getter.into_par_iter()
@@ -1233,8 +1249,8 @@ impl<'cont, Comp> IntoIterator for TaggedGetterMut<'cont, Comp> {
 }
 
 impl<'cont, Comp: Send + Sync> IntoParallelIterator for TaggedGetterMut<'cont, Comp> {
-    type Item = &'cont mut Comp;
     type Iter = ParFlatIterMut<'cont, Comp>;
+    type Item = &'cont mut Comp;
 
     fn into_par_iter(self) -> Self::Iter {
         self.getter.into_par_iter()

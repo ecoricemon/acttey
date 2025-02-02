@@ -1,12 +1,16 @@
-use super::vec::opt_vec::OptVec;
+use super::OptVec;
 use std::{
     collections::HashMap,
     fmt::Display,
     hash::{BuildHasher, Hash},
+    iter,
     ops::{Deref, DerefMut},
 };
 
-/// A shallow wrapper of [`SetList`] for using value as a key.
+/// A list containing unique values.
+///
+/// This list is based on [`SetList`]. See documentation of it for more
+/// information.
 #[derive(Debug)]
 #[repr(transparent)]
 pub struct SetValueList<V, S>(SetList<V, V, S>);
@@ -15,18 +19,41 @@ impl<V, S> SetValueList<V, S>
 where
     S: BuildHasher + Default,
 {
+    /// Creates a new empty list.
+    ///
+    /// [`SetValueList`] requires dummy head node for now, so you can put in any
+    /// values.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetValueList;
+    /// use std::hash::RandomState;
+    ///
+    /// let list = SetValueList::<&'static str, RandomState>::new("");
+    /// ```
     pub fn new(dummy: V) -> Self {
         Self(SetList::new(dummy))
     }
 }
 
-impl<V, S> SetValueList<V, S>
+impl<V, S> Default for SetValueList<V, S>
 where
     V: Default,
     S: BuildHasher + Default,
 {
-    pub fn new_with_default() -> Self {
-        Self(SetList::<V, V, S>::new_with_default())
+    /// Creates a new empty list.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetValueList;
+    /// use std::hash::RandomState;
+    ///
+    /// let list = SetValueList::<&'static str, RandomState>::default();
+    /// ```
+    fn default() -> Self {
+        Self(SetList::<V, V, S>::default())
     }
 }
 
@@ -35,10 +62,40 @@ where
     V: Hash + Eq + Clone,
     S: BuildHasher,
 {
+    /// Appends the given value to the end of the list.
+    ///
+    /// However, if the list already contains the value, nothing takes place and
+    /// returns false.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetValueList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetValueList::<_, RandomState>::default();
+    /// list.push_back("alpha");
+    /// assert!(!list.push_back("alpha"));
+    /// ```
     pub fn push_back(&mut self, value: V) -> bool {
         self.0.push_back(value.clone(), value)
     }
 
+    /// Appends the given value to the beginning of the list.
+    ///
+    /// However, if the list already contains the value, nothing takes place and
+    /// returns false.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetValueList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetValueList::<_, RandomState>::default();
+    /// list.push_front("alpha");
+    /// assert!(!list.push_front("alpha"));
+    /// ```
     pub fn push_front(&mut self, value: V) -> bool {
         self.0.push_front(value.clone(), value)
     }
@@ -96,7 +153,7 @@ where
     S: BuildHasher + Default,
 {
     fn from(value: &[V]) -> Self {
-        let mut list = Self::new_with_default();
+        let mut list = Self::default();
         for v in value.iter() {
             list.push_back(v.clone());
         }
@@ -113,19 +170,16 @@ where
     }
 }
 
-/// Set-like list based on [`OptVec`] with `HashMap` for pointing at nodes.
-/// Theoretically, insert/remove is done in O(1), but iteration is not good as
-/// much as `Vec`. Because iteration is not sequential, it needs jump to reach
-/// the next node. But we can expect it would be more memory friendly than
-/// `LinkedList` based on `Box`. Use [`VecDeque`] if you need something like
-/// queue. Or use [`LinkedList`] if you really want linked list.
+/// A list containg unique key-value pairs.
+///
+/// This is a list, but all items are laid on a single sequential memory block.
+/// Therefore, we can expect more speed in terms of iteration than standard
+/// linked list, [`LinkedList`](std::collections::LinkedList), but it requires
+/// more memory footprint.
 ///
 /// # NOTE
 ///
 /// Current implementation doesn't concern about ZST.
-///
-/// [`VecDeque`]: std::collections::VecDeque
-/// [`LinkedList`]: std::collections::LinkedList
 #[derive(Debug)]
 pub struct SetList<K, V, S> {
     nodes: OptVec<ListNode<V>, S>,
@@ -133,13 +187,22 @@ pub struct SetList<K, V, S> {
     map: HashMap<K, ListPos, S>,
 }
 
-impl<K, V, S> SetList<K, V, S>
+impl<K, V, S> Default for SetList<K, V, S>
 where
     V: Default,
     S: BuildHasher + Default,
 {
-    /// Creates list with default head node.
-    pub fn new_with_default() -> Self {
+    /// Creates a new empty list.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let list = SetList::<char, String, RandomState>::default();
+    /// ```
+    fn default() -> Self {
         Self::new(V::default())
     }
 }
@@ -148,7 +211,19 @@ impl<K, V, S> SetList<K, V, S>
 where
     S: BuildHasher + Default,
 {
-    /// Creates list with default head node using the `dummy` value.
+    /// Creates a new empty list.
+    ///
+    /// [`SetList`] requires dummy head node for now, so you can put in any
+    /// values.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let list = SetList::<char, &'static str, RandomState>::new("");
+    /// ```
     pub fn new(dummy: V) -> Self {
         let mut nodes = OptVec::new();
         let dummy_head_idx = nodes.add(ListNode {
@@ -158,9 +233,8 @@ where
         });
         let tail = ListPos(dummy_head_idx);
 
-        // Dummy node always occupies 0th slot in the OptVec.
-        // We consider that 0 is END index of the list.
-        // See [`ListPos::end`] together.
+        // Dummy node always occupies 0th slot in the OptVec. We consider that 0
+        // is END index of the list. See `ListPos::end` together.
         debug_assert_eq!(ListPos::end(), tail);
 
         Self {
@@ -172,181 +246,415 @@ where
 }
 
 impl<K, V, S> SetList<K, V, S> {
-    /// Retrieves the length of node buffer,
-    /// which is default head node + # of vacant slots + # of occupied slots.
-    //
-    // NOTE: Don't implement len(). It's confusing because we put in default node.
-    pub fn len_buf(&self) -> usize {
-        self.nodes.len()
-    }
-
-    /// Retrieves the number of nodes except default head node.
-    pub fn len_occupied(&self) -> usize {
-        self.nodes.len_occupied() - 1
-    }
-
-    /// Returns true if there's no node in the graph.
-    /// Note that default head node is not taken into account.
-    pub fn is_occupied_empty(&self) -> bool {
-        self.len_occupied() == 0
-    }
-
-    pub fn front(&self) -> Option<&V> {
-        let first_pos = self.get_first_position();
-
-        // Safety: The first poisition must be one of
-        // - Position pointing to actual value which is valid.
-        // - `ListPos::end()` which is valid.
-        unsafe { self.get_value_unchecked(first_pos) }
-    }
-
-    pub fn front_mut(&mut self) -> Option<&mut V> {
-        let first_pos = self.get_first_position();
-
-        // Safety: The first poisition must be one of
-        // - Position pointing to actual value which is valid.
-        // - `ListPos::end()` which is valid.
-        unsafe { self.get_value_unchecked_mut(first_pos) }
-    }
-
-    pub fn back(&self) -> Option<&V> {
-        // Safety: The tail poisition must be one of
-        // - Position pointing to actual value which is valid.
-        // - `ListPos::end()` which is valid.
-        unsafe { self.get_value_unchecked(self.tail) }
-    }
-
-    pub fn back_mut(&mut self) -> Option<&mut V> {
-        // Safety: The tail poisition must be one of
-        // - Position pointing to actual value which is valid.
-        // - `ListPos::end()` which is valid.
-        unsafe { self.get_value_unchecked_mut(self.tail) }
-    }
-
-    pub fn values(&self) -> Values<'_, V, S> {
-        // Safety: get_first_position() returns valid default head node's position.
-        unsafe { self.values_from(self.get_first_position()) }
-    }
-
-    pub fn values_mut(&mut self) -> ValuesMut<'_, V, S> {
-        // Safety: get_first_position() returns valid default head node's position.
-        unsafe { self.values_mut_from(self.get_first_position()) }
-    }
-
-    pub fn into_values(self) -> IntoValues<V, S> {
-        let pos = self.get_first_position();
-        // Safety: get_first_position() returns valid default head node's position.
-        unsafe { self.into_values_from(pos) }
-    }
-
-    /// # Safety
+    /// Returns number of items.
     ///
-    /// Undefined behavior if `cur` is invalid.
-    pub unsafe fn values_from(&self, cur: ListPos) -> Values<'_, V, S> {
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<_, _, RandomState>::default();
+    /// list.push_back('a', "alpha");
+    /// assert_eq!(list.len(), 1);
+    /// ```
+    pub fn len(&self) -> usize {
+        self.nodes.len() - 1 /* dummy head node */
+    }
+
+    /// Returns true if the list is empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<char, &'static str, RandomState>::default();
+    /// assert!(list.is_empty());
+    /// ```
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Returns a shared reference to the front item.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<_, _, RandomState>::default();
+    /// list.push_back('a', "alpha");
+    /// list.push_back('b', "beta");
+    /// assert_eq!(list.front(), Some(&"alpha"));
+    /// ```
+    pub fn front(&self) -> Option<&V> {
+        // Returns `None` for the dummy head node.
+        let first_pos = self.first_position();
+        if first_pos.is_end() {
+            return None;
+        }
+
+        // Safety: Position must be valid one: Ok.
+        unsafe { Some(self.get_value_unchecked(first_pos)) }
+    }
+
+    /// Returns a mutable reference to the front item.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<_, _, RandomState>::default();
+    /// list.push_back('a', "alpha");
+    /// list.push_back('b', "beta");
+    /// assert_eq!(list.front_mut(), Some(&mut "alpha"));
+    /// ```
+    pub fn front_mut(&mut self) -> Option<&mut V> {
+        // Returns `None` for the dummy head node.
+        let first_pos = self.first_position();
+        if first_pos.is_end() {
+            return None;
+        }
+
+        // Safety: Position must be valid one: Ok.
+        unsafe { Some(self.get_value_unchecked_mut(first_pos)) }
+    }
+
+    /// Returns a shared reference to the last item.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<_, _, RandomState>::default();
+    /// list.push_back('a', "alpha");
+    /// list.push_back('b', "beta");
+    /// assert_eq!(list.back(), Some(&"beta"));
+    /// ```
+    pub fn back(&self) -> Option<&V> {
+        // Returns `None` for the dummy head node.
+        if self.tail.is_end() {
+            return None;
+        }
+
+        // Safety: Position must be valid one: Ok.
+        unsafe { Some(self.get_value_unchecked(self.tail)) }
+    }
+
+    /// Returns a mutable reference to the last item.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<_, _, RandomState>::default();
+    /// list.push_back('a', "alpha");
+    /// list.push_back('b', "beta");
+    /// assert_eq!(list.back_mut(), Some(&mut "beta"));
+    /// ```
+    pub fn back_mut(&mut self) -> Option<&mut V> {
+        // Returns `None` for the dummy head node.
+        if self.tail.is_end() {
+            return None;
+        }
+
+        // Safety: Position must be valid one: Ok.
+        unsafe { Some(self.get_value_unchecked_mut(self.tail)) }
+    }
+
+    /// Returns an iterator visiting all values in order.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<_, _, RandomState>::default();
+    /// list.push_back('a', "alpha");
+    /// list.push_back('b', "beta");
+    ///
+    /// for v in list.values() {
+    ///     println!("{v}"); // Prints out "alpha" and "beta".
+    /// }
+    /// ```
+    pub fn values(&self) -> Values<'_, V, S> {
+        self.values_from(self.first_position())
+    }
+
+    /// Returns a mutable iterator visiting all values in order.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<_, _, RandomState>::default();
+    /// list.push_back('a', "alpha".to_owned());
+    /// list.push_back('b', "beta".to_owned());
+    ///
+    /// for v in list.values_mut() {
+    ///     v.push('*');
+    ///     println!("{v}"); // Prints out "alpha*" and "beta*".
+    /// }
+    /// ```
+    pub fn values_mut(&mut self) -> ValuesMut<'_, V, S> {
+        self.values_mut_from(self.first_position())
+    }
+
+    /// Returns an iterator visiting values from the given position.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the position is not valid one for the list.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<_, _, RandomState>::default();
+    /// list.push_back('a', "alpha");
+    /// list.push_back('b', "beta");
+    /// list.push_back('g', "gamma");
+    ///
+    /// let pos = list.get_position(&'b').unwrap();
+    /// for v in list.values_from(pos) {
+    ///     println!("{v}"); // Prints out "beta" and "gamma".
+    /// }
+    /// ```
+    pub fn values_from(&self, cur: ListPos) -> Values<'_, V, S> {
+        assert!(
+            self.nodes.get(cur.into_inner()).is_some(),
+            "{cur:?} is not a valid position"
+        );
+
+        // `ListPos::end()` passes validation above due to the dummy head node.
+        // But it's Ok because `Values` will return `None` when it meets
+        // `ListPos::end()`.
         Values {
             nodes: &self.nodes,
             cur,
         }
     }
 
-    /// # Safety
+    /// Returns a mutable iterator visiting values from the given position.
     ///
-    /// Undefined behavior if `cur` is invalid.
-    pub unsafe fn values_mut_from(&mut self, cur: ListPos) -> ValuesMut<'_, V, S> {
+    /// # Panics
+    ///
+    /// Panics if the position is not valid one for the list.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<_, _, RandomState>::default();
+    /// list.push_back('a', "alpha".to_owned());
+    /// list.push_back('b', "beta".to_owned());
+    /// list.push_back('g', "gamma".to_owned());
+    ///
+    /// let pos = list.get_position(&'b').unwrap();
+    /// for v in list.values_mut_from(pos) {
+    ///     v.push('*');
+    ///     println!("{v}"); // Prints out "beta*" and "gamma*".
+    /// }
+    /// ```
+    pub fn values_mut_from(&mut self, cur: ListPos) -> ValuesMut<'_, V, S> {
+        assert!(
+            self.nodes.get(cur.into_inner()).is_some(),
+            "{cur:?} is not a valid position"
+        );
+
+        // `ListPos::end()` passes validation above due to the dummy head node.
+        // But it's Ok because `ValuesMut` will return `None` when it meets
+        // `ListPos::end()`.
         ValuesMut {
             nodes: &mut self.nodes,
             cur,
         }
     }
 
-    /// # Safety
+    /// Creates an iterator visiting all values in order by consuming the list.
     ///
-    /// Undefined behavior if `cur` is invalid.
-    pub unsafe fn into_values_from(self, cur: ListPos) -> IntoValues<V, S> {
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<_, _, RandomState>::default();
+    /// list.push_back('a', "alpha");
+    /// list.push_back('b', "beta");
+    ///
+    /// for v in list.into_values() {
+    ///     println!("{v}");
+    /// }
+    /// ```
+    pub fn into_values(self) -> IntoValues<V, S> {
+        let pos = self.first_position();
+        self.into_values_from(pos)
+    }
+
+    /// Creates an iterator visiting values from the given position by consuming
+    /// the list.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the position is not valid one for the list.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<_, _, RandomState>::default();
+    /// list.push_back('a', "alpha");
+    /// list.push_back('b', "beta");
+    /// list.push_back('g', "gamma");
+    ///
+    /// let pos = list.get_position(&'b').unwrap();
+    /// for v in list.into_values_from(pos) {
+    ///     println!("{v}"); // Prints out "beta" and "gamma".
+    /// }
+    /// ```
+    pub fn into_values_from(self, cur: ListPos) -> IntoValues<V, S> {
+        assert!(
+            self.nodes.get(cur.into_inner()).is_some(),
+            "{cur:?} is not a valid position"
+        );
+
+        // `ListPos::end()` passes validation above due to the dummy head node.
+        // But it's Ok because `IntoValues` will return `None` when it meets
+        // `ListPos::end()`.
         IntoValues {
             nodes: self.nodes,
             cur,
         }
     }
 
-    /// # Safety
+    /// Returns a shared reference to a value at the given position with the
+    /// next position.
     ///
-    /// Undefined behavior if `cur` is invalid.
-    pub unsafe fn iter_pos_from(&self, cur: ListPos) -> PosIter<'_, V, S> {
-        PosIter {
-            nodes: &self.nodes,
-            cur,
-        }
-    }
-
-    /// Retrieves shared reference to the value at the given position
-    /// and the next position of it.
-    /// If the given position is unknown position like out of bounds,
-    /// Returns None.
+    /// If the given position is not valid one for the list, returns None.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<_, _, RandomState>::default();
+    /// list.push_back('a', "alpha");
+    /// list.push_back('b', "beta");
+    ///
+    /// let pos = list.get_position(&'b').unwrap();
+    /// let (_, v) = list.iter_next(pos).unwrap();
+    /// assert_eq!(v, &"beta");
+    /// ```
     pub fn iter_next(&self, cur: ListPos) -> Option<(ListPos, &V)> {
+        // `ListPos::end()` must be ignored due to the dummy head node.
         if cur.is_end() {
             return None;
         }
+
         self.nodes
             .get(cur.into_inner())
             .map(|cur_node| (cur_node.next, &cur_node.value))
     }
 
-    /// Retrieves mutable reference to the value at the given position
-    /// and the next position of it.
-    /// If the given position is unknown position like out of bounds,
-    /// Returns None.
+    /// Returns a mutable reference to a value at the given position with the
+    /// next position.
+    ///
+    /// If the given position is not valid one for the list, returns None.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<_, _, RandomState>::default();
+    /// list.push_back('a', "alpha");
+    /// list.push_back('b', "beta");
+    ///
+    /// let pos = list.get_position(&'b').unwrap();
+    /// let (_, v) = list.iter_next_mut(pos).unwrap();
+    /// assert_eq!(v, &mut "beta");
+    /// ```
     pub fn iter_next_mut(&mut self, cur: ListPos) -> Option<(ListPos, &mut V)> {
+        // `ListPos::end()` must be ignored due to the dummy head node.
         if cur.is_end() {
             return None;
         }
+
         self.nodes
             .get_mut(cur.into_inner())
             .map(|cur_node| (cur_node.next, &mut cur_node.value))
     }
 
-    /// Returns first position.
-    /// Note that the first position may be `ListPos::end()` if the list has no items in it.
-    /// Otherwise, it must be a valid position.
-    //
-    // Acturally, list must have dummy head even if it's just created.
-    pub fn get_first_position(&self) -> ListPos {
+    /// Returns the first position of the list.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<_, _, RandomState>::default();
+    /// list.push_back('a', "alpha");
+    /// list.push_back('b', "beta");
+    ///
+    /// let pos = list.first_position();
+    /// let (_, v) = list.iter_next(pos).unwrap();
+    /// assert_eq!(v, &"alpha");
+    /// ```
+    pub fn first_position(&self) -> ListPos {
         // Safety: Dummy head occupies `ListPos::end()` so accessing it is safe.
         // See constructor for more details.
         let dummy_head_idx = ListPos::end().into_inner();
         unsafe { self.nodes.get_unchecked(dummy_head_idx).next }
     }
 
-    /// Retrieves shared reference to the value at the given position
-    /// or returns None if the position is `ListPos::end()`.
+    /// Returns a shared reference to a value at the given position.
+    ///
+    /// If the position is [`ListPos::end`], then the method returns value of
+    /// the dummy head node.
     ///
     /// # Safety
     ///
-    /// Undefined behavior if the position is not valid.
-    /// Valid position means position pointing to actual value or is `ListPos::end()`.
-    unsafe fn get_value_unchecked(&self, pos: ListPos) -> Option<&V> {
-        if !pos.is_end() {
-            let node = self.nodes.get_unchecked(pos.into_inner());
-            Some(&node.value)
-        } else {
-            None
-        }
+    /// Undefined behavior if the position is neither a valid one for the list
+    /// nor the `ListPos::end`.
+    unsafe fn get_value_unchecked(&self, pos: ListPos) -> &V {
+        let node = unsafe { self.nodes.get_unchecked(pos.into_inner()) };
+        &node.value
     }
 
-    /// Retrieves mutable reference to the value at the given position
-    /// or returns None if the position is `ListPos::end()`.
+    /// Returns a mutable reference to a value at the given position.
+    ///
+    /// If the position is [`ListPos::end`], then the method returns value of
+    /// the dummy head node.
     ///
     /// # Safety
     ///
-    /// Undefined behavior if the position is not valid.
-    /// Valid position means position pointing to actual value or is `ListPos::end()`.
-    unsafe fn get_value_unchecked_mut(&mut self, pos: ListPos) -> Option<&mut V> {
-        if !pos.is_end() {
-            let node = self.nodes.get_unchecked_mut(pos.into_inner());
-            Some(&mut node.value)
-        } else {
-            None
-        }
+    /// Undefined behavior if the position is neither a valid one for the list
+    /// nor the `ListPos::end`.
+    unsafe fn get_value_unchecked_mut(&mut self, pos: ListPos) -> &mut V {
+        let node = unsafe { self.nodes.get_unchecked_mut(pos.into_inner()) };
+        &mut node.value
     }
 
     fn get_default_head_node_mut(&mut self) -> &mut ListNode<V> {
@@ -362,6 +670,18 @@ where
     K: Hash + Eq,
     S: BuildHasher,
 {
+    /// Returns true if the vector contains the given key.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<_, _, RandomState>::default();
+    /// list.push_back('a', "alpha");
+    /// assert!(list.contains_key(&'a'));
+    /// ```
     pub fn contains_key<Q>(&self, key: &Q) -> bool
     where
         K: std::borrow::Borrow<Q>,
@@ -370,6 +690,18 @@ where
         self.map.contains_key(key)
     }
 
+    /// Retrieves a position of a value corresponding to the given key.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<_, _, RandomState>::default();
+    /// list.push_back('a', "alpha");
+    /// let pos = list.get_position(&'a').unwrap();
+    /// ```
     pub fn get_position<Q>(&self, key: &Q) -> Option<ListPos>
     where
         K: std::borrow::Borrow<Q>,
@@ -378,6 +710,18 @@ where
         self.map.get(key).copied()
     }
 
+    /// Retrieves a shared reference to a value corresponding to the given key.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<_, _, RandomState>::default();
+    /// list.push_back('a', "alpha");
+    /// assert_eq!(list.get(&'a'), Some(&"alpha"));
+    /// ```
     pub fn get<Q>(&self, key: &Q) -> Option<&V>
     where
         K: std::borrow::Borrow<Q>,
@@ -386,6 +730,18 @@ where
         self.get_node(key).map(|node| &node.value)
     }
 
+    /// Retrieves a mutable reference to a value corresponding to the given key.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<_, _, RandomState>::default();
+    /// list.push_back('a', "alpha");
+    /// assert_eq!(list.get_mut(&'a'), Some(&mut "alpha"));
+    /// ```
     pub fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
     where
         K: std::borrow::Borrow<Q>,
@@ -394,29 +750,22 @@ where
         self.get_node_mut(key).map(|node| &mut node.value)
     }
 
-    pub fn get_next<Q>(&self, key: &Q) -> Option<&V>
-    where
-        K: std::borrow::Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
-    {
-        let node = self.get_node(key)?;
-        self.nodes
-            .get(node.next.into_inner())
-            .map(|node| &node.value)
-    }
-
-    pub fn get_next_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
-    where
-        K: std::borrow::Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
-    {
-        let node = self.get_node(key)?;
-        self.nodes
-            .get_mut(node.next.into_inner())
-            .map(|node| &mut node.value)
-    }
-
-    /// Returns true if the value was successfully inserted.
+    /// Appends the given key-value pair to the end of the list.
+    ///
+    /// However, if the list already contains the key, nothing takes place and
+    /// returns false.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<_, _, RandomState>::default();
+    /// list.push_back('a', "alpha");
+    /// assert!(!list.push_back('a', "beta"));
+    /// assert_eq!(list.back(), Some(&"alpha"));
+    /// ```
     pub fn push_back(&mut self, key: K, value: V) -> bool {
         if self.contains_key(&key) {
             return false;
@@ -442,14 +791,29 @@ where
         true
     }
 
-    /// Returns true if the value was successfully inserted.
+    /// Inserts the given key-value pair to the beginning of the list.
+    ///
+    /// However, if the list already contains the key, nothing takes place and
+    /// returns false.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<_, _, RandomState>::default();
+    /// list.push_front('a', "alpha");
+    /// assert!(!list.push_front('a', "beta"));
+    /// assert_eq!(list.front(), Some(&"alpha"));
+    /// ```
     pub fn push_front(&mut self, key: K, value: V) -> bool {
         if self.contains_key(&key) {
             return false;
         }
 
         // Appends new first node (the next node of default head node).
-        let first_pos = self.get_first_position();
+        let first_pos = self.first_position();
         let cur_index = self.nodes.add(ListNode {
             prev: ListPos::end(),
             next: first_pos,
@@ -474,9 +838,23 @@ where
         true
     }
 
-    /// Inserts the value after the specific node `after`.
-    /// If you want to insert value to the front, then use [`Self::push_front`].
-    /// Returns true if the value was successfully inserted.
+    /// Inserts the given `key`-`value` pair after a node corresponding to
+    /// `after`.
+    ///
+    /// However, if the list already contains the `key` or doesn't contain
+    /// `after`, nothing takes place and returns false.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<_, _, RandomState>::default();
+    /// list.push_back('a', "alpha");
+    /// list.push_back('g', "gamma");
+    /// list.insert('b', "beta", &'a');
+    /// ```
     pub fn insert<Q>(&mut self, key: K, value: V, after: &Q) -> bool
     where
         K: std::borrow::Borrow<Q>,
@@ -519,37 +897,18 @@ where
         }
     }
 
-    /// Moves the node after the specific node `after`.
-    /// If you want to move the node to the front, use [`Self::move_node_to_front`].
-    /// Returns true if the node was successfully moved.
-    pub fn move_node<Q>(&mut self, key: &Q, after: &Q) -> bool
-    where
-        K: std::borrow::Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
-    {
-        if let Some((key, value)) = self.remove_entry(key) {
-            self.insert(key, value, after)
-        } else {
-            false
-        }
-    }
-
-    /// Moves the node to the first position.
-    /// Returns true if the node was successfully moved.
-    pub fn move_node_to_front<Q>(&mut self, key: &Q) -> bool
-    where
-        K: std::borrow::Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
-    {
-        if let Some((key, value)) = self.remove_entry(key) {
-            self.push_front(key, value);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Removes and returns value if it was present.
+    /// Removes an item corresponding to the given key.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<_, _, RandomState>::default();
+    /// list.push_back('a', "alpha");
+    /// assert_eq!(list.remove(&'a'), Some("alpha"));
+    /// ```
     pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
     where
         K: std::borrow::Borrow<Q>,
@@ -558,7 +917,19 @@ where
         self.remove_entry(key).map(|(_, value)| value)
     }
 
-    /// Removes and returns value if it was present.
+    /// Removes an item corresponding to the given key then resturns key-value
+    /// pair.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::ds::SetList;
+    /// use std::hash::RandomState;
+    ///
+    /// let mut list = SetList::<_, _, RandomState>::default();
+    /// list.push_back('a', "alpha");
+    /// assert_eq!(list.remove_entry(&'a'), Some(('a', "alpha")));
+    /// ```
     pub fn remove_entry<Q>(&mut self, key: &Q) -> Option<(K, V)>
     where
         K: std::borrow::Borrow<Q>,
@@ -635,7 +1006,7 @@ where
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "[")?;
-        let last = self.len_occupied() - 1;
+        let last = self.len() - 1;
         for (i, value) in self.values().enumerate() {
             if i == last {
                 write!(f, "{value}")?;
@@ -666,7 +1037,7 @@ where
     S: BuildHasher + Default,
 {
     fn from(value: &[(K, V)]) -> Self {
-        let mut list = Self::new_with_default();
+        let mut list = Self::default();
         for (k, v) in value.iter() {
             list.push_back(k.clone(), v.clone());
         }
@@ -674,19 +1045,23 @@ where
     }
 }
 
+/// A position to an item of [`SetList`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
 pub struct ListPos(usize);
 
 impl ListPos {
+    /// Creates a [`ListPos`] meaning end of list.
     pub const fn end() -> Self {
         Self(0)
     }
 
+    /// Returns true if the position is end.
     pub const fn is_end(&self) -> bool {
         self.0 == 0
     }
 
+    /// Returns inner index by consuming `self`.
     pub const fn into_inner(self) -> usize {
         self.0
     }
@@ -699,6 +1074,10 @@ struct ListNode<V> {
     value: V,
 }
 
+/// An iterator yielding shared references to values of [`SetList`].
+///
+/// You can create the iterator by calling [`SetList::values`]. See the
+/// documentation of the method for more information.
 #[derive(Debug, Clone)]
 pub struct Values<'a, V, S> {
     nodes: &'a OptVec<ListNode<V>, S>,
@@ -720,6 +1099,12 @@ impl<'a, V, S> Iterator for Values<'a, V, S> {
     }
 }
 
+impl<V, S> iter::FusedIterator for Values<'_, V, S> {}
+
+/// An iterator yielding mutable references to values of [`SetList`].
+///
+/// You can create the iterator by calling [`SetList::values_mut`]. See the
+/// documentation of the method for more information.
 #[derive(Debug)]
 pub struct ValuesMut<'a, V, S> {
     nodes: &'a mut OptVec<ListNode<V>, S>,
@@ -743,6 +1128,12 @@ impl<'a, V, S> Iterator for ValuesMut<'a, V, S> {
     }
 }
 
+impl<V, S> iter::FusedIterator for ValuesMut<'_, V, S> {}
+
+/// An owning iteartor over values of [`SetList`].
+///
+/// You can create the iterator by calling [`SetList::into_values`]. See the
+/// documentation of the method for more information.
 #[derive(Debug)]
 pub struct IntoValues<V, S> {
     nodes: OptVec<ListNode<V>, S>,
@@ -767,6 +1158,12 @@ where
     }
 }
 
+impl<V, S: BuildHasher> iter::FusedIterator for IntoValues<V, S> {}
+
+/// An owning iterator over key-value pairs of [`SetList`].
+///
+/// You can create the iterator by calling [`SetList::into_iter`]. See the
+/// documentation of the method for more information.
 #[derive(Debug)]
 pub struct IntoIter<K, V, S> {
     nodes: OptVec<ListNode<V>, S>,
@@ -800,27 +1197,15 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct PosIter<'a, V, S> {
-    nodes: &'a OptVec<ListNode<V>, S>,
-    cur: ListPos,
-}
-
-impl<V, S> Iterator for PosIter<'_, V, S> {
-    type Item = ListPos;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if !self.cur.is_end() {
-            // Safety: self.cur is always valid.
-            let node = unsafe { self.nodes.get_unchecked(self.cur.into_inner()) };
-            let res = self.cur;
-            self.cur = node.next;
-            Some(res)
-        } else {
-            None
-        }
+// We can implement ExactSizeIterator because hash_map::IntoIter implements it.
+impl<K, V, S: BuildHasher> ExactSizeIterator for IntoIter<K, V, S> {
+    fn len(&self) -> usize {
+        self.map_iter.len()
     }
 }
+
+// We can implement FusedIterator because hash_map::IntoIter implements it.
+impl<K, V, S: BuildHasher> iter::FusedIterator for IntoIter<K, V, S> {}
 
 #[cfg(test)]
 mod tests {
@@ -830,11 +1215,11 @@ mod tests {
     #[test]
     fn test_setlist() {
         // push
-        let mut list = SetValueList::<_, RandomState>::new_with_default();
+        let mut list = SetValueList::<_, RandomState>::default();
         list.push_front(1);
         list.push_back(2);
         list.push_front(0);
-        assert_eq!(3, list.len_occupied());
+        assert_eq!(3, list.len());
         let mut iter = list.values();
         assert_eq!(Some(&0), iter.next());
         assert_eq!(Some(&1), iter.next());
@@ -850,18 +1235,18 @@ mod tests {
         assert_eq!(Some(&0), iter.next());
         assert_eq!(Some(&2), iter.next());
         assert_eq!(None, iter.next());
-        assert_eq!(2, list.len_occupied());
+        assert_eq!(2, list.len());
         // take 2
         assert_eq!(Some(2), list.remove(&2));
         let mut iter = list.values();
         assert_eq!(Some(&0), iter.next());
         assert_eq!(None, iter.next());
-        assert_eq!(1, list.len_occupied());
+        assert_eq!(1, list.len());
         // take 0
         assert_eq!(Some(0), list.remove(&0));
         let mut iter = list.values();
         assert_eq!(None, iter.next());
-        assert_eq!(0, list.len_occupied());
+        assert_eq!(0, list.len());
 
         // from<&[T]>
         let slice = &['a', 'b', 'c'][..];
@@ -880,10 +1265,10 @@ mod tests {
             assert_eq!(src * 2, dst);
         }
         // iterator from
-        let cur = list.get_first_position();
+        let cur = list.first_position();
         let (next, v) = list.iter_next_mut(cur).unwrap();
         *v /= 2;
-        for v in unsafe { list.values_mut_from(next) } {
+        for v in list.values_mut_from(next) {
             *v /= 2;
         }
         for (src, dst) in src.iter().cloned().zip(list.values().cloned()) {
@@ -893,7 +1278,7 @@ mod tests {
 
     #[test]
     fn test_setlist_into_iter() {
-        let mut list = SetValueList::<_, RandomState>::new_with_default();
+        let mut list = SetValueList::<_, RandomState>::default();
         for i in 0..10 {
             list.push_back(i);
         }

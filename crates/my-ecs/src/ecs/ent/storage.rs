@@ -5,8 +5,14 @@ use super::{
         EntityName, EntityTag,
     },
 };
-use crate::ecs::EcsError;
-use crate::{debug_format, ds::prelude::*, util::With};
+use crate::{
+    ds::{
+        BorrowResult, Borrowed, DescribeGroup, Getter, GetterMut, GroupDesc, GroupMap,
+        SimpleHolder, TypeInfo,
+    },
+    ecs::EcsError,
+    util::{macros::debug_format, With},
+};
 use std::{
     any::TypeId,
     collections::HashMap,
@@ -18,8 +24,9 @@ use std::{
     sync::Arc,
 };
 
+/// A trait for generating [`EntityReg`].
 pub trait AsEntityReg {
-    fn as_entity_descriptor() -> EntityReg;
+    fn entity_descriptor() -> EntityReg;
 }
 
 /// A storage where you can find both entity and component data and static
@@ -60,7 +67,7 @@ pub(crate) struct EntityStorage<S> {
 
     /// Generation that will be assigned to the next registered entity
     /// container.
-    gen: u64,
+    generation: u64,
 }
 
 impl<S> EntityStorage<S>
@@ -72,7 +79,7 @@ where
             map: GroupMap::new(),
             name_to_index: HashMap::default(),
             ent_gens: Vec::new(),
-            gen: 1,
+            generation: 1,
         }
     }
 }
@@ -221,14 +228,14 @@ where
             .map(|(ckey, _)| *ckey)
             .collect::<Vec<_>>();
         let index = self.map.next_index(&*gkey);
-        let ei = EntityIndex::new(With::new(index, self.gen));
+        let ei = EntityIndex::new(With::new(index, self.generation));
         desc.set_index(ei);
 
         let ename = desc.get_name().cloned();
         match self.map.add_group(desc) {
             Ok(i) => {
                 debug_assert_eq!(i, index);
-                self.gen += 1;
+                self.generation += 1;
 
                 // Adds mapping.
                 if let Some(name) = ename {
@@ -318,14 +325,14 @@ where
 
     /// # Safety
     ///
-    /// Undefine behavior if exclusive borrow happend before.
+    /// Undefined behavior if exclusive borrow happened before.
     //
     // Allows dead_code for test.
     #[allow(dead_code)]
     pub(crate) unsafe fn get_ptr(&self, ei: &EntityIndex) -> Option<NonNull<dyn ContainEntity>> {
         let ekey = EntityKeyRef::from(ei);
         let cont = self.get_entity_container(ekey)?;
-        let ptr = cont.cont_ptr.get_unchecked();
+        let ptr = unsafe { cont.cont_ptr.get_unchecked() };
         Some(*ptr)
     }
 
@@ -343,7 +350,7 @@ where
     }
 }
 
-/// A registration descriptor of an entity for [`EntityStorage`].
+/// A descriptor for registration of an entity storage.
 pub struct EntityReg {
     name: Option<EntityName>,
     index: Option<EntityIndex>,
@@ -456,9 +463,11 @@ impl DescribeGroup<Arc<[ComponentKey]>, EntityContainer, ComponentKey, TypeInfo>
     }
 }
 
-/// A struct including entity information and its container.
-/// The container holds component data without concrete type information.
-pub struct EntityContainer {
+/// A wrapper of an entity container.
+///
+/// The entity container is held as a trait object, and this wrapper provides
+/// access to the entity container with some information such as entity name.
+pub(crate) struct EntityContainer {
     tag: Arc<EntityTag>,
 
     /// Container that including components for the entity.
@@ -488,6 +497,10 @@ impl EntityContainer {
             cont,
             cont_ptr,
         }
+    }
+
+    pub(crate) fn into_inner(self) -> Box<dyn ContainEntity> {
+        self.cont
     }
 
     pub(crate) const fn get_tag(&self) -> &Arc<EntityTag> {
@@ -592,7 +605,7 @@ impl<'buf, T> EntityContainerRef<'buf, T> {
 
     /// Retrieves borrowed getter for a certain component column.
     ///
-    /// If the component type doens't belong to the entity or the column was
+    /// If the component type doesn't belong to the entity or the column was
     /// borrowed mutably in the past and not returned yet, returns None.
     pub fn get_column_of<C: Component>(&self) -> Option<Borrowed<Getter<'_, C>>> {
         let ci = self.cont.get_column_index(&TypeId::of::<C>())?;
@@ -602,9 +615,9 @@ impl<'buf, T> EntityContainerRef<'buf, T> {
         })
     }
 
-    /// Retrives borrwoed mutable getter for a certain component column.
+    /// Retrieves borrowed mutable getter for a certain component column.
     ///
-    /// If the component type doens't belong to the entity or the column was
+    /// If the component type doesn't belong to the entity or the column was
     /// borrowed in the past and not returned yet, returns None.
     pub fn get_column_mut_of<C: Component>(&mut self) -> Option<Borrowed<GetterMut<'_, C>>> {
         let ci = self.cont.get_column_index(&TypeId::of::<C>())?;
@@ -640,7 +653,7 @@ where
     /// Returns a struct holding shared references to components that belong
     /// to an entity for the given entity id.
     ///
-    /// If it failed to find an enitty using the given entity id, returns
+    /// If it failed to find an entity using the given entity id, returns
     /// `None`. See [`EntityContainerRef::get_by_value_index`] for more
     /// details.
     ///
@@ -657,7 +670,7 @@ where
     /// struct Ca(i32);
     ///
     /// fn system(ew: EntWrite<Ea>) {
-    ///     let mut ew = ew.take_recur().unwrap();
+    ///     let mut ew = ew.take_recur();
     ///     let eid = ew.add(Ea { ca: Ca(0) });
     ///     println!("{:?}", ew.get(&eid).unwrap());
     /// }
@@ -674,7 +687,7 @@ where
     /// Returns a struct holding mutable references to components that belong
     /// to an entity for the given entity id.
     ///
-    /// If it failed to find an enitty using the given entity id, returns
+    /// If it failed to find an entity using the given entity id, returns
     /// `None`. See [`EntityContainerRef::get_mut_by_value_index`] for more
     /// details.
     ///
@@ -691,7 +704,7 @@ where
     /// struct Ca(i32);
     ///
     /// fn system(ew: EntWrite<Ea>) {
-    ///     let mut ew = ew.take_recur().unwrap();
+    ///     let mut ew = ew.take_recur();
     ///     let eid = ew.add(Ea { ca: Ca(0) });
     ///     let ea = ew.get_mut(&eid).unwrap();
     ///     *ea.ca = Ca(42);
@@ -732,7 +745,7 @@ where
     /// struct Ca(i32);
     ///
     /// fn system(ew: EntWrite<Ea>) {
-    ///     let ew = ew.take_recur().unwrap();
+    ///     let ew = ew.take_recur();
     ///     for vi in 0..ew.len() {
     ///         println!("{:?}", ew.get_by_value_index(vi));
     ///     }
@@ -768,7 +781,7 @@ where
     /// struct Ca(i32);
     ///
     /// fn system(ew: EntWrite<Ea>) {
-    ///     let mut ew = ew.take_recur().unwrap();
+    ///     let mut ew = ew.take_recur();
     ///     for vi in 0..ew.len() {
     ///         let ea = ew.get_mut_by_value_index(vi);
     ///         *ea.ca = Ca(42);
@@ -786,7 +799,7 @@ where
     ///
     /// It's encouraged to use combination of [`EntityContainerRef::resize`]
     /// and [`EntityContainerRef::get_column_mut_of`] when you need to add
-    /// lots of entites at once. It's more cache-friendly so it would be faster
+    /// lots of entities at once. It's more cache-friendly so it would be faster
     /// than calling to this method many times.
     pub fn add(&mut self, value: T) -> EntityId {
         let ei = self.get_entity_tag().index();

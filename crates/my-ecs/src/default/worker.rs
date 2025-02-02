@@ -1,11 +1,17 @@
+//! Provides [`Work`](crate::ecs::worker::Work) implementations and worker pool.
+//!
+//! If build target is native, the module exposes worker type which based on
+//! [`std::thread::Thread`]. While the build target is web, the module exposes
+//! web worker instead.
+
 /// Common interface for worker pool implementations.
 pub trait AsWorkerPool<W>: From<Vec<W>> + Into<Vec<W>> {
-    /// Creates empty worker pool.
+    /// Creates an empty worker pool.
     ///
     /// # Examples
     ///
     /// ```
-    /// # use my_ecs::prelude::*;
+    /// use my_ecs::prelude::*;
     ///
     /// let pool = WorkerPool::new();
     /// assert!(pool.is_empty());
@@ -16,25 +22,37 @@ pub trait AsWorkerPool<W>: From<Vec<W>> + Into<Vec<W>> {
     /// cpus.
     ///
     /// Number of logical cpus depends on platform which this crate runs on.
-    /// This method guarantees the returned workerpool to have at least one
+    /// This method guarantees the returned worker pool to have at least one
     /// worker in it even if it failed to get the number of logical cpus.
     ///
     /// # Examples
     ///
     /// ```
-    /// # use my_ecs::prelude::*;
+    /// use my_ecs::prelude::*;
     ///
-    /// let pool = WorkerPool::with_num_cpus();
+    /// let pool = WorkerPool::with_all_cpus();
     /// assert!(!pool.is_empty());
     /// ```
-    fn with_num_cpus() -> Self;
+    fn with_all_cpus() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        let len = {
+            std::thread::available_parallelism()
+                .unwrap_or(unsafe { std::num::NonZeroUsize::new_unchecked(1) })
+                .get()
+        };
+
+        #[cfg(target_arch = "wasm32")]
+        let len = crate::util::web::available_parallelism();
+
+        Self::with_len(len)
+    }
 
     /// Creates worker pool with `len` workers.
     ///
     /// # Examples
     ///
     /// ```
-    /// # use my_ecs::prelude::*;
+    /// use my_ecs::prelude::*;
     ///
     /// let pool = WorkerPool::with_len(1);
     /// assert_eq!(pool.len() , 1);
@@ -54,7 +72,7 @@ pub trait AsWorkerPool<W>: From<Vec<W>> + Into<Vec<W>> {
     /// # Examples
     ///
     /// ```
-    /// # use my_ecs::prelude::*;
+    /// use my_ecs::prelude::*;
     ///
     /// let mut pool = WorkerPool::new();
     /// assert!(pool.is_empty());
@@ -75,14 +93,14 @@ pub use web::*;
 #[cfg(not(target_arch = "wasm32"))]
 mod non_web {
     use super::*;
-    use crate::{ds::prelude::*, ecs::prelude::*, util};
+    use crate::{ds::ManagedConstPtr, ecs::prelude::*, util};
     use std::{
         fmt,
-        num::NonZeroUsize,
         sync::mpsc::{self, Sender},
-        thread::{self, Builder, JoinHandle},
+        thread::{Builder, JoinHandle},
     };
 
+    /// A data type holding [`Worker`]s.
     #[derive(Debug)]
     #[repr(transparent)]
     pub struct WorkerPool {
@@ -94,13 +112,6 @@ mod non_web {
             Self {
                 workers: Vec::new(),
             }
-        }
-
-        fn with_num_cpus() -> Self {
-            let num_cpus = thread::available_parallelism()
-                .unwrap_or(unsafe { NonZeroUsize::new_unchecked(1) })
-                .get();
-            Self::with_len(num_cpus)
         }
 
         fn with_len(len: usize) -> Self {
@@ -143,6 +154,9 @@ mod non_web {
         }
     }
 
+    /// [`Worker`] builder.
+    ///
+    /// You can spawn [`Worker`] from this builder.
     #[derive(Debug)]
     pub struct WorkerBuilder<'a> {
         inner: Builder,
@@ -150,6 +164,7 @@ mod non_web {
     }
 
     impl<'a> WorkerBuilder<'a> {
+        /// Creates a new [`WorkerBuilder`].
         pub fn new(name: &'a str) -> Self {
             Self {
                 inner: Builder::new().name(name.to_owned()),
@@ -157,6 +172,7 @@ mod non_web {
             }
         }
 
+        /// Sets worker's stack size in bytes.
         pub fn stack_size(self, size: usize) -> Self {
             Self {
                 inner: self.inner.stack_size(size),
@@ -164,11 +180,16 @@ mod non_web {
             }
         }
 
+        /// Spawns a new [`Worker`] from the builder.
         pub fn spawn(self) -> Result<Worker, std::io::Error> {
             Worker::spawn(self)
         }
     }
 
+    /// Worker handle.
+    ///
+    /// When [`Worker`] is dropped, it waits for its associated worker to
+    /// finish.
     pub struct Worker {
         name: Box<str>,
         tx: Sender<Option<ManagedConstPtr<SubContext>>>,
@@ -225,9 +246,9 @@ mod non_web {
 mod web {
     use super::*;
     use crate::{
-        ds::prelude::*,
+        ds::{ManagedConstPtr, NonNullExt},
         ecs::prelude::*,
-        util::{self, prelude::*},
+        util::{macros::impl_from_for_enum, prelude::*},
     };
     use std::{
         cell::RefCell,
@@ -246,6 +267,7 @@ mod web {
     };
     use wasm_bindgen::prelude::*;
 
+    /// A data type holding [`Worker`]s.
     #[derive(Debug)]
     #[repr(transparent)]
     pub struct WorkerPool {
@@ -265,10 +287,6 @@ mod web {
             }
         }
 
-        fn with_num_cpus() -> Self {
-            Self::with_len(web_util::available_parallelism())
-        }
-
         fn with_len(len: usize) -> Self {
             let mut this = Self::new();
 
@@ -276,7 +294,7 @@ mod web {
             for _ in 0..len {
                 let worker = WorkerBuilder::new(&name).spawn().unwrap();
                 this.append(worker);
-                util::str::increase_rnumber(&mut name);
+                str_util::increase_rnumber(&mut name);
             }
 
             this
@@ -309,6 +327,9 @@ mod web {
         }
     }
 
+    /// [`MainWorker`] builder.
+    ///
+    /// You can spawn [`MainWorker`] from this builder.
     #[derive(Debug)]
     #[repr(transparent)]
     pub struct MainWorkerBuilder<'a> {
@@ -316,23 +337,30 @@ mod web {
     }
 
     impl<'a> MainWorkerBuilder<'a> {
+        /// Creates a [`WorkerBuilder`] with default name 'main-worker'.
         pub fn new() -> Self {
             let inner = WorkerBuilder::new("main-worker").with_listen("mainOnMessage");
             Self { inner }
         }
 
+        /// Creates a [`WorkerBuilder`] with the given name.
         pub fn with_name(self, name: &'a str) -> Self {
             Self {
                 inner: self.inner.with_name(name),
             }
         }
 
+        /// Creates a [`WorkerBuilder`] with the given name of initialization
+        /// function.
+        ///
+        /// Default initialization function is 'mainOnMessage'.
         pub fn with_init(self, init: &'a str) -> Self {
             Self {
                 inner: self.inner.with_init(init),
             }
         }
 
+        /// Spawns a [`MainWorker`].
         pub fn spawn(self) -> Result<MainWorker, JsValue> {
             MainWorker::spawn(self)
         }
@@ -344,6 +372,23 @@ mod web {
         }
     }
 
+    /// Main worker handle.
+    ///
+    /// Main worker is a web worker that is parent of other sub workers. Main
+    /// worker is responsible for communication with window context, spawning
+    /// sub workers, creating ecs instance, and running ecs. You can think of
+    /// main worker as main thread where 'main' function runs on native
+    /// environment.
+    ///
+    /// # Common worker hierarchy
+    ///
+    /// window - main worker - sub workers
+    ///
+    /// # Why we need main worker
+    ///
+    /// Ecs instance blocks sometimes to wait for messages from sub workers. But
+    /// browsers doesn't allow us to block on window context. So we need an
+    /// extra web worker.
     #[derive(Debug)]
     #[repr(transparent)]
     pub struct MainWorker {
@@ -357,11 +402,21 @@ mod web {
             })
         }
 
-        pub fn spawn_children(&self, mut num: usize) {
-            if num == 0 {
-                num = web_util::available_parallelism();
-            }
-
+        /// Spawns sub workers as many as the given number on the main worker.
+        ///
+        /// Sub workers are behind the main worker so that you cannot
+        /// communicate with them directly.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use my_ecs::prelude::*;
+        ///
+        /// let main = MainWorkerBuilder::new().spawn().unwrap();
+        /// let num_cpus = web_util::available_parallelism();
+        /// main.spawn_children(num_cpus);
+        /// ```
+        pub fn spawn_children(&self, num: usize) {
             self.delegate(
                 |arg| {
                     let num: f64 = arg.unchecked_into_f64();
@@ -378,10 +433,28 @@ mod web {
             );
         }
 
-        pub fn init_ecs<F>(&self, f: F)
+        /// Sends the main worker a function that initializes ecs instance.
+        ///
+        /// The main worker will execute the function and store the returned ecs
+        /// instance once it's ready.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use my_ecs::prelude::*;
+        ///
+        /// let main = MainWorkerBuilder::new().spawn().unwrap();
+        /// main.init_app(|pool| {
+        ///     let num_workers = pool.len();
+        ///     Ecs::default(pool, [num_workers])
+        /// });
+        /// ```
+        pub fn init_app<F, R>(&self, f: F)
         where
-            F: FnOnce(WorkerPool) -> LeakedEcsApp + 'static,
+            F: FnOnce(WorkerPool) -> R + 'static,
+            R: Into<LeakedEcsApp>,
         {
+            let f = move |pool: WorkerPool| -> LeakedEcsApp { f(pool).into() };
             let f: DynFnOnce<WorkerPool, LeakedEcsApp> = ManuallyDrop::new(Box::new(f));
             helper(self, f);
 
@@ -407,7 +480,27 @@ mod web {
             }
         }
 
-        pub fn with_ecs<F>(&self, f: F)
+        /// Sends the main worker a function that accesses ecs instance.
+        ///
+        /// But if main worker doesn't have ecs instance, the function will be
+        /// dropped without execution. Don't forget to call
+        /// [`MainWorker::init_app`] beforehand.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use my_ecs::prelude::*;
+        ///
+        /// let main = MainWorkerBuilder::new().spawn().unwrap();
+        ///
+        /// main.init_app(|pool| {
+        ///     let num_workers = pool.len();
+        ///     Ecs::default(pool, [num_workers])
+        /// });
+        ///
+        /// main.with_app(|app| { /* ... */ });
+        /// ```
+        pub fn with_app<F>(&self, f: F)
         where
             F: FnOnce(EcsExt<'static>) + 'static,
         {
@@ -438,14 +531,37 @@ mod web {
 
         /// Executes the given future on the main worker using JS runtime.
         ///
-        /// This method doesn't block, but the main worker stacks requested
-        /// functions rather than executing them until the future is completed.
+        /// This method doesn't block, but the main worker stacks other
+        /// requested functions rather than executing them until the given
+        /// future is completed.
         ///
-        /// Web APIs which return `Promise` should be called carafully. They
-        /// eagerly put tasks to JS runtime's queue, and the tasks cannot make
+        /// Web APIs which return `Promise` should be called carefully. They
+        /// eagerly put tasks to JS runtime queue, and the tasks cannot make
         /// more progress while Rust wasm holds CPU. That means that Rust wasm
-        /// should stop its processing to complete JS `Promise`.
-        pub fn with_ecs_await<F, Fut>(&self, f: F)
+        /// should stop its processing to complete JS `Promise`. In other words,
+        /// Rust wasm cannot wait to be woken up by `Promise`.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use my_ecs::prelude::*;
+        /// use web_sys::{WorkerGlobalScope, Response};
+        /// use wasm_bindgen_futures::JsFuture;
+        ///
+        /// let main = MainWorkerBuilder::new().spawn().unwrap();
+        ///
+        /// main.init_app(|pool| {
+        ///     let num_workers = pool.len();
+        ///     Ecs::default(pool, [num_workers])
+        /// });
+        ///
+        /// main.with_app_await(|app| async {
+        ///     let global: WorkerGlobalScope = js_sys::global().unchecked_into();
+        ///     let promise = global.fetch_with_str("<some-url>");
+        ///     let resp = JsFuture::from(promise).await.unwrap();
+        /// });
+        /// ```
+        pub fn with_app_await<F, Fut>(&self, f: F)
         where
             F: FnOnce(EcsExt<'static>) -> Fut + 'static,
             Fut: Future<Output = ()> + 'static,
@@ -489,7 +605,10 @@ mod web {
             }
         }
 
-        /// Calls the given function on main worker context.
+        /// Sends the main worker a function to call it on the main worker
+        /// context.
+        ///
+        /// The function will be called once the main worker is ready.
         pub fn delegate(&self, f: fn(arg: JsValue), arg: JsValue) {
             MessageFn { f }.post_to(&self.handle(), arg);
         }
@@ -517,8 +636,22 @@ mod web {
         }
     }
 
+    /// Listener of messages from the main worker.
+    ///
+    /// This function is exposed to JS, and it looks like,
+    ///
+    /// ```js
+    /// // index.js
+    /// const main_worker = new Worker('worker.js');
+    /// main_worker.onmessage = (msg) => {
+    ///     // this function
+    /// };
+    ///
+    /// // worker.js
+    /// postMessage('to window');
+    /// ```
     #[wasm_bindgen(js_name = mainOnMessage)]
-    pub fn main_onmessage(msg: JsValue) {
+    pub fn main_on_message(msg: JsValue) {
         if let Some(arr) = msg.dyn_ref::<js_sys::Array>() {
             let header = arr.get(0);
             match MessageHeader::from_js_value(header).0 {
@@ -567,7 +700,7 @@ mod web {
         "inner" = DynFnOnceExt<EcsExt<'static>, Pin<Box<dyn Future<Output = ()>>>>
     );
 
-    pub struct MainWorkerContext {
+    struct MainWorkerContext {
         /// Worker pool.
         pool: WorkerPool,
         ecs: Option<LeakedEcsApp>,
@@ -674,6 +807,9 @@ mod web {
         }
     }
 
+    /// [`Worker`] builder.
+    ///
+    /// You can spawn [`Worker`] from this builder.
     #[derive(Debug)]
     pub struct WorkerBuilder<'a> {
         name: &'a str,
@@ -684,10 +820,11 @@ mod web {
 
     impl<'a> WorkerBuilder<'a> {
         /// Default message listener of the worker.
-        /// See [`worker_onmessage`].
+        /// See [`worker_on_message`].
         const DEFAULT_LISTEN: &'static str = "workerOnMessage";
         const DEFAULT_INIT: &'static str = "workerInit";
 
+        /// Creates a new [`WorkerBuilder`].
         pub const fn new(name: &'a str) -> Self {
             Self {
                 name,
@@ -697,31 +834,38 @@ mod web {
             }
         }
 
+        /// Creates a new [`WorkerBuilder`] with the given name.
         pub const fn with_name(mut self, name: &'a str) -> Self {
             self.name = name;
             self
         }
 
+        /// Creates a new [`WorkerBuilder`] with the given script.
         pub const fn with_script(mut self, script: &'a str) -> Self {
             self.script = Some(script);
             self
         }
 
+        /// Creates a new [`WorkerBuilder`] with the given name of
+        /// initialization function.
         pub const fn with_init(mut self, init: &'a str) -> Self {
             self.init = init;
             self
         }
 
+        /// Creates a new [`WorkerBuilder`] with the given `onmessage` listener.
         pub const fn with_listen(mut self, listen: &'a str) -> Self {
             self.listen = listen;
             self
         }
 
+        /// Spawns a new [`Worker`] from the builder.
         pub fn spawn(self) -> Result<Worker, JsValue> {
             Worker::spawn(self)
         }
     }
 
+    /// Worker handle.
     pub struct Worker {
         /// JS worker handle.
         handle: web_sys::Worker,
@@ -731,14 +875,14 @@ mod web {
 
         /// Callback for worker's first response, which is a notification of
         /// the worker's readiness.
-        /// The callback will be replaced with [`onmsg`] once it called.
         ///
-        /// [`onmsg`]: Self::onmsg
+        /// The callback will be replaced with [`Worker::on_message`] once it
+        /// called.
         _on_ready: Closure<dyn FnMut()>,
 
         /// Callback for worker response.
         #[allow(clippy::type_complexity)]
-        onmsg: Rc<RefCell<Closure<dyn FnMut(web_sys::MessageEvent)>>>,
+        on_message: Rc<RefCell<Closure<dyn FnMut(web_sys::MessageEvent)>>>,
 
         /// Determines the worker is spawned and ready to listen to message.
         ready: Arc<AtomicBool>,
@@ -758,15 +902,15 @@ mod web {
             // Creates a new worker.
             let handle = create_worker(builder.name, builder.script)?;
             let ready = Arc::new(AtomicBool::new(false));
-            let onmsg = Rc::new(RefCell::new(Closure::new(|_| {})));
+            let on_message = Rc::new(RefCell::new(Closure::new(|_| {})));
             let c_handle = handle.clone();
             let c_ready = Arc::clone(&ready);
-            let c_onmsg = Rc::clone(&onmsg);
+            let c_on_message = Rc::clone(&on_message);
 
             // Listens to worker's ready notification.
             let on_ready = Closure::new(move || {
-                let onmsg = c_onmsg.borrow();
-                c_handle.set_onmessage(Some(onmsg.as_ref().unchecked_ref()));
+                let on_message = c_on_message.borrow();
+                c_handle.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
                 c_ready.store(true, Ordering::Release);
             });
             handle.set_onmessage(Some(on_ready.as_ref().unchecked_ref()));
@@ -790,20 +934,23 @@ mod web {
                 handle,
                 name: builder.name.into(),
                 _on_ready: on_ready,
-                onmsg,
+                on_message,
                 ready,
             })
         }
 
+        /// Returns JS worker handle.
         pub fn handle(&self) -> web_sys::Worker {
             self.handle.clone()
         }
 
+        /// Returns true if the worker has been fully initialized and ready to
+        /// process messages.
         pub fn is_ready(&self) -> bool {
             self.ready.load(Ordering::Relaxed)
         }
 
-        pub fn set_onmessage<F>(&self, mut cb: F)
+        pub fn set_on_message<F>(&self, mut cb: F)
         where
             F: FnMut(JsValue) + 'static,
         {
@@ -813,9 +960,10 @@ mod web {
             if self.is_ready() {
                 self.handle.set_onmessage(Some(cb.as_ref().unchecked_ref()));
             }
-            *self.onmsg.borrow_mut() = cb;
+            *self.on_message.borrow_mut() = cb;
         }
 
+        /// Sends the worker a message.
         pub fn post_message(&self, msg: &JsValue) -> Result<(), JsValue> {
             self.handle.post_message(msg)
         }
@@ -823,7 +971,7 @@ mod web {
 
     impl Work for Worker {
         fn unpark(&mut self, cx: ManagedConstPtr<SubContext>) -> bool {
-            let ptr = cx.inner().as_ptr();
+            let ptr = cx.as_ptr();
 
             #[cfg(feature = "check")]
             drop(cx);
@@ -877,7 +1025,7 @@ mod web {
     //
     // build: {
     //   rollupOptions: {
-    //       // We need to split wasm glue module into a sperate chunk
+    //       // We need to split wasm glue module into a separate chunk
     //       // 1. Not to include window context data.
     //       //    * wasm glue module will be imported in worker context.
     //       //    * In worker context, we can't access something like document.
@@ -891,6 +1039,7 @@ mod web {
     //         wasm: 'pkg/wasm-index.js', // path to wasm glue file.
     //         ...
     //       },
+    //       ...
     //
     //       // Then, put the following.
     //       // * https://rollupjs.org/configuration-options/#preserveentrysignatures
@@ -898,6 +1047,8 @@ mod web {
     //       //   but I guess Vite 5.4.2 changes it to `false`.
     //       preserveEntrySignatures: 'exports-only',
     //     },
+    //   ...
+    // }
     fn create_worker(name: &str, script: Option<&str>) -> Result<web_sys::Worker, JsValue> {
         let opt = web_sys::WorkerOptions::new();
         opt.set_name(name);
@@ -940,15 +1091,17 @@ mod web {
     ///
     /// Undefined behavior if the pointer is not valid or aliased.
     #[wasm_bindgen(js_name = workerOnMessage)]
-    pub unsafe fn worker_onmessage(cx: *mut SubContext) {
+    pub unsafe fn worker_on_message(cx: *mut SubContext) {
         let cx = ManagedConstPtr::new(NonNullExt::new_unchecked(cx));
         SubContext::execute(cx);
     }
 
-    /// Message event header.  
-    /// Inner value will be transmuted into f64 and vice versa.
-    /// You must guarantee that f64 representation is not Nan (or Inf).
-    /// If so, someone(maybe JS) will change it's bits except Nan bits.
+    /// Message event header.
+    ///
+    /// Inner value will be transmuted into f64 and vice versa. You must
+    /// guarantee that f64 representation is not Nan (or Inf). If so,
+    /// someone(maybe JS) can change its bit expression into something else with
+    /// just preserving the meaning, Nan or Inf or something like that.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct MessageHeader(pub u64);
 
@@ -1139,7 +1292,7 @@ mod web {
         /// # Safety
         ///
         /// Undefined behavior if the given data is not a valid [`DynFnOnce`].
-        /// Also, return value must be casted as the original type.
+        /// Also, return value must be cast as the original type.
         #[inline]
         unsafe fn decode_from_array(arr: &js_sys::Uint32Array) -> DynFnOnceExt<(), ()> {
             let mut buf: [u32; Self::len()] = [0; Self::len()];
@@ -1150,7 +1303,7 @@ mod web {
         /// # Safety
         ///
         /// Undefined behavior if the given data is not a valid [`DynFnOnce`].
-        /// Also, return value must be casted as the original type.
+        /// Also, return value must be cast as the original type.
         #[inline]
         const unsafe fn decode(encoded: [u32; Self::len()]) -> DynFnOnceExt<(), ()> {
             let f = Self { dst: encoded }.src;

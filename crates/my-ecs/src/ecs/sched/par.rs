@@ -2,7 +2,7 @@ use super::{
     ctrl::SUB_CONTEXT,
     task::{ParTask, ParTaskHolder, TaskId},
 };
-use crate::ecs::stat;
+use crate::global;
 use rayon::iter::{
     plumbing::{
         Consumer, Folder, Producer, ProducerCallback, Reducer, UnindexedConsumer, UnindexedProducer,
@@ -93,12 +93,12 @@ impl LengthSplitter {
 }
 
 // ref: https://github.com/rayon-rs/rayon/blob/7543ed40c9a017dee32b3dc72b3ae819820e8366/src/iter/plumbing/mod.rs#L350
-pub fn bridge<I, C>(par_iter: I, consumer: C) -> C::Result
+fn bridge<I, C>(par_iter: I, consumer: C) -> C::Result
 where
     I: IndexedParallelIterator,
     C: Consumer<I::Item>,
 {
-    stat::exec::increase_parallel_task_count();
+    global::stat::increase_parallel_task_count();
     let len = par_iter.len();
     return par_iter.with_producer(Callback { len, consumer });
 
@@ -127,9 +127,14 @@ where
     P: Producer,
     C: Consumer<P::Item>,
 {
-    let splitter = LengthSplitter::new(producer.min_len(), producer.max_len(), len).unwrap();
     const MIGRATED: bool = false;
-    return helper(len, MIGRATED, splitter, producer, consumer);
+    let res =
+        if let Some(splitter) = LengthSplitter::new(producer.min_len(), producer.max_len(), len) {
+            helper(len, MIGRATED, splitter, producer, consumer)
+        } else {
+            helper_no_split(producer, consumer)
+        };
+    return res;
 
     // === Internal helper functions ===
 
@@ -161,15 +166,28 @@ where
             producer.fold_with(consumer.into_folder()).complete()
         }
     }
+
+    fn helper_no_split<P, C>(producer: P, consumer: C) -> C::Result
+    where
+        P: Producer,
+        C: Consumer<P::Item>,
+    {
+        if consumer.full() {
+            consumer.into_folder().complete()
+        } else {
+            producer.fold_with(consumer.into_folder()).complete()
+        }
+    }
 }
 
 // ref: https://github.com/rayon-rs/rayon/blob/7543ed40c9a017dee32b3dc72b3ae819820e8366/src/iter/plumbing/mod.rs#L445
-pub fn bridge_unindexed<P, C>(producer: P, consumer: C) -> C::Result
+#[allow(dead_code)] // For future use
+fn bridge_unindexed<P, C>(producer: P, consumer: C) -> C::Result
 where
     P: UnindexedProducer,
     C: UnindexedConsumer<P::Item>,
 {
-    stat::exec::increase_parallel_task_count();
+    global::stat::increase_parallel_task_count();
     let splitter = Splitter::new().unwrap();
     bridge_unindexed_producer_consumer(false, splitter, producer, consumer)
 }
@@ -220,7 +238,7 @@ where
     let r_task = unsafe { ParTask::new(&r_holder) };
     let r_task_id = TaskId::Parallel(r_task);
 
-    // Puts 'Right task' into local queue and nofifies it to another worker.
+    // Puts 'Right task' into local queue then notifies it to another worker.
     //
     // TODO: Optimize.
     // compare to rayon, too many steal operations take place.
@@ -281,9 +299,14 @@ where
     }
 }
 
-// TODO: Implement this trait for types that implement `ParallelIterator` such
-// as `rayon::iter::Flatten`.
+/// A trait for wrapping Rayon's parallel iterators in [`EcsPar`] in order to
+/// intercept function call to a Rayon API then to execute them in the ECS
+/// context.
 pub trait IntoEcsPar: ParallelIterator {
+    /// Wraps Rayon's parallel iterator in [`EcsPar`].
+    ///
+    /// `EcsPar` calls an ECS function to make use of ECS workers instead of
+    /// Rayon's workers.
     #[inline]
     fn into_ecs_par(self) -> EcsPar<Self> {
         EcsPar(self)
@@ -292,6 +315,7 @@ pub trait IntoEcsPar: ParallelIterator {
     /// Implementations must call [`bridge`] or [`bridge_unindexed`] instead of
     /// [`rayon::iter::plumbing::bridge`] or
     /// [`rayon::iter::plumbing::bridge_unindexed`].
+    #[doc(hidden)]
     fn drive_unindexed<C>(self, consumer: C) -> C::Result
     where
         C: UnindexedConsumer<Self::Item>;
@@ -308,13 +332,18 @@ impl<I: IndexedParallelIterator> IntoEcsPar for I {
     }
 }
 
-/// Wrapper of rayon's parallel iterator.
+/// A wrapper type of Rayon's parallel iterator.
 ///
-/// rayon's parallel iterator basically uses its own worker registry. It means
-/// that rayon will spawn new workers regardless of living workers in ecs, which
-/// may not be something you wish.  
-/// To use ecs's workers instead, just wrap the iterator in this wrapper.
-/// Then, this wrapper will intercept calls to registry and switch it to ecs's.
+/// Rayon's parallel iterator basically uses its own worker registry. It means
+/// that Rayon will spawn new workers regardless of living workers in ECS
+/// instance, which is a behavior you may not want. To use workers of ECS
+/// instance instead, just wrap the Rayon's parallel iterator in this wrapper.
+/// Then, this wrapper will intercept calls to Rayon's functions.
+///
+/// # Limitation
+///
+/// This wrapper currently requires implmentation of
+/// [`IndexedParallelIterator`].
 #[derive(Clone)]
 #[repr(transparent)]
 pub struct EcsPar<I>(pub I);

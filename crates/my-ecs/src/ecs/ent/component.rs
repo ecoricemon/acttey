@@ -1,13 +1,12 @@
-use my_ecs_macros::repeat_macro;
-
 use crate::ds::prelude::*;
+use my_ecs_macros::repeat_macro;
 
 /// Ordinary rust types.
 pub trait Component: Send + Sync + Sized + 'static {
     const IS_SEND: bool = true; // by bound
     const IS_SYNC: bool = true; // by bound
 
-    // === Must be overwitten by something like [`my_ecs_macros::Component`] ===
+    // === Must be overwritten by something like [`my_ecs_macros::Component`] ===
     const IS_DEFAULT: bool = false; // depends on impl
     const FN_DEFAULT: FnDefaultRaw = unimpl_default; // depends on impl
     const IS_CLONE: bool = false; // depends on impl
@@ -18,25 +17,29 @@ pub trait Component: Send + Sync + Sized + 'static {
     }
 
     fn type_info() -> TypeInfo {
-        let mut tinfo = Self::as_type_info();
-        tinfo.set_additional(
+        TypeInfo::new::<Self>(
             Self::IS_SEND,
             Self::IS_SYNC,
             Self::IS_DEFAULT.then_some(Self::FN_DEFAULT),
             Self::IS_CLONE.then_some(Self::FN_CLONE),
-        );
-        tinfo
+        )
     }
 }
 
+/// A set of [`Component`]s.
 pub trait Components: 'static {
     type Keys: AsRef<[ComponentKey]>;
     type Infos: AsRef<[TypeInfo]>;
 
     const LEN: usize;
 
+    /// Returns [`ComponentKey`]s in declared field order.
     fn keys() -> Self::Keys;
+
+    /// Returns [`TypeInfo`]s in declared field order.
     fn infos() -> Self::Infos;
+
+    /// Returns sorted [`ComponentKey`]s.
     fn sorted_keys() -> Self::Keys;
 }
 
@@ -44,7 +47,7 @@ macro_rules! impl_components {
     ($n:expr, $($i:expr),*) => {const _: () = {
         #[allow(unused_imports)]
         use $crate::{
-            ds::types::TypeInfo,
+            ds::TypeInfo,
             ecs::ent::component::{Component, Components, ComponentKey},
         };
         use paste::paste;

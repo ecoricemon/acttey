@@ -1,5 +1,12 @@
-//! Data structures defined by this crate can be resources.
-use crate::{ds::prelude::*, ecs::resource::Resource};
+//! Implements [`Resource`] for some data types of the crate.
+
+use crate::{
+    ds::{
+        AnyVec, ChunkAnyVec, GenQueue, GroupMap, IndexedMap, OptVec, SetList, SetValueList,
+        SimpleVecPool,
+    },
+    ecs::resource::Resource,
+};
 
 impl Resource for AnyVec {}
 impl Resource for ChunkAnyVec {}
@@ -40,4 +47,3 @@ where
 {
 }
 impl<T> Resource for GenQueue<T> where T: Send + 'static {}
-impl<T> Resource for LimitedQueue<T> where T: Send + 'static {}

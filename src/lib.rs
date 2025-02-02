@@ -15,7 +15,7 @@ pub mod prelude {
 
 pub(crate) type AppHasher = ahash::RandomState;
 
-pub use my_ecs::ecs::EcsError;
+pub use my_ecs::prelude::EcsError;
 use std::fmt;
 use thiserror::Error;
 

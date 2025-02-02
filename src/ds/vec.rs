@@ -1,11 +1,11 @@
-use super::vec::OptVec;
-use crate::util::With;
+use super::OptVec;
+use my_ecs::prelude::With;
 use std::hash::BuildHasher;
 
 #[derive(Debug, Clone, Default)]
 pub struct GenVec<T, S> {
     values: OptVec<With<T, u64>, S>,
-    gen: u64,
+    generation: u64,
 }
 
 impl<T, S> GenVec<T, S>
@@ -15,7 +15,7 @@ where
     pub fn new() -> Self {
         Self {
             values: OptVec::new(),
-            gen: 1,
+            generation: 1,
         }
     }
 }
@@ -25,8 +25,8 @@ where
     S: BuildHasher,
 {
     pub fn add(&mut self, value: T) -> With<usize, u64> {
-        let value_gen = self.gen;
-        self.gen += 1;
+        let value_gen = self.generation;
+        self.generation += 1;
         let value = With::new(value, value_gen);
         let index = self.values.add(value);
         With::new(index, value_gen)

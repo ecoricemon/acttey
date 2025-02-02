@@ -1,9 +1,0 @@
-[build]
-target = [
-    "aarch64-apple-darwin",
-    "wasm32-unknown-unknown"
-]
-rustflags = [
-    "--cfg=web_sys_unstable_apis",
-    "--cfg=wasm_platform",
-]

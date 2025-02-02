@@ -1,14 +1,14 @@
 use super::{ent::entity::EntityIndex, resource::ResourceIndex};
-use crate::ds::prelude::*;
+use crate::ds::{AsDedupVec, DedupVec, GenQueue, OptVec};
 use std::{fmt::Debug, hash::BuildHasher, ops::Deref};
 
 /// A struct containing [`WaitQueue`]s for each component, resource, and entity.
 /// Their indices are the same with the ones from the data containers.
 #[derive(Debug)]
-pub(super) struct WaitQueues<S> {
+pub(crate) struct WaitQueues<S> {
     ent_queues: OptVec<OptVec<WaitQueue, S>, S>,
     res_queues: OptVec<WaitQueue, S>,
-    gen: u64,
+    generation: u64,
 }
 
 impl<S> WaitQueues<S>
@@ -19,7 +19,7 @@ where
         Self {
             ent_queues: OptVec::new(),
             res_queues: OptVec::new(),
-            gen: 0,
+            generation: 0,
         }
     }
 }
@@ -32,13 +32,10 @@ where
     #[cfg(debug_assertions)]
     pub(super) fn is_all_queue_empty(&self) -> bool {
         self.ent_queues
-            .iter_occupied()
-            .flat_map(|(_, cols)| cols.iter_occupied())
+            .pairs()
+            .flat_map(|(_, cols)| cols.pairs())
             .all(|(_, col)| col.is_empty())
-            && self
-                .res_queues
-                .iter_occupied()
-                .all(|(_, col)| col.is_empty())
+            && self.res_queues.pairs().all(|(_, col)| col.is_empty())
     }
 
     pub(super) fn initialize_resource_queue(&mut self, index: usize) {
@@ -78,11 +75,11 @@ where
         );
 
         // Increases generation.
-        self.gen += 1;
+        self.generation += 1;
 
         // === Internal helper functions ===
 
-        /// Dequeues an item from componenet wait queues.
+        /// Dequeues an item from component wait queues.
         /// The component queues are picked up by `wait` indices.
         fn dequeue_comp<S, I>(ent_queues: &mut OptVec<OptVec<WaitQueue, S>, S>, wait_iter: I)
         where
@@ -118,7 +115,7 @@ where
         {
             for ei in wait_iter {
                 let comp_queues = ent_queues.get_mut(ei).unwrap();
-                for (_, queue) in comp_queues.iter_occupied_mut() {
+                for (_, queue) in comp_queues.pairs_mut() {
                     queue.pop();
                 }
             }
@@ -127,7 +124,7 @@ where
 
     /// Enqueues requests for access authority of components or resources
     /// according to `wait` indices.
-    /// If they're good to be accssed now, returns true.
+    /// If they're good to be accessed now, returns true.
     /// Otherwise, returns false, and then failed indices will be inserted into `retry`.
     fn _enqueue(&mut self, wait: &WaitIndices, retry: &mut WaitRetryIndices) -> bool {
         let mut res = true;
@@ -201,7 +198,7 @@ where
                 let comp_queues = ent_queues.get_mut(ei).unwrap();
                 let queue = comp_queues.get_mut(ci).unwrap();
                 let target_gen = queue.push(rw);
-                if target_gen != queue.gen() {
+                if target_gen != queue.generation() {
                     retry.push((target_gen, ei, ci));
                     available = false;
                 }
@@ -234,7 +231,7 @@ where
             for ri in wait_iter {
                 let queue = res_queues.get_mut(ri).unwrap();
                 let target_gen = queue.push(rw);
-                if target_gen != queue.gen() {
+                if target_gen != queue.generation() {
                     retry.push((target_gen, ri));
                     available = false;
                 }
@@ -265,9 +262,9 @@ where
             let mut available = true;
             for ei in wait_iter {
                 let comp_queues = ent_queues.get_mut(ei).unwrap();
-                for (ci, queue) in comp_queues.iter_occupied_mut() {
+                for (ci, queue) in comp_queues.pairs_mut() {
                     let target_gen = queue.push(RW::Write);
-                    if target_gen != queue.gen() {
+                    if target_gen != queue.generation() {
                         retry.push((target_gen, ei, ci));
                         available = false;
                     }
@@ -301,7 +298,7 @@ where
             while let Some((target_gen, ei, ci)) = retry.pop() {
                 let comp_queues = ent_queues.get(ei).unwrap();
                 let queue = comp_queues.get(ci).unwrap();
-                if target_gen != queue.gen() {
+                if target_gen != queue.generation() {
                     retry.push((target_gen, ei, ci));
                     return false;
                 }
@@ -319,7 +316,7 @@ where
         {
             while let Some((target_gen, resi)) = retry.pop() {
                 let queue = res_queues.get(resi).unwrap();
-                if target_gen != queue.gen() {
+                if target_gen != queue.generation() {
                     retry.push((target_gen, resi));
                     return false;
                 }
@@ -370,12 +367,12 @@ impl WaitQueue {
             if let Some(back) = self.0.back_mut() {
                 if back.0 == RW::Read {
                     back.1 += 1;
-                    return self.gen() + (self.len() - 1) as u64;
+                    return self.generation() + (self.len() - 1) as u64;
                 }
             }
         }
         self.0.push_back((rw, 1));
-        self.gen() + (self.len() - 1) as u64
+        self.generation() + (self.len() - 1) as u64
     }
 
     fn pop(&mut self) {

@@ -5,46 +5,44 @@ use super::{
     share::{self, EntMoveStorage, Shared},
     DynResult,
 };
-use crate::{ds::prelude::*, impl_from_for_enum};
-use my_ecs_macros::repeat_macro;
+use crate::{ds::ReadyFuture, util::macros::impl_from_for_enum};
 use std::{fmt, ptr::NonNull, sync::MutexGuard};
 
-pub trait Commands {
-    fn command(&mut self, ecs: Ecs<'_>) -> DynResult<()>;
+pub mod prelude {
+    pub use super::{Command, Commander};
 }
 
-macro_rules! impl_commands {
-    (1, 0) => {
-        impl<A0: Command> Commands for A0 {
-            fn command(&mut self, ecs: Ecs<'_>) -> DynResult<()> {
-                self.command(ecs)
-            }
-        }
-    };
-    ($n:expr, $($i:expr),*) => {
-        paste::paste! {
-            #[allow(unused_parens)]
-            impl<$([<A $i>]: Command),*> Commands for ( $([<A $i>]),* ) {
-                fn command(&mut self, ecs: Ecs<'_>) -> DynResult<()> {
-                    $(
-                        match self.$i.command(unsafe { ecs.copy() }) {
-                            Ok(()) => {}
-                            Err(e) => return Err(e),
-                        }
-                    )*
-                    Ok(())
-                }
-            }
-        }
-    };
-}
-repeat_macro!(impl_commands, 1..=8);
-
+/// Command to an ECS instance.
+///
+/// Command is one way to modify ECS instance directly such as adding or
+/// removing systems. In the command method, an ECS handle is given and you can
+/// make change to the ECS insance using the handle.
+///
+/// # Example
+///
+/// ```
+/// use my_ecs::prelude::*;
+///
+/// struct MyCommand;
+///
+/// impl Command for MyCommand {
+///     fn command(&mut self, mut ecs: Ecs) -> DynResult<()> {
+///         ecs.add_system(|| { /* ... */}).take()?;
+///         Ok(())
+///     }
+/// }
+/// ```
 pub trait Command: Send + 'static {
+    /// A method accessing the whole ECS instance.
+    ///
+    /// After calling this method, the command will be dropped.
     #[allow(unused_variables)]
     fn command(&mut self, ecs: Ecs<'_>) -> DynResult<()>;
 
-    /// Command can be cancelled out when it's not executed before it's dropped.
+    /// Cancellation method which is called when the command cannot be
+    /// executed for some reason.
+    ///
+    /// After calling this method, the command will be dropped.
     fn cancel(&mut self) {}
 }
 
@@ -64,6 +62,15 @@ where
         } else {
             Err("command has been taken".into())
         }
+    }
+}
+
+impl<F> Command for F
+where
+    F: FnMut(Ecs) -> DynResult<()> + Send + 'static,
+{
+    fn command(&mut self, ecs: Ecs<'_>) -> DynResult<()> {
+        self(ecs)
     }
 }
 
@@ -104,8 +111,8 @@ impl Command for () {
 }
 
 #[derive(Debug)]
-pub enum CommandObject {
-    /// Trait object.
+pub(crate) enum CommandObject {
+    /// Trait object command.
     Boxed(Box<dyn Command>),
 
     /// Ready future containing command.
@@ -144,23 +151,25 @@ impl CommandObject {
 
 /// Like other commands, RawCommand is also executed only once.
 #[derive(Debug)]
-pub struct RawCommand {
+pub(crate) struct RawCommand {
     data: NonNull<u8>,
     command: unsafe fn(NonNull<u8>, Ecs<'_>) -> DynResult<()>,
     cancel: unsafe fn(NonNull<u8>),
 }
 
+unsafe impl Send for RawCommand {}
+
 impl RawCommand {
     pub(crate) unsafe fn new<C: Command>(cmd: &C) -> Self {
-        let data = NonNull::new_unchecked((cmd as *const _ as *const u8).cast_mut());
+        let data = unsafe { NonNull::new_unchecked((cmd as *const _ as *const u8).cast_mut()) };
 
         unsafe fn command<C: Command>(data: NonNull<u8>, ecs: Ecs<'_>) -> DynResult<()> {
-            let data = data.cast::<C>().as_mut();
+            let data = unsafe { data.cast::<C>().as_mut() };
             data.command(ecs)
         }
 
         unsafe fn cancel<C: Command>(data: NonNull<u8>) {
-            let data = data.cast::<C>().as_mut();
+            let data = unsafe { data.cast::<C>().as_mut() };
             data.cancel();
         }
 
@@ -184,8 +193,13 @@ impl RawCommand {
     }
 }
 
-unsafe impl Send for RawCommand {}
-
+/// A handy command generator.
+///
+/// The generator provides commands shown below for now.
+/// * Entity move command
+///   - Entity move command is about moving an entity from one container to
+///     another. For example, if removing `Ca` from `Ea { Ca, Cb }`, then it
+///     moves from entity container for `Ea { Ca, Cb }` to another `Eb { Cb }`.
 pub struct Commander<'s> {
     shared: &'s Shared,
 }
@@ -195,12 +209,33 @@ impl<'s> Commander<'s> {
         Self { shared }
     }
 
+    /// Creates entity move command builder.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::prelude::*;
+    ///
+    /// #[derive(Component)] struct Ca;
+    /// #[derive(Component)] struct Cb;
+    /// #[derive(Entity)] struct Ea { a: Ca, b: Cb }
+    ///
+    /// let mut ecs = Ecs::default(WorkerPool::new(), []);
+    ///
+    /// // Adds an entity `Ea { Ca, Cb }`.
+    /// let ei = ecs.register_entity_of::<Ea>().unwrap();
+    /// let eid = ecs.add_entity(ei, Ea { a: Ca, b: Cb }).unwrap();
+    ///
+    /// // Removes `Ca` from `Ea { Ca, Cb }`.
+    /// ecs.execute_command(|cmdr| cmdr.entity(eid).detach::<Ca>().finish()).unwrap();
+    /// ```
     pub fn entity(&self, eid: EntityId) -> EntityMoveCommandBuilder<'_, true> {
         let guard = self.shared.lock_entity_move_storage();
         EntityMoveCommandBuilder::with_guard(eid, guard)
     }
 }
 
+/// Scheduler the given command.
 pub fn schedule_command<F>(f: F)
 where
     F: FnOnce(Ecs) -> DynResult<()> + Send + 'static,
@@ -212,7 +247,7 @@ where
 
 pub(crate) fn schedule_command_object(cmd: CommandObject) {
     let ptr = SUB_CONTEXT.get();
-    assert!(!ptr.is_dangling());
+    assert!(!ptr.is_dangling(), "expected sub worker context");
 
     // Safety: Current worker has valid sub context pointer.
     let comm = unsafe { ptr.as_ref().get_comm() };
@@ -223,7 +258,16 @@ pub fn entity<'g>(eid: EntityId) -> EntityMoveCommandBuilder<'g, false> {
     EntityMoveCommandBuilder::new(eid)
 }
 
-pub struct EntityMoveCommandBuilder<'g, const OBJ: bool> {
+/// A command builder to attach or detach some components to or from an entity.
+///
+/// By attaching or detathcing components, entity move from one entity container
+/// to another arises because the entity doesn't belong to the previous entity
+/// container. If destination entity container doesn't exist at the time, new
+/// entity container is generated first then the entity moves into it.
+///
+/// * MAIN - Whether the builder is on main context or not. They must be
+///   distinguashed due to internal restrictions.
+pub struct EntityMoveCommandBuilder<'g, const MAIN: bool> {
     eid: EntityId,
     guard: MutexGuard<'g, EntMoveStorage>,
     len: usize,
@@ -242,7 +286,12 @@ impl<'g> EntityMoveCommandBuilder<'g, true> {
         Self { eid, guard, len: 0 }
     }
 
-    pub fn finish(mut self) -> impl Command {
+    /// Finishes to build an entity move command.
+    ///
+    /// # Examples
+    ///
+    /// See [`Commander::entity`].
+    pub fn finish(mut self) -> impl Command + 'static {
         assert!(self.len > 0);
 
         let cmd = self._finish();
@@ -255,20 +304,36 @@ impl<'g> EntityMoveCommandBuilder<'g, true> {
     }
 }
 
-impl<const OBJ: bool> EntityMoveCommandBuilder<'_, OBJ> {
+impl<const MAIN: bool> EntityMoveCommandBuilder<'_, MAIN> {
+    /// Adds component attachment instruction to a command builder.
+    ///
+    /// The command builder will generate a command with the instruction when
+    /// [`EntityMoveCommandBuilder::finish`] is called.
+    ///
+    /// # Examples
+    ///
+    /// See [`Commander::entity`].
     pub fn attach<C: Component>(mut self, component: C) -> Self {
         self.guard.insert_addition(self.eid, component);
         self.len += 1;
         self
     }
 
+    /// Adds component detatchment instruction to a command builder.
+    ///
+    /// The command builder will generate a command with the instruction when
+    /// [`EntityMoveCommandBuilder::finish`] is called.
+    ///
+    /// # Examples
+    ///
+    /// See [`Commander::entity`].
     pub fn detach<C: Component>(mut self) -> Self {
         self.guard.insert_removal(self.eid, C::key());
         self.len += 1;
         self
     }
 
-    fn _finish(&mut self) -> impl Command {
+    fn _finish(&mut self) -> EntityMoveCommand {
         self.guard.set_command_length(self.len);
         EntityMoveCommand
     }

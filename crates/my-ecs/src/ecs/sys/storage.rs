@@ -1,36 +1,40 @@
 use super::system::{PoisonedSystem, SystemGroup, SystemId};
-use crate::ecs::{
-    sys::system::{InsertPos, SystemData, Tick},
-    EcsError,
+use crate::{
+    ds::Array,
+    ecs::{
+        sys::system::{InsertPos, SystemData, Tick},
+        EcsError,
+    },
+    MAX_GROUP,
 };
-use crate::util::prelude::*;
-use std::{array, hash::BuildHasher};
+use std::hash::BuildHasher;
 
-/// * `S` - Hasher.
-/// * `N` - Number of [`SystemGroup`], which operates in a different configurable way from each other.
 #[derive(Debug)]
-pub(crate) struct SystemStorage<S, const N: usize> {
-    pub(crate) sgroups: Multi<SystemGroup<S>, N>,
+pub(crate) struct SystemStorage<S> {
+    pub(crate) sgroups: Array<SystemGroup<S>, MAX_GROUP>,
 }
 
-impl<S, const N: usize> SystemStorage<S, N>
+impl<S> SystemStorage<S>
 where
     S: BuildHasher + Default + 'static,
 {
-    pub(crate) fn new() -> Self {
-        // For now, group index `gi` below is limited up to u16::MAX - 1 by `SystemId`.
-        // Here, we check N in terms of bounds at compile time.
-        let _: () = const { assert!(N < SystemId::max_group_index() as usize) };
+    pub(crate) fn new(num_groups: usize) -> Self {
+        assert!(num_groups <= MAX_GROUP);
 
-        let sgroups = array::from_fn(|gi| SystemGroup::new(gi as u16));
-
-        Self {
-            sgroups: Multi::new(sgroups),
+        let mut sgroups = Array::new();
+        for gi in 0..num_groups {
+            sgroups.push(SystemGroup::new(gi as u16));
         }
+
+        Self { sgroups }
+    }
+
+    pub(crate) fn num_groups(&self) -> usize {
+        self.sgroups.len()
     }
 
     pub(crate) fn get_group_mut(&mut self, gi: usize) -> &mut SystemGroup<S> {
-        self.sgroups.switch_to(gi)
+        &mut self.sgroups[gi]
     }
 
     pub(crate) fn register(
@@ -38,13 +42,12 @@ where
         sdata: SystemData,
         volatile: bool,
     ) -> Result<(), EcsError<SystemData>> {
-        // Id and flags of the system must be valid here.
+        // Identifier and flags of the system must be valid here.
         debug_assert!(!sdata.id().is_dummy());
         debug_assert!(!sdata.flags().is_empty());
 
-        self.sgroups
-            .switch_to(sdata.id().group_index() as usize)
-            .register(sdata, volatile)
+        let gi = sdata.id().group_index() as usize;
+        self.sgroups[gi].register(sdata, volatile)
     }
 
     /// Activates the system. If the system is already active, nothing takes place.
@@ -58,28 +61,24 @@ where
         #[cfg(debug_assertions)]
         if let InsertPos::After(at) = &at {
             if target.group_index() != at.group_index() {
-                let reason = debug_format!(
-                    "tried to activate a system after a system belonging to different group"
-                );
-                return Err(EcsError::UnknownSystem(reason, ()));
+                let reason =
+                    "tried to activate a system after a system belonging to different group";
+                return Err(EcsError::UnknownSystem(reason.to_owned(), ()));
             }
         }
 
-        self.sgroups
-            .switch_to(target.group_index() as usize)
-            .activate(target, at, live)
+        let gi = target.group_index() as usize;
+        self.sgroups[gi].activate(target, at, live)
     }
 
     pub(crate) fn unregister(&mut self, sid: &SystemId) -> Result<(), EcsError> {
-        self.sgroups
-            .switch_to(sid.group_index() as usize)
-            .unregister(sid)
+        let gi = sid.group_index() as usize;
+        self.sgroups[gi].unregister(sid)
     }
 
     pub(crate) fn inactivate(&mut self, sid: &SystemId) -> Result<(), EcsError> {
-        self.sgroups
-            .switch_to(sid.group_index() as usize)
-            .inactivate(sid)
+        let gi = sid.group_index() as usize;
+        self.sgroups[gi].inactivate(sid)
     }
 
     pub(crate) fn drain_dead(&mut self) -> impl Iterator<Item = SystemData> + '_ {

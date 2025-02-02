@@ -1,9 +1,9 @@
 use crate::{
-    ds::gen::GenVec,
-    util::{AsOr, Or, StaticStr, With},
+    ds::vec::GenVec,
+    util::{macros::debug_format, AsOr, StaticStr},
     ActteyError, AppHasher,
 };
-use my_ecs::prelude::{debug_format, ResourceId};
+use my_ecs::prelude::{Or, ResourceId, With};
 use std::collections::HashMap;
 
 pub trait HasLabel {

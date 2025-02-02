@@ -7,31 +7,34 @@ use super::{
     task::{ParTask, SysTask, Task},
 };
 use crate::{
-    ds::prelude::*,
+    ds::{
+        Array, ListPos, ManagedConstPtr, ManagedMutPtr, NonNullExt, ReadyFuture, SetValueList,
+        UnsafeFuture, WakeSend,
+    },
     ecs::{
         cache::{CacheItem, RefreshCacheStorage},
         cmd::{Command, CommandObject},
         entry::Ecs,
         share::Shared,
-        stat,
         sys::system::{RawSystemCycleIter, SystemCycleIter, SystemData, SystemGroup, SystemId},
         wait::WaitQueues,
         worker::{Message, PanicMessage, Work, WorkerId},
         DynResult,
     },
+    global,
     util::prelude::*,
+    MAX_GROUP,
 };
 use crossbeam_deque as cb;
 use std::{
     any::Any,
-    array,
     cell::{Cell, UnsafeCell},
     collections::{HashMap, VecDeque},
     future::Future,
     hash::BuildHasher,
     marker::PhantomPinned,
     mem,
-    ops::Deref,
+    ops::{Deref, IndexMut},
     pin::Pin,
     ptr::NonNull,
     rc::Rc,
@@ -42,8 +45,8 @@ use std::{
 };
 
 #[derive(Debug)]
-pub(crate) struct Scheduler<W, S, const N: usize> {
-    wgroups: [WorkGroup<W>; N],
+pub(crate) struct Scheduler<W, S> {
+    wgroups: Array<WorkGroup<W>, MAX_GROUP>,
 
     waits: WaitQueues<S>,
 
@@ -51,10 +54,10 @@ pub(crate) struct Scheduler<W, S, const N: usize> {
     record: ScheduleRecord<S>,
 
     /// A list holding pending tasks due to data dependency.
-    nor_pendings: [Pending<S>; N],
+    nor_pendings: Array<Pending<S>, MAX_GROUP>,
 
     /// A list holding pending tasks due to data dependency.
-    dedi_pendings: [Pending<S>; N],
+    dedi_pendings: Array<Pending<S>, MAX_GROUP>,
 
     /// Ready dedicated tasks.
     dedi: VecDeque<Task>,
@@ -62,17 +65,25 @@ pub(crate) struct Scheduler<W, S, const N: usize> {
     /// Channel sending messages to main worker.
     tx_msg: ParkingSender<Message>,
 
-    /// Channel receving messages from sub workers.
+    /// Channel receiving messages from sub workers.
     rx_msg: ParkingReceiver<Message>,
 
-    /// Channel receving commands from sub workers.
+    /// Channel receiving commands from sub workers.
     rx_cmd: Rc<CommandReceiver>,
 
     /// Main worker id.
     wid: WorkerId,
 }
 
-impl<W, S, const N: usize> Scheduler<W, S, N> {
+impl<W, S> Scheduler<W, S> {
+    pub(crate) fn num_groups(&self) -> usize {
+        self.wgroups.len()
+    }
+
+    pub(crate) fn num_workers(&self) -> usize {
+        self.wgroups.iter().map(WorkGroup::len).sum()
+    }
+
     /// Returns number of open sub workers.
     pub(crate) fn is_work_groups_exhausted(&self) -> bool {
         self.wgroups.iter().all(|wg| wg.is_exhausted())
@@ -135,34 +146,43 @@ impl<W, S, const N: usize> Scheduler<W, S, N> {
     }
 }
 
-impl<W, S, const N: usize> Scheduler<W, S, N>
+impl<W, S> Scheduler<W, S>
 where
     W: Work + 'static,
     S: BuildHasher + Default + 'static,
 {
     pub(crate) fn new(
         mut workers: Vec<W>,
-        nums: [usize; N],
+        groups: &[usize],
         shared: &Arc<Shared>,
         tx_cmd: &CommandSender,
         rx_cmd: Rc<CommandReceiver>,
     ) -> Self {
-        assert_eq!(workers.len(), nums.iter().sum::<usize>());
+        assert_eq!(workers.len(), groups.iter().sum::<usize>());
 
+        let num_groups = groups.len();
         let pending_limit: usize = workers.len();
-        let nor_pendings = array::from_fn(|_| Pending::new(pending_limit));
-        let dedi_pendings = array::from_fn(|_| Pending::new(pending_limit));
+
+        let (nor_pendings, dedi_pendings) =
+            (0..num_groups).fold((Array::new(), Array::new()), |(mut nor, mut dedi), _| {
+                nor.push(Pending::new(pending_limit));
+                dedi.push(Pending::new(pending_limit));
+                (nor, dedi)
+            });
+
         let (tx_msg, rx_msg) = comm::parking_channel(thread::current());
 
-        let wgroups = array::from_fn(|i| {
+        let wgroups = (0..num_groups).fold(Array::new(), |mut acc, i| {
             // Splits off left piece from entire worker array.
-            let mut piece = workers.split_off(nums[i]);
-            mem::swap(&mut workers, &mut piece);
+            let mut left = workers.split_off(groups[i]); // right
+            mem::swap(&mut workers, &mut left); // right -> left
 
             // Creates sub context group and initializes it.
-            let mut group = WorkGroup::new(i as u16, piece, &tx_msg, tx_cmd, shared);
+            let mut group = WorkGroup::new(i as u16, left, &tx_msg, tx_cmd, shared);
             group.initialize(&rx_msg);
-            group
+            acc.push(group);
+
+            acc
         });
 
         let id = WORKER_ID_GEN.get();
@@ -183,21 +203,31 @@ where
         }
     }
 
-    pub(crate) fn execute_all(
-        &mut self,
-        sgroups: &mut [SystemGroup<S>; N],
-        cache: &mut RefreshCacheStorage<S>,
-    ) {
+    pub(crate) fn execute_all<T>(&mut self, sgroups: &mut T, cache: &mut RefreshCacheStorage<S>)
+    where
+        T: IndexMut<usize, Output = SystemGroup<S>>,
+    {
         // # Procedures
         // 1. Opens sub workers through `WorkGroup`s.
         // 2. Creates `ScheduleUnit` for each `WorkGroup` and `SystemGroup`,
         //    then runs every `ScheduleUnit`.
         // 3. Cleans up.
 
-        // 1. Opens work groups.
-        let mut lives: [bool; N] = array::from_fn(|i| sgroups[i].len_active() > 0);
+        // Preparation.
+        let num_groups = self.wgroups.len();
+        let mut lives = [false; MAX_GROUP];
+        let mut units: Array<ScheduleUnit<'_, W, S>, MAX_GROUP> = Array::new();
+        for i in 0..num_groups {
+            lives[i] = sgroups[i].len_active() > 0;
+            let cycle = sgroups[i].get_active_mut().iter_begin().into_raw();
+            let unit = ScheduleUnit::new(i, self, cycle, cache);
+            units.push(unit);
+        }
         let tickables = lives;
-        for (i, _) in lives.iter().enumerate().filter(|(_, &live)| live) {
+        let mut panicked = Vec::new();
+
+        // 1. Opens work groups.
+        for (i, _) in lives.iter().enumerate().filter(|(_, live)| **live) {
             self.wgroups[i].open();
         }
 
@@ -206,8 +236,6 @@ where
         // (2) If there are dedicated system tasks, handles just one. Because
         //     we want to make sub workers busy rather than doing something.
         // (3) If all system tasks are pulled or handled, escapes the loop.
-        let mut panicked = Vec::new();
-        let mut units: [_; N] = array::from_fn(|i| ScheduleUnit::new(i, self, sgroups, cache));
         loop {
             // (1) Pulls system tasks from cycles and inject them into work
             // groups.
@@ -226,7 +254,7 @@ where
                 continue;
             }
 
-            // (3) If any cycle is not empty, waits for messages. Otherwise
+            // (3) If any cycle is not empty, waits for messages. Otherwise,
             // breaks the loop.
             if lives.iter().any(|&live| live) {
                 self.wait(&mut units, cache, &mut panicked);
@@ -246,7 +274,7 @@ where
                 .poison(&sid, payload)
                 .unwrap();
         }
-        for i in 0..N {
+        for i in 0..num_groups {
             if tickables[i] {
                 sgroups[i].tick();
             }
@@ -257,12 +285,14 @@ where
         self.validate_clean();
     }
 
-    fn wait(
+    fn wait<'s, T>(
         &mut self,
-        units: &mut [ScheduleUnit<'_, W, S, N>; N],
+        units: &mut T,
         cache: &mut RefreshCacheStorage<'_, S>,
         panicked: &mut Vec<(SystemId, Box<dyn Any + Send>)>,
-    ) {
+    ) where
+        T: IndexMut<usize, Output = ScheduleUnit<'s, W, S>>,
+    {
         // Consumes buffered messages as many as possible.
         if let Ok(msg) = self.rx_msg.recv_timeout(Duration::MAX) {
             self.handle_message(msg, cache, panicked);
@@ -311,13 +341,13 @@ where
         };
     }
 
-    fn pending_to_ready(
-        &mut self,
-        units: &mut [ScheduleUnit<'_, W, S, N>; N],
-        cache: &mut RefreshCacheStorage<'_, S>,
-    ) {
+    fn pending_to_ready<'s, T>(&mut self, units: &mut T, cache: &mut RefreshCacheStorage<'_, S>)
+    where
+        T: IndexMut<usize, Output = ScheduleUnit<'s, W, S>>,
+    {
         #[allow(clippy::needless_range_loop)] // indexing more than one.
-        for i in 0..N {
+        let num_groups = self.wgroups.len();
+        for i in 0..num_groups {
             // @@@ Safety:
             unsafe {
                 // For normal tasks.
@@ -400,7 +430,8 @@ where
         assert!(self.record.is_empty());
 
         // Validates if there's no pending tasks.
-        for i in 0..N {
+        let num_groups = self.wgroups.len();
+        for i in 0..num_groups {
             assert!(!self.has_pending(i));
         }
 
@@ -417,7 +448,7 @@ where
 }
 
 #[derive(Debug)]
-struct ScheduleUnit<'s, W, S, const N: usize> {
+struct ScheduleUnit<'s, W, S> {
     // Own data.
     cycle: RawSystemCycleIter<S>,
 
@@ -425,42 +456,54 @@ struct ScheduleUnit<'s, W, S, const N: usize> {
     wgroup: NonNull<WorkGroup<W>>,
     waits: NonNull<WaitQueues<S>>,
     record: NonNull<ScheduleRecord<S>>,
-    nor_pendings: NonNull<[Pending<S>; N]>,
-    dedi_pendings: NonNull<[Pending<S>; N]>,
+    nor_pendings: NonNull<[Pending<S>]>,
+    dedi_pendings: NonNull<[Pending<S>]>,
     dedi: NonNull<VecDeque<Task>>,
 
     // From others.
     cache: NonNull<RefreshCacheStorage<'s, S>>,
 }
 
-impl<'s, W, S, const N: usize> ScheduleUnit<'s, W, S, N>
+impl<'s, W, S> ScheduleUnit<'s, W, S>
 where
     W: Work + 'static,
     S: BuildHasher + Default + 'static,
 {
     fn new(
         index: usize,
-        sched: &mut Scheduler<W, S, N>,
-        sgroups: &mut [SystemGroup<S>; N],
+        sched: &mut Scheduler<W, S>,
+        cycle: RawSystemCycleIter<S>,
         cache: &mut RefreshCacheStorage<'s, S>,
     ) -> Self {
-        let cycle = sgroups[index].get_active_mut().iter_begin().into_raw();
-
-        // Safety: Infallible. Also these pointers will never be dereferenced
+        // Safety: Infallible. Also, these pointers will never be dereferenced
         // in a violated way.
         unsafe {
+            // From `Scheduler`.
+            let ptr = sched.wgroups.get_mut(index).unwrap_unchecked() as *mut _;
+            let wgroup = NonNull::new_unchecked(ptr);
+            let ptr = &mut sched.waits as *mut _;
+            let waits = NonNull::new_unchecked(ptr);
+            let ptr = &mut sched.record as *mut _;
+            let record = NonNull::new_unchecked(ptr);
+            let ptr = sched.nor_pendings.as_mut_slice() as *mut _;
+            let nor_pendings = NonNull::new_unchecked(ptr);
+            let ptr = sched.dedi_pendings.as_mut_slice() as *mut _;
+            let dedi_pendings = NonNull::new_unchecked(ptr);
+            let ptr = &mut sched.dedi as *mut _;
+            let dedi = NonNull::new_unchecked(ptr);
+            // From others.
+            let ptr = cache as *mut _;
+            let cache = NonNull::new_unchecked(ptr);
+
             Self {
-                // Own data.
                 cycle,
-                // From `Scheduler`.
-                wgroup: NonNull::new_unchecked(sched.wgroups.get_unchecked_mut(index) as *mut _),
-                waits: NonNull::new_unchecked(&mut sched.waits as *mut _),
-                record: NonNull::new_unchecked(&mut sched.record as *mut _),
-                nor_pendings: NonNull::new_unchecked(&mut sched.nor_pendings as *mut _),
-                dedi_pendings: NonNull::new_unchecked(&mut sched.dedi_pendings as *mut _),
-                dedi: NonNull::new_unchecked(&mut sched.dedi as *mut _),
-                // From others.
-                cache: NonNull::new_unchecked(cache as *mut _),
+                wgroup,
+                waits,
+                record,
+                nor_pendings,
+                dedi_pendings,
+                dedi,
+                cache,
             }
         }
     }
@@ -537,13 +580,13 @@ where
         unsafe { self.record.as_mut() }
     }
 
-    fn nor_pendings<'o>(&mut self) -> &'o mut [Pending<S>; N] {
+    fn nor_pendings<'o>(&mut self) -> &'o mut [Pending<S>] {
         // Safety: While this reference exists, `Scheduler` prevents the memory
         // won't be get accessed by other pointer or references.
         unsafe { self.nor_pendings.as_mut() }
     }
 
-    fn dedi_pendings<'o>(&mut self) -> &'o mut [Pending<S>; N] {
+    fn dedi_pendings<'o>(&mut self) -> &'o mut [Pending<S>] {
         // Safety: While this reference exists, `Scheduler` prevents the memory
         // won't be get accessed by other pointer or references.
         unsafe { self.dedi_pendings.as_mut() }
@@ -556,7 +599,7 @@ where
     }
 }
 
-impl<W, S, const N: usize> Drop for ScheduleUnit<'_, W, S, N> {
+impl<W, S> Drop for ScheduleUnit<'_, W, S> {
     fn drop(&mut self) {
         // We've consumed cycle completely?
         debug_assert!(self.cycle.position().is_end());
@@ -599,7 +642,7 @@ impl Helper {
         S: BuildHasher + Default + 'static,
         W: Work + 'static,
     {
-        let mut cur = pending.get_first_position();
+        let mut cur = pending.first_position();
 
         while let Some((next, &cycle_pos)) = pending.iter_next(cur) {
             let sdata = cycle.get_at(cycle_pos).unwrap();
@@ -743,11 +786,11 @@ where
     }
 
     fn is_empty(&self) -> bool {
-        self.list.is_occupied_empty()
+        self.list.is_empty()
     }
 
     fn push(&mut self, pos: ListPos) -> bool {
-        if self.list.len_occupied() < self.limit {
+        if self.list.len() < self.limit {
             self.list.push_back(pos);
             true
         } else {
@@ -760,7 +803,7 @@ where
     }
 }
 
-// Do not implement `DerefMut` to prevent pusing over the `limit`.
+// Do not implement `DerefMut` to prevent pushing over the `limit`.
 impl<S> Deref for Pending<S> {
     type Target = SetValueList<ListPos, S>;
 
@@ -771,21 +814,23 @@ impl<S> Deref for Pending<S> {
 
 #[derive(Debug)]
 struct WorkGroup<W> {
-    /// Sub workers belonging to this group.
+    /// Sub workers belonging to the group.
     workers: Vec<W>,
 
     /// Context for each sub worker.
     sub_cxs: Vec<Pin<Box<SubContext>>>,
 
-    /// Signal to wait or be waken by others in this group.
+    /// Signal to wait or be woken by others in the same group.
     signal: Arc<GlobalSignal>,
 
-    /// Main worker gives this group tasks through this injector.
+    /// Queue that shared over sub workers of the group.
     injector: Arc<cb::Injector<Task>>,
 }
 
 impl<W> WorkGroup<W> {
     fn len(&self) -> usize {
+        debug_assert_eq!(self.workers.len(), self.sub_cxs.len());
+
         self.sub_cxs.len()
     }
 
@@ -793,12 +838,17 @@ impl<W> WorkGroup<W> {
         mem::take(&mut self.workers)
     }
 
+    /// Waits until the work group gets closed.
     fn wait_exhausted(&self) {
         while !self.is_exhausted() {
             self.signal.wait_open_count(0);
         }
     }
 
+    /// Determines whether the work group is exhausted or not.
+    ///
+    /// `exhausted` here means that the work group has closed and cannot be
+    /// woken up without intervention from outside.
     fn is_exhausted(&self) -> bool {
         // If guidance queue is empty, it means that sub workers cannot open
         // themselves again.
@@ -987,6 +1037,7 @@ thread_local! {
     };
 }
 
+/// Context for a sub worker.
 #[derive(Debug)]
 pub struct SubContext {
     guide: sub::SubStateGuide,
@@ -1056,7 +1107,7 @@ impl SubContext {
     fn set_handle(ptr: ManagedConstPtr<Self>) {
         let handle = unsafe { &mut *ptr.handle.get() };
         *handle = thread::current();
-        SUB_CONTEXT.set(ptr.inner());
+        SUB_CONTEXT.set(ptr.as_nonnullext());
         WORKER_ID.set(ptr.comm.worker_id());
         ptr.comm.send_message(Message::Handle(ptr.comm.worker_id()));
     }
@@ -1134,7 +1185,7 @@ impl SubContext {
             match mem::replace(steal, cb::Steal::Empty) {
                 cb::Steal::Success(cur) => match cur {
                     Task::System(task) => {
-                        stat::exec::increase_system_task_count();
+                        global::stat::increase_system_task_count();
                         self.work_for_system_task(task);
                     }
                     Task::Parallel(task) => {
@@ -1142,7 +1193,7 @@ impl SubContext {
                         self.work_for_parallel_task(task);
                     }
                     Task::Future(task) => {
-                        stat::exec::increase_future_task_count();
+                        global::stat::increase_future_task_count();
                         self.work_for_future_task(task);
                     }
                 },
@@ -1161,10 +1212,10 @@ impl SubContext {
     fn work_for_system_task(&self, task: SysTask) {
         let sid = task.sid();
 
-        // In web, panic is normally aborted, but we can detect
-        // whether or not panic has been happened through panic hook.
-        // We write `WorkId` to thread local variable to be used in
-        // panic hook in order to identify where the panic occurred.
+        // In web, panic is normally aborted, but we can detect whether panic
+        // has been happened through panic hook. We write `WorkId` on a thread
+        // local variable to be used in panic hook in order to identify where
+        // the panic occurred.
         #[cfg(target_arch = "wasm32")]
         {
             use super::comm::{TaskKind, WorkId, WORK_ID};
@@ -1254,11 +1305,11 @@ impl SubContext {
         }
     }
 
-    /// Cancels out remaining tasks.  
+    /// Cancels out remaining tasks.
     //
-    // NOTE: Future tasks are able to be cancelled at the next await points.
-    // So that if any future executor, or runtime, doesn't call poll() on
-    // future tasks again, this method will block infinitely.
+    // NOTE: Future tasks can be cancelled out at the next await points. So that
+    // if any future executor, or runtime, doesn't call poll() on future tasks
+    // again, this method will block infinitely.
     fn abort(&self) {
         loop {
             match self.comm.pop() {
@@ -1266,7 +1317,7 @@ impl SubContext {
                 cb::Steal::Empty => {
                     if self.comm.signal().future_count() == 0 {
                         // Before escaping the loop, notifies all other sub
-                        // wokers, so that they can escape their loops as well.
+                        // workers, so that they can escape their loops as well.
                         self.comm.signal().sub().notify_all();
                         break;
                     }
@@ -1335,7 +1386,7 @@ impl Drop for SubContext {
 // This module helps us not to access fields of structs in this module directly.
 mod sub {
     use super::SubState;
-    use crate::ds::prelude::*;
+    use crate::ds::ArrayDeque;
     use std::sync::{
         atomic::{AtomicU32, Ordering},
         Mutex,
@@ -1355,12 +1406,12 @@ mod sub {
     //
     // Why we need buffering?
     // - Main worker and sub workers are not tightly synchronized.
-    //   - Main worker doesn't care of in which states sub workers are.
-    //   - Main worker just notifies that there will be no new system tasks to
+    //   * Main worker doesn't care of in which states sub workers are.
+    //   * Main worker just notifies that there will be no new system tasks to
     //     sub workers by sending Close request to sub workers and waits for
     //     completion of system tasks only, not for future tasks.
     // - We don't want that sub workers are in open states too long.
-    //   - Worker may have other roles and we may need to hand over the control
+    //   * Worker may have other roles, and we may need to hand over the control
     //     for them. To do that, we need to reach close state from time to time.
     #[derive(Debug)]
     pub(super) struct SubStateGuide {
@@ -1376,7 +1427,7 @@ mod sub {
         // Helps us not to lock `queue` too frequently.
         close: AtomicU32,
 
-        /// Whether or not open request has been pushed.
+        /// Whether open request has been pushed.
         //
         // Prevents from appending 'not paired close' onto the queue.
         #[cfg(debug_assertions)]
@@ -1417,7 +1468,7 @@ mod sub {
             }
 
             // If an open-close pair cannot be appended in a row, unchains the
-            // pair by popping close reuqest.
+            // pair by popping close request.
             let mut queue = self.queue.lock().unwrap();
             if queue.capacity() - queue.len() < 2 {
                 debug_assert_eq!(queue[queue.len() - 1], SubState::Close);
@@ -1516,6 +1567,7 @@ impl WakeSend for UnsafeWaker {
     }
 }
 
+/// Schedules the given future.
 pub fn schedule_future<F, R>(future: F)
 where
     F: Future<Output = R> + Send + 'static,
@@ -1523,7 +1575,7 @@ where
 {
     // This function must be called on sub worker context.
     let ptr = SUB_CONTEXT.get();
-    assert!(!ptr.is_dangling());
+    assert!(!ptr.is_dangling(), "expected sub worker context");
 
     // Allocates memory for the future.
     let waker = UnsafeWaker { ptr: ptr.as_ptr() };

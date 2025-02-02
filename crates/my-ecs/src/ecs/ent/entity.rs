@@ -1,7 +1,17 @@
 use super::component::{ComponentKey, Components};
-use crate::{ds::prelude::*, util::prelude::*};
+use crate::{
+    ds::{BorrowResult, RawGetter, TypeInfo},
+    util::{macros::impl_from_for_enum, With},
+};
 use std::{any::TypeId, fmt, mem, mem::MaybeUninit, ops::Deref, ptr::NonNull, sync::Arc};
 
+/// A set of components.
+///
+/// Implementing this trait is not mandatory, but by doing so, the crate can
+/// provide you more easy to use APIs. Plus, there is a derive macro that have
+/// the same name, which help you implement this trait. As a consequence, it's
+/// encouraged to implement this trait by the derive macro about entity types
+/// that you know.
 #[allow(private_interfaces)]
 pub trait Entity: Components + Send + 'static {
     type Ref<'cont>;
@@ -23,7 +33,7 @@ pub trait Entity: Components + Send + 'static {
     ///
     /// # Safety
     ///
-    /// Must be implemented correctly. Other methods depend on this offsets with
+    /// Must be implemented correctly. Other methods depend on this offset with
     /// unsafe blocks.
     const OFFSETS_BY_FIELD_INDEX: &'static [usize];
 
@@ -43,19 +53,19 @@ pub trait Entity: Components + Send + 'static {
     ///
     /// # Safety
     ///
-    /// Must be implemented correctly. Other methods depend on this offsets with
+    /// Must be implemented correctly. Other methods depend on this offset with
     /// unsafe blocks.
-    fn to_column_index(fi: usize) -> usize;
+    fn field_to_column_index(fi: usize) -> usize;
 
     /// Turns column index into field index.
     ///
     /// This function would be called infrequently, so that simple
     /// implementations would be good enough.
-    fn to_field_index(ci: usize) -> usize {
+    fn column_to_field_index(ci: usize) -> usize {
         // Safety: Field index matches column index 1 by 1.
         unsafe {
             (0..Self::num_components())
-                .find(|&fi| Self::to_column_index(fi) == ci)
+                .find(|&fi| Self::field_to_column_index(fi) == ci)
                 .unwrap_unchecked()
         }
     }
@@ -80,7 +90,7 @@ pub trait Entity: Components + Send + 'static {
     /// # Examples
     ///
     /// ```
-    /// # use my_ecs::prelude::*;
+    /// use my_ecs::prelude::*;
     /// use std::hash::RandomState;
     ///
     /// #[derive(Entity, Debug, PartialEq)]
@@ -124,7 +134,7 @@ pub trait Entity: Components + Send + 'static {
     /// # Examples
     ///
     /// ```
-    /// # use my_ecs::prelude::*;
+    /// use my_ecs::prelude::*;
     /// use std::hash::RandomState;
     ///
     /// #[derive(Entity, Debug, PartialEq)]
@@ -163,7 +173,7 @@ pub trait Entity: Components + Send + 'static {
     fn key() -> EntityKey {
         let ckeys: Arc<[ComponentKey]> = (0..Self::num_components())
             .map(|ci| {
-                let fi = Self::to_field_index(ci);
+                let fi = Self::column_to_field_index(ci);
                 Self::keys().as_ref()[fi]
             })
             .collect();
@@ -200,7 +210,7 @@ pub trait Entity: Components + Send + 'static {
 
         // Registers component column in the sorted order by component key.
         for ci in 0..Self::num_components() {
-            let fi = Self::to_field_index(ci);
+            let fi = Self::column_to_field_index(ci);
             let tinfo = Self::infos().as_ref()[fi];
             cont.add_column(tinfo);
         }
@@ -217,7 +227,7 @@ pub trait Entity: Components + Send + 'static {
     /// # Examples
     ///
     /// ```
-    /// # use my_ecs::prelude::*;
+    /// use my_ecs::prelude::*;
     /// use std::hash::RandomState;
     ///
     /// #[derive(Entity, Debug, PartialEq)]
@@ -242,7 +252,7 @@ pub trait Entity: Components + Send + 'static {
         cont.begin_add_row();
 
         for fi in 0..Self::num_components() {
-            let ci = Self::to_column_index(fi);
+            let ci = Self::field_to_column_index(fi);
             // Safety:
             // - Column index and value pointer are gotten client impl.
             // - We're going to forget `self`.
@@ -269,7 +279,7 @@ pub trait Entity: Components + Send + 'static {
     /// # Examples
     ///
     /// ```
-    /// # use my_ecs::prelude::*;
+    /// use my_ecs::prelude::*;
     /// use std::hash::RandomState;
     ///
     /// #[derive(Entity, Debug, PartialEq)]
@@ -302,7 +312,7 @@ pub trait Entity: Components + Send + 'static {
             for fi in 0..Self::num_components() {
                 let comp_ptr = base_ptr.add(Self::OFFSETS_BY_FIELD_INDEX[fi]);
                 let comp_ptr = NonNull::new_unchecked(comp_ptr);
-                let ci = Self::to_column_index(fi);
+                let ci = Self::field_to_column_index(fi);
                 cont.remove_value_by_value_index(ci, vi, comp_ptr);
             }
             cont.end_remove_row_by_value_index(vi);
@@ -315,7 +325,7 @@ pub trait Entity: Components + Send + 'static {
 /// A trait for collecting heterogeneous component types.
 ///
 /// In this trait, each component type is gathered in each component column and
-/// all columns have the same length like 2d matrix.
+/// all columns have the same length so that it looks like 2d matrix.
 ///
 /// When it comes to in & out types, this trait has intentionally raw pointer
 /// parameters not to use generic for object safety. So that you can hold
@@ -337,8 +347,8 @@ pub trait Entity: Components + Send + 'static {
 ///
 /// Second one is 'row index' which is a kind of outer index for each entity.
 /// You will get this row index when you put your entity in an entity container.
-/// Also you can remove an entity using the row index. Row indices may not be in
-/// order and not consecutive.
+/// Also, you can remove an entity using the row index. Row indices may not be
+/// in order and not consecutive.
 ///
 /// The last one is 'value index' which is inner index for each entity. In
 /// contrast to former one, value indices are in order and consecutive like
@@ -359,7 +369,7 @@ pub trait Entity: Components + Send + 'static {
 /// # Examples
 ///
 /// ```
-/// # use my_ecs::prelude::*;
+/// use my_ecs::prelude::*;
 /// use std::{hash::RandomState, ptr::NonNull};
 ///
 /// #[derive(Entity)]
@@ -419,7 +429,7 @@ pub trait ContainEntity: RegisterComponent + BorrowComponent + AddEntity {
     /// # Examples
     ///
     /// ```
-    /// # use my_ecs::prelude::*;
+    /// use my_ecs::prelude::*;
     /// use std::{hash::RandomState, ptr::NonNull, any::TypeId};
     ///
     /// #[derive(Entity)]
@@ -478,7 +488,7 @@ pub trait ContainEntity: RegisterComponent + BorrowComponent + AddEntity {
     /// # Examples
     ///
     /// ```
-    /// # use my_ecs::prelude::*;
+    /// use my_ecs::prelude::*;
     /// use std::{hash::RandomState, ptr::NonNull, any::TypeId};
     ///
     /// #[derive(Entity)]
@@ -536,9 +546,9 @@ pub trait RegisterComponent {
     /// Adds a component column to the entity container then returns column
     /// index.
     ///
-    /// But the entity container failed to add new entity for some reasons,
+    /// But the entity container failed to add new entity for some reason,
     /// returns `None`. You can get [`TypeInfo`] from any static types using
-    /// [`tinfo`] macro.
+    /// [`tinfo`](crate::tinfo) macro.
     ///
     /// Column index is guaranteed to be increased one by one from zero
     /// whenever you call this method, which means you can get column index
@@ -547,7 +557,7 @@ pub trait RegisterComponent {
     /// # Examples
     ///
     /// ```
-    /// # use my_ecs::prelude::*;
+    /// use my_ecs::prelude::*;
     /// use std::{hash::RandomState, any::TypeId};
     ///
     /// #[derive(Component)]
@@ -573,7 +583,7 @@ pub trait RegisterComponent {
     /// # Examples
     ///
     /// ```
-    /// # use my_ecs::prelude::*;
+    /// use my_ecs::prelude::*;
     /// use std::{hash::RandomState, any::TypeId};
     ///
     /// #[derive(Component)]
@@ -598,7 +608,7 @@ pub trait RegisterComponent {
     /// # Examples
     ///
     /// ```
-    /// # use my_ecs::prelude::*;
+    /// use my_ecs::prelude::*;
     /// use std::{hash::RandomState, any::TypeId};
     ///
     /// #[derive(Component)]
@@ -623,7 +633,7 @@ pub trait RegisterComponent {
     /// # Examples
     ///
     /// ```
-    /// # use my_ecs::prelude::*;
+    /// use my_ecs::prelude::*;
     /// use std::hash::RandomState;
     ///
     /// #[derive(Component)]
@@ -642,7 +652,7 @@ pub trait RegisterComponent {
     /// # Examples
     ///
     /// ```
-    /// # use my_ecs::prelude::*;
+    /// use my_ecs::prelude::*;
     /// use std::hash::RandomState;
     ///
     /// #[derive(Component)]
@@ -665,7 +675,7 @@ pub trait RegisterComponent {
     /// # Examples
     ///
     /// ```
-    /// # use my_ecs::prelude::*;
+    /// use my_ecs::prelude::*;
     /// use std::{hash::RandomState, any::TypeId};
     ///
     /// #[derive(Component)]
@@ -691,12 +701,12 @@ pub trait BorrowComponent {
     /// Borrows component column for the given column index.
     ///
     /// If borrow is successful, returns [`RawGetter`] of the component column.
-    /// Otherwise, returns [`BorrowError`].
+    /// Otherwise, returns [`BorrowError`](crate::ds::BorrowError).
     ///
     /// # Examples
     ///
     /// ```
-    /// # use my_ecs::prelude::*;
+    /// use my_ecs::prelude::*;
     /// use std::{hash::RandomState, any::TypeId};
     ///
     /// #[derive(Component)]
@@ -713,12 +723,12 @@ pub trait BorrowComponent {
     /// Borrows component column mutably for the given column index.
     ///
     /// If borrow is successful, returns [`RawGetter`] of the component column.
-    /// Otherwise, returns [`BorrowError`].
+    /// Otherwise, returns [`BorrowError`](crate::ds::BorrowError).
     ///
     /// # Examples
     ///
     /// ```
-    /// # use my_ecs::prelude::*;
+    /// use my_ecs::prelude::*;
     /// use std::{hash::RandomState, any::TypeId};
     ///
     /// #[derive(Component)]
@@ -732,14 +742,14 @@ pub trait BorrowComponent {
     /// ```
     fn borrow_column_mut(&mut self, ci: usize) -> BorrowResult<RawGetter>;
 
-    /// Retrives component column pointer for the given column index.
+    /// Retrieves component column pointer for the given column index.
     ///
     /// If there is not the component column in the entity container, returns
     /// `None`
     ///
     /// # Safety
     ///
-    /// Undefine behavior if exclusive borrow happend before.
+    /// Undefined behavior if exclusive borrow happened before.
     unsafe fn get_column(&self, ci: usize) -> Option<NonNull<u8>>;
 }
 
@@ -1007,7 +1017,7 @@ pub(crate) enum EntityKey {
     /// Component keys, another type of [`TypeId`], that belong to an entity.
     ///
     /// Searching an entity container using component keys always succeeds if
-    /// the keys are valid. In searching, component keys are must sorted and
+    /// the keys are valid. In searching, component keys must be sorted and
     /// deduplicated.
     Ckeys(Arc<[ComponentKey]>),
 
@@ -1105,8 +1115,10 @@ impl fmt::Display for EntityIndex {
     }
 }
 
-/// [`Arc<str>`] of entity.
-/// An entity must have its unique name.
+/// Unique entity name.
+///
+/// An entity container can be distinguished by its name, so in other words, it
+/// must be unique.
 #[derive(Hash, PartialEq, Eq, Clone, Debug)]
 #[repr(transparent)]
 pub struct EntityName(Arc<str>);

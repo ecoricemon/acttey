@@ -9,7 +9,12 @@ use super::{
         StoreSelectInfo,
     },
 };
-use crate::{debug_format, ds::prelude::*, ecs::resource::ResourceKey, DefaultHasher};
+use crate::{
+    ds::{ATypeId, Borrowed, ManagedConstPtr, ManagedMutPtr},
+    ecs::resource::ResourceKey,
+    util::macros::debug_format,
+    DefaultRandomState,
+};
 use std::{
     any,
     collections::HashMap,
@@ -25,11 +30,11 @@ use std::{
 // When a system is registered, it's corresponding request and
 // related other information is registered here, and it can be shared from other systems.
 // When it comes to unregister, each system data will unregister itself from
-// this stroage when it's dropped.
-pub(crate) static RINFO_STOR: LazyLock<Arc<Mutex<RequestInfoStorage<DefaultHasher>>>> =
+// this storage when it's dropped.
+pub(crate) static RINFO_STOR: LazyLock<Arc<Mutex<RequestInfoStorage<DefaultRandomState>>>> =
     const { LazyLock::new(|| Arc::new(Mutex::new(RequestInfoStorage::new()))) };
 
-/// Storage containig request and other info.
+/// Storage containing request and other info.
 #[derive(Debug)]
 pub(crate) struct RequestInfoStorage<S> {
     /// [`RequestKey`] -> [`RequestInfo`].
@@ -316,42 +321,23 @@ where
     }
 }
 
-/// A single request is about needs for all sorts of components, resources,
-/// and entity containers.
-/// In other words, a request is a combination of [`Query`]s, [`ResQuery`]s,
-/// and queries for entity containers.
-/// They must be requested at once in order to prevent dead lock.
-/// You can make a request by implementing this trait and put it in a system.
+/// A system request for a components, resources, and entity containers.
+///
+/// All systems must declare their own requests in advance. The crate exploits
+/// the information to avoid data race and dead-lock between systems. A request
+/// consists of read and write requests like so,
+///
+/// * Read - Read request for a set of components.
+/// * Write - Write request for a set of components.
+/// * ResRead - Read request for a set of resources.
+/// * ResWrite - Write request for a set of resources.
+/// * EntWrite - Write request for a set of entity containers.
 #[allow(private_interfaces, private_bounds)]
 pub trait Request: 'static {
-    /// Read-only access [`Query`] consisting of [`Filter`]s.
-    /// Read-only access helps us execute systems simultaneously.
-    ///
-    /// [`Filter`]: super::filter::Filter
     type Read: Query;
-
-    /// Writable access [`QueryMut`] consisting of [`Filter`]s.
-    /// Writable access always takes exclusive authority over the target.
-    ///
-    /// [`Filter`]: super::filter::Filter
     type Write: QueryMut;
-
-    /// Read-only access [`ResQuery`] consisting of [`Resource`]s.
-    /// Read-only access can help us execute systems simultaneously.
-    ///
-    /// [`Resource`]: super::super::resource::Resource
     type ResRead: ResQuery;
-
-    /// Writable access [`ResQueryMut`] consisting of [`Resource`]s.
-    /// Writable access always takes exclusive authority over the target.
-    ///
-    /// [`Resource`]: super::super::resource::Resource
     type ResWrite: ResQueryMut;
-
-    /// Writable access [`EntQueryMut`] consisting of [`Entity`].
-    /// Writable acess always takes exclusive authority over the target.
-    ///
-    /// [`Entity`]: super::super::ent::entity::Entity
     type EntWrite: EntQueryMut;
 
     #[doc(hidden)]
@@ -421,38 +407,6 @@ where
     type ResRead = RR;
     type ResWrite = RW;
     type EntWrite = EW;
-}
-
-/// This macro declares an empty struct and implements [`Request`] fot it.
-#[macro_export]
-macro_rules! request {
-    (
-        $vis:vis $id:ident
-        $(, Read=( $($read:ty),+ ))?
-        $(, Write=( $($write:ty),+ ))?
-        $(, ResRead=( $($res_read:ty),+ ))?
-        $(, ResWrite=( $($res_write:ty),+ ))?
-        $(, EntWrite=( $($ent_write:ty),+ ))?
-    ) => {
-        #[derive(Debug)]
-        $vis struct $id;
-        impl $crate::ecs::sys::request::Request for $id {
-            #[allow(unused_parens)]
-            type Read = ( $( $($read),+ )? );
-
-            #[allow(unused_parens)]
-            type Write = ( $( $($write),+ )? );
-
-            #[allow(unused_parens)]
-            type ResRead = ( $( $($res_read),+ )? );
-
-            #[allow(unused_parens)]
-            type ResWrite = ( $( $($res_write),+ )? );
-
-            #[allow(unused_parens)]
-            type EntWrite = ( $( $($ent_write),+ )? );
-        }
-    };
 }
 
 pub(crate) trait StoreRequestInfo:
@@ -544,25 +498,25 @@ impl RequestInfo {
             // Doesn't overlap other write?
             for j in i + 1..w_sels.len() {
                 if !w_sels[i].1.is_disjoint(&w_sels[j].1) {
-                    let errmsg = debug_format!(
+                    let reason = debug_format!(
                         "`{}` and `{}` are not disjoint in request `{}`",
                         w_sels[i].1.name(),
                         w_sels[j].1.name(),
                         self.name(),
                     );
-                    return Err(errmsg);
+                    return Err(reason);
                 }
             }
             // Doesn't overlap read?
             for (_, r_sel) in r_sels.iter() {
                 if !w_sels[i].1.is_disjoint(r_sel) {
-                    let errmsg = debug_format!(
+                    let reason = debug_format!(
                         "`{}` and `{}` are not disjoint in request `{}`",
                         w_sels[i].1.name(),
                         r_sel.name(),
                         self.name(),
                     );
-                    return Err(errmsg);
+                    return Err(reason);
                 }
             }
         }
@@ -576,23 +530,23 @@ impl RequestInfo {
             // Doesn't overlap other write?
             for j in i + 1..w_keys.len() {
                 if w_keys[i] == w_keys[j] {
-                    let errmsg = debug_format!(
+                    let reason = debug_format!(
                         "duplicate resource query `{:?}` in request `{}`",
                         w_keys[i],
                         self.name(),
                     );
-                    return Err(errmsg);
+                    return Err(reason);
                 }
             }
             // Doesn't overlap read?
             for r_key in r_keys.iter() {
                 if &w_keys[i] == r_key {
-                    let errmsg = debug_format!(
+                    let reason = debug_format!(
                         "duplicate resource query `{:?}` in request `{}`",
                         w_keys[i],
                         self.name(),
                     );
-                    return Err(errmsg);
+                    return Err(reason);
                 }
             }
         }
@@ -614,12 +568,12 @@ impl Request for () {
 ///
 /// System request, [`Request`], is composed of requests for read, write,
 /// resource read, resource write, and entity write. They are actually pointers
-/// to the requesting data. Each requuest means,
+/// to the requesting data. Each request means,
 /// - Read or write: Read or write requests for specific
 ///   [`Component`](crate::ecs::ent::component::Component)s.
 /// - Resource read or write: Read or write requests for specific
 ///   [`Resource`](crate::ecs::resource::Resource)s.
-/// - Enitty write: Write requests for specific entity containers.
+/// - Entity write: Write requests for specific entity containers.
 //
 // Why buffer for system rather than request?
 // Q. Many systems may have the same request, so is they be able to share the
@@ -689,6 +643,7 @@ impl Default for SystemBuffer {
     }
 }
 
+/// A response corresponding to a [`Request`].
 pub struct Response<'buf, Req: Request> {
     pub read: <Req::Read as Query>::Output<'buf>,
     pub write: <Req::Write as QueryMut>::Output<'buf>,

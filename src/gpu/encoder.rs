@@ -5,10 +5,10 @@ use super::{
     pipeline::ComputePipeline,
 };
 use crate::{
-    util::{AsOr, Or, StaticStr},
+    util::{AsOr, StaticStr},
     ActteyError,
 };
-use my_ecs::prelude::{Resource, ResourceId, ResourceIndex};
+use my_ecs::prelude::{Or, Resource, ResourceId, ResourceIndex};
 use std::{
     ops::{Deref, DerefMut},
     sync::Arc,
@@ -273,21 +273,24 @@ impl ComputePass {
         }
     }
 
-    /// A helper method to push a [`ComputePassCommand::SetPipeline`].
+    /// A helper method to append a [`ComputePassCommand`] associated with
+    /// setting a pipeline.
     pub fn set_pipeline(&mut self, pipe: ComputePipeline) -> &mut Self {
         let cmd = ComputePassCommand::SetPipeline { pipe };
         self.cmds.push(cmd);
         self
     }
 
-    /// A helper method to push a [`ComputePassCommand::SetBindGroup`].
+    /// A helper method to append a [`ComputePassCommand`] associated with
+    /// setting a bind group.
     pub fn set_bind_group(&mut self, index: u32, bind_group: BindGroup) -> &mut Self {
         let cmd = ComputePassCommand::SetBindGroup { index, bind_group };
         self.cmds.push(cmd);
         self
     }
 
-    /// A helper method to push a [`ComputePassCommand::DispatchWorkgroups`].
+    /// A helper method to append a [`ComputePassCommand`] associated with
+    /// dispathing workgoups.
     pub fn dispatch_workgroups(&mut self, x: u32, y: u32, z: u32) -> &mut Self {
         let cmd = ComputePassCommand::DispatchWorkgroups { x, y, z };
         self.cmds.push(cmd);

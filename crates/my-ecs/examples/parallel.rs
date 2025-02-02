@@ -18,14 +18,14 @@ fn main() {
     const NUM: i64 = END - START + 1;
     const SUM: i64 = (START + END) * NUM / 2;
 
-    let pool = WorkerPool::with_num_cpus();
+    let pool = WorkerPool::with_all_cpus();
     let num_workers = pool.len();
     let mut ecs = Ecs::default(pool, [num_workers]);
 
     ecs.register_entity_of::<Ea>()
         // Puts in some numbers.
         .add_once_system(|ew: EntWrite<Ea>| {
-            let mut ew = ew.take_recur().unwrap();
+            let mut ew = ew.take_recur();
             ew.resize(NUM as usize, Ea { a: Ca(0) });
             let mut col = ew.get_column_mut_of::<Ca>().unwrap();
             for (ca, val) in col.iter_mut().zip(START..=END) {
@@ -49,8 +49,7 @@ fn main() {
                 start.elapsed()
             );
         })
-        .run()
-        .schedule_all();
+        .step();
 
     // For the sake of comparison, computes in sequential as well.
     ecs.add_once_system(|r: Read<Fa>| {
@@ -65,6 +64,5 @@ fn main() {
             start.elapsed()
         );
     })
-    .run()
-    .schedule_all();
+    .step();
 }

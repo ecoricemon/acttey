@@ -27,17 +27,17 @@ mod non_web {
         // - Compute tasks in group 1.
 
         ecs.add_once_systems((
-            move || schedule_future(async_io_server(exit_rx)),
-            move || schedule_future(async_io_client(exit_tx)),
+            move || global::schedule_future(async_io_server(exit_rx)),
+            move || global::schedule_future(async_io_client(exit_tx)),
         ))
         .add_system(SystemDesc::new().with_group_index(1).with_once(|| {
-            schedule_future(async_compute());
-            schedule_future(async_compute());
+            global::schedule_future(async_compute());
+            global::schedule_future(async_compute());
         }))
         .unwrap();
 
         print!("[GOOD example] ");
-        while !ecs.run().schedule_all().wait_for_idle().is_completed() {}
+        ecs.run();
     }
 
     pub(super) fn bad_example() {
@@ -51,19 +51,19 @@ mod non_web {
         // - Compute tasks in group 0.
 
         ecs.add_once_systems((
-            move || schedule_future(async_io_server(exit_rx)),
+            move || global::schedule_future(async_io_server(exit_rx)),
             || {
-                schedule_future(async_compute());
-                schedule_future(async_compute());
+                global::schedule_future(async_compute());
+                global::schedule_future(async_compute());
             },
             move || {
-                schedule_future(async_io_client(exit_tx));
+                global::schedule_future(async_io_client(exit_tx));
             },
         ))
         .unwrap();
 
         print!("[BAD example] ");
-        while !ecs.run().schedule_all().wait_for_idle().is_completed() {}
+        ecs.run();
     }
 
     // Function that needs to respond quickly.

@@ -14,11 +14,11 @@ mod non_web {
         let mut ecs = Ecs::default(WorkerPool::with_len(3), [3]);
 
         // Schedules a future using once system.
-        ecs.add_once_system(|| schedule_future(register_map()))
+        ecs.add_once_system(|| global::schedule_future(register_map()))
             .unwrap();
 
         // Waits until all tasks are executed completely.
-        while !ecs.run().schedule_all().wait_for_idle().is_completed() {}
+        ecs.run();
     }
 
     async fn register_map() -> impl Command {
@@ -38,7 +38,7 @@ mod non_web {
         let f = move |mut ecs: Ecs| {
             // Registers map resource.
             let map = Map::new(&map_data);
-            ecs.register_resource(map)
+            ecs.add_resource(map)
                 .take()
                 .map_err(EcsError::without_data)?;
 

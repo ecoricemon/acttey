@@ -7,13 +7,20 @@ use rayon::iter::IntoParallelRefIterator;
 use std::{
     alloc::{self, Layout},
     any::{self, TypeId},
-    mem, ops,
+    cmp::Ordering,
+    mem,
+    num::NonZeroUsize,
+    ops::{Deref, DerefMut},
     ptr::{self, NonNull},
     slice,
 };
 
-// TODO: Not tested in boundary conditions.
-/// Vector containing same type of data without generic parameter.
+/// A type-erased vector containing values of the same type.
+///
+/// This vector would be useful when you need to hold vectors of heterogeneous
+/// types in a single variable. Instead, this vector has methods that looks
+/// quite dirty and not easy to use. Most methods are unsafe because they take
+/// or return pointer instead of concrete type.
 #[derive(Debug)]
 pub struct AnyVec {
     ptr: NonNull<u8>,
@@ -22,16 +29,24 @@ pub struct AnyVec {
     tinfo: TypeInfo,
 }
 
-// We're restricting type to be Send and Sync.
-// See `AnyVec::new()`
+// `AnyVec` is currently restricted to be `Send` and `Sync`. See
+// `AnyVec::new()`.
 unsafe impl Send for AnyVec {}
 unsafe impl Sync for AnyVec {}
 
 impl AnyVec {
+    /// Creates a new empty vector.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let v = AnyVec::new(tinfo!(i32));
+    /// ```
     pub fn new(tinfo: TypeInfo) -> Self {
-        // For now, allows only Send and Sync type.
-        assert!(tinfo.is_send, "AnyVec doesn't allow not Send type for now");
-        assert!(tinfo.is_sync, "AnyVec doesn't allow not Sync type for now");
+        assert!(tinfo.is_send, "expected `Send` and `Sync` type");
+        assert!(tinfo.is_sync, "expected `Send` and `Sync` type");
 
         let mut v = Self {
             tinfo,
@@ -48,69 +63,231 @@ impl AnyVec {
         v
     }
 
+    /// Returns [`TypeInfo`] of the item.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let v = AnyVec::new(tinfo!(i32));
+    /// assert_eq!(v.type_info(), &tinfo!(i32));
+    /// ```
     pub const fn type_info(&self) -> &TypeInfo {
         &self.tinfo
     }
 
+    /// Returns [`TypeId`] of the item.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let v = AnyVec::new(tinfo!(i32));
+    /// assert_eq!(v.type_id(), std::any::TypeId::of::<i32>());
+    /// ```
     pub const fn type_id(&self) -> TypeId {
         self.tinfo.ty
     }
 
+    /// Returns name of the item based on [`type_name`](any::type_name).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let v = AnyVec::new(tinfo!(i32));
+    /// println!("{}", v.type_name());
+    /// ```
     pub const fn type_name(&self) -> &'static str {
         self.tinfo.name
     }
 
+    /// Returns size in bytes of the item.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let v = AnyVec::new(tinfo!(i32));
+    /// assert_eq!(v.item_size(), std::mem::size_of::<i32>());
+    /// ```
     pub const fn item_size(&self) -> usize {
         self.tinfo.size
     }
 
+    /// Returns whether the item is zero-sized type or not.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let v = AnyVec::new(tinfo!(i32));
+    /// assert!(!v.is_zst());
+    /// let v = AnyVec::new(tinfo!(()));
+    /// assert!(v.is_zst());
+    /// ```
     pub const fn is_zst(&self) -> bool {
         self.item_size() == 0
     }
 
+    /// Returns alignment in bytes of the item.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let v = AnyVec::new(tinfo!(i32));
+    /// assert_eq!(v.align(), std::mem::align_of::<i32>());
+    /// ```
     pub const fn align(&self) -> usize {
         self.tinfo.align
     }
 
+    /// Returns raw drop function pointer.
     pub const fn fn_drop(&self) -> FnDropRaw {
         self.tinfo.fn_drop
     }
 
+    /// Returns raw clone function pointer.
     pub const fn fn_clone(&self) -> FnCloneRaw {
         self.tinfo.fn_clone
     }
 
+    /// Returns whether the item is [`Clone`] or not.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let v = AnyVec::new(tinfo!(i32));
+    /// assert!(v.is_clone());
+    ///
+    /// struct S;
+    /// let v = AnyVec::new(tinfo!(S));
+    /// assert!(!v.is_clone());
+    /// ```
     pub const fn is_clone(&self) -> bool {
         self.tinfo.is_clone
     }
 
+    /// Returns whether the item is [`Send`] or not.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let v = AnyVec::new(tinfo!(i32));
+    /// assert!(v.is_send());
+    /// // let v = AnyVec::new(tinfo!(*const u8)); // Disallowed for now.
+    /// ```
     pub const fn is_send(&self) -> bool {
         self.tinfo.is_send
     }
 
+    /// Returns whether the item is [`Sync`] or not.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let v = AnyVec::new(tinfo!(i32));
+    /// assert!(v.is_sync());
+    /// // let v = AnyVec::new(tinfo!(*const u8)); // Disallowed for now.
+    /// ```
     pub const fn is_sync(&self) -> bool {
         self.tinfo.is_sync
     }
 
-    pub fn is_type_of(&self, ty: &TypeId) -> bool {
-        &self.tinfo.ty == ty
+    /// Returns true if the given [`TypeId`] is the same as item of the vector.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let v = AnyVec::new(tinfo!(i32));
+    /// assert!(v.is_type_of::<i32>());
+    /// ```
+    pub fn is_type_of<T: 'static>(&self) -> bool {
+        self.tinfo.ty == TypeId::of::<T>()
     }
 
+    /// Returns number of item.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    /// unsafe { v.push(0_i32) };
+    /// assert_eq!(v.len(), 1);
+    /// ```
     pub const fn len(&self) -> usize {
         self.len
     }
 
+    /// Returns true if the vector is empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let v = AnyVec::new(tinfo!(i32));
+    /// assert!(v.is_empty());
+    /// ```
     pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// Returns capacity in bytes of the vector.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    /// v.reserve(10);
+    /// assert!(v.capacity() >= 10);
+    /// ```
     pub const fn capacity(&self) -> usize {
         self.cap
     }
 
+    /// Returns iterator visiting all items.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the given type is not the same as the vector contains.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    /// unsafe {
+    ///     v.push(0_i32);
+    ///     v.push(1_i32);
+    /// }
+    /// for x in v.iter_of::<i32>() {
+    ///     println!("{x}");
+    /// }
+    /// ```
     pub fn iter_of<T: 'static>(&self) -> Iter<'_, T> {
         assert!(
-            self.is_type_of(&TypeId::of::<T>()),
+            self.is_type_of::<T>(),
             "type doesn't match, contains {:?} but {:?} requested",
             self.type_name(),
             any::type_name::<T>()
@@ -119,9 +296,29 @@ impl AnyVec {
         unsafe { AsRawIter::iter_of(self) }
     }
 
+    /// Returns mutable iterator visiting all items.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the given type is not the same as the vector contains.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    /// unsafe {
+    ///     v.push(0_i32);
+    ///     v.push(1_i32);
+    /// }
+    /// for x in v.iter_mut_of::<i32>() {
+    ///     *x += 10;
+    /// }
+    /// ```
     pub fn iter_mut_of<T: 'static>(&mut self) -> IterMut<'_, T> {
         assert!(
-            self.is_type_of(&TypeId::of::<T>()),
+            self.is_type_of::<T>(),
             "type doesn't match, contains {:?} but {:?} requested",
             self.type_name(),
             any::type_name::<T>()
@@ -130,10 +327,34 @@ impl AnyVec {
         unsafe { AsRawIter::iter_mut_of(self) }
     }
 
+    /// Returns parallel iterator visiting all items.
+    ///
+    /// Parallel iterator implements [`rayon`]'s parallel iterator traits, so
+    /// that it can be split into multiple CPU cores then consumed at the same
+    /// time.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the given type is not the same as the vector contains.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::prelude::*;
+    /// use my_ecs::ds::AnyVec;
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    /// unsafe {
+    ///     v.push(1_i32);
+    ///     v.push(2_i32);
+    /// }
+    /// let sum: i32 = v.par_iter_of::<i32>().sum();
+    /// assert_eq!(sum, 3);
+    /// ```
     #[inline]
     pub fn par_iter_of<T: Send + Sync + 'static>(&self) -> ParIter<'_, T> {
         assert!(
-            self.is_type_of(&TypeId::of::<T>()),
+            self.is_type_of::<T>(),
             "type doesn't match, contains {:?} but {:?} requested",
             self.type_name(),
             any::type_name::<T>()
@@ -142,10 +363,34 @@ impl AnyVec {
         unsafe { AsRawIter::par_iter_of(self) }
     }
 
+    /// Returns mutable parallel iterator visiting all items.
+    ///
+    /// Parallel iterator implements [`rayon`]'s parallel iterator traits, so
+    /// that it can be split into multiple CPU cores then consumed at the same
+    /// time.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the given type is not the same as the vector contains.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::prelude::*;
+    /// use my_ecs::ds::AnyVec;
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    /// unsafe {
+    ///     v.push(1_i32);
+    ///     v.push(2_i32);
+    /// }
+    /// let sum: i32 = v.par_iter_mut_of::<i32>().map(|x| *x + 1).sum();
+    /// assert_eq!(sum, 5);
+    /// ```
     #[inline]
     pub fn par_iter_mut_of<T: Send + Sync + 'static>(&mut self) -> ParIterMut<'_, T> {
         assert!(
-            self.is_type_of(&TypeId::of::<T>()),
+            self.is_type_of::<T>(),
             "type doesn't match, contains {:?} but {:?} requested",
             self.type_name(),
             any::type_name::<T>()
@@ -154,8 +399,30 @@ impl AnyVec {
         unsafe { AsRawIter::par_iter_mut_of(self) }
     }
 
-    pub fn reserve(&mut self, add_num: usize) {
-        let need_cap = self.len().saturating_add(add_num);
+    /// Reserves additional capacity more than or equal to the given value.
+    ///
+    /// If capacity of the vector is already sufficient, nothing takes place.
+    /// Otherwise, allocates new memory or reallocates the old memory so that
+    /// the capacity will be greater than or equal to `self.len() + additional`.
+    /// This method deliberately allocates more memory than requested to avoid
+    /// frequent reallocation.
+    ///
+    /// # Panics
+    ///
+    /// Panics if total memory in bytes after calling this method will exceed
+    /// [`isize::MAX`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    /// v.reserve(10);
+    /// assert!(v.capacity() >= 10);
+    /// ```
+    pub fn reserve(&mut self, additional: usize) {
+        let need_cap = self.len().saturating_add(additional);
         if self.capacity() < need_cap {
             let max_cap = self.max_capacity();
             if need_cap > max_cap {
@@ -172,8 +439,28 @@ impl AnyVec {
         }
     }
 
-    pub fn reserve_exact(&mut self, add_num: usize) {
-        let need_cap = self.len().saturating_add(add_num);
+    /// Reserves additional capacity as much as the given value.
+    ///
+    /// If capacity of the vector is already sufficient, nothing takes place.
+    /// Otherwise, allocates new memory or reallocates the old memory so that
+    /// the capacity will be equal to `self.len() + additional` exactly.
+    ///
+    /// Note, however, that allocator may give a memory block that is greater
+    /// than requested for some reason. The exact size of memory block is
+    /// invisible from clients, but you can look into it using something like
+    /// [`libc::malloc_usable_size`](https://docs.rs/libc/latest/libc/fn.malloc_usable_size.html).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    /// v.reserve(10);
+    /// assert_eq!(v.capacity(), 10);
+    /// ```
+    pub fn reserve_exact(&mut self, additional: usize) {
+        let need_cap = self.len().saturating_add(additional);
         if self.capacity() < need_cap {
             if need_cap > self.max_capacity() {
                 panic!("can't allocate {need_cap} x {} bytes", self.item_size());
@@ -197,22 +484,24 @@ impl AnyVec {
         if self.capacity() == 0 {
             let layout = Layout::from_size_align(new_size, self.align()).unwrap();
 
-            // Safety:
             let ptr = unsafe { alloc::alloc(layout) };
-            if ptr.is_null() {
+            let Some(ptr) = NonNull::new(ptr) else {
                 alloc::handle_alloc_error(layout);
-            }
-            self.ptr = NonNull::new_unchecked(ptr);
+            };
+
+            self.ptr = ptr;
             self.cap = new_cap;
         } else {
-            self.realloc_unchecked(new_cap);
+            unsafe { self.realloc_unchecked(new_cap) }
         };
     }
 
+    /// Shrinks capacity of the vector as much as possible.
+    ///
     /// # Examples
     ///
     /// ```
-    /// # use my_ecs::prelude::*;
+    /// use my_ecs::{tinfo, ds::AnyVec};
     ///
     /// let mut v = AnyVec::new(tinfo!(i32));
     /// assert_eq!(v.capacity(), 0);
@@ -245,47 +534,145 @@ impl AnyVec {
         }
     }
 
+    /// Sets length of the vector to the given value without any additional
+    /// operations.
+    ///
     /// # Safety
     ///
-    /// - `new_len` must be less than or equal to [`Self::capacity`].
-    /// - Caller must initialized extended items.
+    /// - `new_len` must be less than or equal to `self.capacity()`.
+    /// - If `new_len` is greater than the previous length, caller must
+    ///   initialize the extended range with proper values.
+    /// - If `new_len` is less than the previous length, caller must drop
+    ///   abandoned values from the vector properly.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    ///
+    /// unsafe {
+    ///     v.push(0_i32);
+    ///     v.set_len(0);
+    /// }
+    /// ```
     pub unsafe fn set_len(&mut self, new_len: usize) {
         debug_assert!(new_len <= self.capacity());
 
         self.len = new_len;
     }
 
+    /// Copies data as much as [`AnyVec::item_size`] from `src` address to the
+    /// memory pointed by `index`.
+    ///
+    /// Note that the old stored value is dropped before the copy, which means
+    /// the given index must be in bounds.
+    ///
     /// # Safety
     ///
-    /// `index` must be inbound.
-    /// `ptr` must point to valid data type.
-    pub unsafe fn set_raw_unchecked(&mut self, index: usize, ptr: NonNull<u8>) {
-        let dst = self.get_ptr(index);
-        (self.fn_drop())(dst);
-        ptr::copy_nonoverlapping(ptr.as_ptr(), dst, self.item_size());
+    /// - `index` must be in bounds.
+    /// - `src` must point to a valid type that the vector contains.
+    /// - Memory range pointed by `index` must not need to be dropped.
+    /// - `src` must not be dropped after calling this method because it is
+    ///   moved into the vector.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    /// use std::ptr::NonNull;
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    ///
+    /// unsafe {
+    ///     v.push(0_i32);
+    ///     let value = 1_i32;
+    ///     let ptr = (&value as *const i32 as *const u8).cast_mut();
+    ///     v.set_raw_unchecked(0, NonNull::new(ptr).unwrap());
+    ///     assert_eq!(v.pop(), Some(1_i32));
+    /// }
+    /// ```
+    pub unsafe fn set_raw_unchecked(&mut self, index: usize, src: NonNull<u8>) {
+        unsafe {
+            let dst = self.get_ptr(index);
+            let fn_drop = self.fn_drop();
+            fn_drop(dst);
+            ptr::copy_nonoverlapping(src.as_ptr(), dst, self.item_size());
+        }
     }
 
-    /// Caller should make sure data pointed by `ptr` not to be dropped.
-    /// To make it not to be dropped, call [`std::mem::forget`].
+    /// Copies data as much as `self.item_size()` from `src` address to the end
+    /// of the vector.
+    ///
+    /// If the vector doesn't have sufficient capacity for the appended value,
+    /// then the vector increases its capacity first by calling
+    /// [`AnyVec::reserve`] which allocates memory more than just one value,
+    /// then does the copy.
     ///
     /// # Safety
     ///
-    /// `ptr` must point to valid data type.
-    pub unsafe fn push_raw(&mut self, ptr: NonNull<u8>) {
+    /// - `src` must point to a valid type that the vector contains.
+    /// - `src` must not be dropped after calling this method because it is
+    ///   moved into the vector.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    /// use std::ptr::NonNull;
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    ///
+    /// let value = 0x01020304_i32;
+    /// unsafe {
+    ///     let ptr = (&value as *const i32 as *const u8).cast_mut();
+    ///     v.push_raw(NonNull::new(ptr).unwrap());
+    ///     assert_eq!(v.pop(), Some(value));
+    /// }
+    /// ```
+    pub unsafe fn push_raw(&mut self, src: NonNull<u8>) {
         if !self.is_zst() {
             self.reserve(1);
 
             // Safety: index is valid.
-            self.update_unchecked(self.len(), ptr);
+            unsafe {
+                let dst = self.get_ptr(self.len());
+                ptr::copy_nonoverlapping(src.as_ptr(), dst, self.item_size());
+            }
         }
 
         // Safety: Infallible.
         unsafe { self.set_len(self.len().checked_add(1).unwrap()) };
     }
 
+    /// Writes a value to the end of the vector by calling the given function.
+    ///
+    /// If the vector doesn't have sufficient capacity for the appended value,
+    /// then the vector increases its capacity first by calling
+    /// [`AnyVec::reserve`] which allocates memory more than just one value,
+    /// then does the write operation.
+    ///
     /// # Safety
     ///
-    /// `write` must write correct type on given buffer.
+    /// - `write` must write a valid type that the vector contains.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    /// use std::ptr::{self, NonNull};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    ///
+    /// let value = 0x01020304_i32;
+    /// unsafe {
+    ///     v.push_with(|dst| {
+    ///         ptr::write(dst as *mut i32, value);
+    ///     });
+    ///     assert_eq!(v.pop(), Some(value));
+    /// }
+    /// ```
     pub unsafe fn push_with<F>(&mut self, write: F)
     where
         F: FnOnce(*mut u8),
@@ -293,7 +680,7 @@ impl AnyVec {
         if !self.is_zst() {
             self.reserve(1);
 
-            let dst = self.get_ptr(self.len());
+            let dst = unsafe { self.get_ptr(self.len()) };
             write(dst);
         }
 
@@ -301,11 +688,30 @@ impl AnyVec {
         unsafe { self.set_len(self.len().checked_add(1).unwrap()) };
     }
 
+    /// Appends the given value to the end of the vector.
+    ///
     /// # Safety
     ///
-    /// Type of the value `T` must be the same as the type the vector knows.
+    /// - `value` must be the same type as the vector contains.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    /// unsafe {
+    ///     v.push(0_i32);
+    ///     assert_eq!(v.pop(), Some(0_i32));
+    /// }
+    /// ```
     pub unsafe fn push<T: 'static>(&mut self, mut value: T) {
-        debug_assert!(self.is_type_of(&TypeId::of::<T>()));
+        debug_assert!(
+            self.is_type_of::<T>(),
+            "expected `{}`, but received `{}`",
+            self.type_name(),
+            any::type_name::<T>()
+        );
 
         // Safety: Infallible.
         unsafe {
@@ -315,18 +721,6 @@ impl AnyVec {
         mem::forget(value);
     }
 
-    /// Overwrites value located at index with the given pointer.
-    /// Note that this doesn't drop old value.
-    ///
-    /// # Safety
-    ///
-    /// - `index` must be in bound.
-    /// - `ptr` must point to valid data type.
-    pub unsafe fn update_unchecked(&mut self, index: usize, ptr: NonNull<u8>) {
-        let dst = self.get_ptr(index);
-        ptr::copy_nonoverlapping(ptr.as_ptr(), dst, self.item_size());
-    }
-
     /// Removes the last item from the vector and writes it to the given
     /// buffer, then returns `Some`.
     ///
@@ -334,10 +728,19 @@ impl AnyVec {
     /// buffer, so that caller must call `drop()` on it correctly.
     /// Otherwise, returns `None` without change to the buffer.
     ///
+    /// # Safety
+    ///
+    /// Undefined behavior if conditions below are not met.
+    /// - `buf` must have enough size to be copied an item.
+    /// - When `Some` is returned, `buf` must be correctly handled as an item.
+    ///   For example, if an item should be dropped, caller must call drop() on
+    ///   it.
+    /// - When `None` is returned, `buf` must be correctly handled as it was.
+    ///
     /// # Examples
     ///
     /// ```
-    /// # use my_ecs::prelude::*;
+    /// use my_ecs::{tinfo, ds::AnyVec};
     ///
     /// let mut v = AnyVec::new(tinfo!(i32));
     /// unsafe { v.push(42_i32) };
@@ -349,31 +752,45 @@ impl AnyVec {
     /// assert!(v.is_empty());
     /// assert_eq!(buf, 42);
     /// ```
-    ///
-    /// # Safety
-    ///
-    /// Undefined behavior if conditions below are not met.
-    /// - `buf` must have enough size to be copied an item.
-    /// - When `Some` is returned, `buf` must be correctly handled as an item.
-    ///   For example, if an item should be dropped, caller must call drop() on
-    ///   it.
-    /// - When `None` is returned, `buf` must be correctly handled as it was.
     pub unsafe fn pop_raw(&mut self, buf: *mut u8) -> Option<()> {
         if self.is_empty() {
             None
         } else {
-            // Safety: Vector is not empty.
-            let ptr = self._pop();
-            ptr::copy_nonoverlapping(ptr, buf, self.item_size());
+            unsafe {
+                // Safety: Vector is not empty.
+                let ptr = self._pop();
+                ptr::copy_nonoverlapping(ptr, buf, self.item_size());
+            }
             Some(())
         }
     }
 
+    /// Removes the last item from the vector.
+    ///
     /// # Safety
     ///
-    /// Type of the value `T` must be the same as the type the vector knows.
+    /// - `T` must be the same type as the vector contains.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    ///
+    /// unsafe {
+    ///     v.push(0_i32);
+    ///     let value = v.pop::<i32>().unwrap();
+    ///     assert_eq!(value, 0_i32);
+    /// }
+    /// ```
     pub unsafe fn pop<T: 'static>(&mut self) -> Option<T> {
-        debug_assert!(self.is_type_of(&TypeId::of::<T>()));
+        debug_assert!(
+            self.is_type_of::<T>(),
+            "expected `{}`, but received `{}`",
+            self.type_name(),
+            any::type_name::<T>()
+        );
 
         if self.is_empty() {
             None
@@ -385,16 +802,52 @@ impl AnyVec {
         }
     }
 
+    /// Removes the last item from the vector then drops it immediately.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    ///
+    /// unsafe {
+    ///     v.push(0_i32);
+    ///     assert_eq!(v.pop_drop(), Some(()));
+    /// }
+    /// ```
     pub fn pop_drop(&mut self) -> Option<()> {
         if self.is_empty() {
             None
         } else {
+            let fn_drop = self.fn_drop();
             // Safety: Vector is not empty.
-            unsafe { (self.fn_drop())(self._pop()) };
+            unsafe { fn_drop(self._pop()) };
             Some(())
         }
     }
 
+    /// Removes the last item from the vector without calling drop function on
+    /// it.
+    ///
+    /// # Safety
+    ///
+    /// Rust safety doesn't include calling drop function. See
+    /// [`forget`](mem::forget) for more information. However, caller must
+    /// guarantee that not calling drop function is fine for the item.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    ///
+    /// unsafe {
+    ///     v.push(0_i32);
+    ///     assert_eq!(v.pop_forget(), Some(()));
+    /// }
+    /// ```
     pub fn pop_forget(&mut self) -> Option<()> {
         if self.is_empty() {
             None
@@ -409,23 +862,39 @@ impl AnyVec {
     ///
     /// Length of the vector must not be zero.
     unsafe fn _pop(&mut self) -> *mut u8 {
-        // Safety: Decreasing is safe.
-        self.set_len(self.len() - 1);
+        unsafe {
+            // Safety: Decreasing is safe.
+            self.set_len(self.len() - 1);
 
-        // Safety: We're using `Layout::from_size_align` which restricts size to be under the limit.
-        self.get_ptr(self.len())
+            // Safety: We're using `Layout::from_size_align` which restricts
+            // size to be under the limit.
+            self.get_ptr(self.len())
+        }
     }
 
     /// Removes an item at the given index from the vector and writes it to the
     /// given buffer.
     ///
-    /// Therefore the item is actually moved from the vector to the given
+    /// Therefore, the item is actually moved from the vector to the given
     /// buffer. So caller must take care of calling drop on it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the given index is out of bounds.
+    ///
+    /// # Safety
+    ///
+    /// Undefined behavior if conditions below are not met.
+    /// - `buf` must have enough size to be copied an item.
+    /// - When `Some` is returned, `buf` must be correctly handled as an item.
+    ///   For example, if an item should be dropped, caller must call drop() on
+    ///   it.
+    /// - When `None` is returned, `buf` must be correctly handled as it was.
     ///
     /// # Examples
     ///
     /// ```
-    /// # use my_ecs::prelude::*;
+    /// use my_ecs::{tinfo, ds::AnyVec};
     ///
     /// let mut v = AnyVec::new(tinfo!(i32));
     /// unsafe {
@@ -444,6 +913,15 @@ impl AnyVec {
     ///     assert_eq!(v.pop::<i32>(), Some(2));
     /// }
     /// ```
+    pub unsafe fn swap_remove_raw(&mut self, index: usize, buf: *mut u8) {
+        // If index is out of bounds or len() - 1 overflows, swap() panics.
+        self.swap(index, self.len().wrapping_sub(1));
+        unsafe { self.pop_raw(buf) };
+    }
+
+    /// Removes an item at the given index from the vector and returns it.
+    ///
+    /// Then the last item of the vector is moved to the vacant slot.
     ///
     /// # Panics
     ///
@@ -451,52 +929,116 @@ impl AnyVec {
     ///
     /// # Safety
     ///
-    /// Undefined behavior if conditions below are not met.
-    /// - `buf` must have enough size to be copied an item.
-    /// - When `Some` is returned, `buf` must be correctly handled as an item.
-    ///   For example, if an item should be dropped, caller must call drop() on
-    ///   it.
-    /// - When `None` is returned, `buf` must be correctly handled as it was.
-    pub unsafe fn swap_remove_raw(&mut self, index: usize, buf: *mut u8) {
-        // If index is out of bounds or len() - 1 overflows, swap() panics.
-        self.swap(index, self.len().wrapping_sub(1));
-        self.pop_raw(buf);
-    }
-
-    /// # Panics
+    /// - `T` must be the same type as the vector contains.
     ///
-    /// Panics if `index` is out of bound..
+    /// # Examples
     ///
-    /// # Safety
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
     ///
-    /// Type of the value `T` must be the same as the type the vector knows.
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    ///
+    /// unsafe {
+    ///     v.push(0_i32);
+    ///     v.push(1_i32);
+    ///     v.push(2_i32);
+    ///     assert_eq!(v.swap_remove::<i32>(0), 0);
+    ///     assert_eq!(v.swap_remove::<i32>(0), 2);
+    ///     assert_eq!(v.swap_remove::<i32>(0), 1);
+    /// }
+    /// ```
     pub unsafe fn swap_remove<T: 'static>(&mut self, index: usize) -> T {
         // If index is out of bounds or len() - 1 overflows, swap() panics.
         self.swap(index, self.len().wrapping_sub(1));
-        self.pop().unwrap()
+        unsafe { self.pop().unwrap() }
     }
 
+    /// Removes an item at the given index from the vector and drops it
+    /// immediately.
+    ///
+    /// Then the last item of the vector is moved to the vacant slot.
+    ///
     /// # Panics
     ///
-    /// Panics if `index` is out of bounds.
+    /// Panics if the given index is out of bounds.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    ///
+    /// unsafe {
+    ///     v.push(0_i32);
+    ///     v.swap_remove_drop(0);
+    ///     assert!(v.is_empty());
+    /// }
+    /// ```
     pub fn swap_remove_drop(&mut self, index: usize) {
         // If index is out of bounds or len() - 1 overflows, swap() panics.
         self.swap(index, self.len().wrapping_sub(1));
         self.pop_drop();
     }
 
+    /// Removes an item at the given index from the vector without calling drop
+    /// function on it.
+    ///
+    /// Then the last item of the vector is moved to the vacant slot.
+    ///
     /// # Panics
     ///
-    /// Panics if `index` is out of bounds.
+    /// Panics if given index is out of bounds.
+    ///
+    /// # Safety
+    ///
+    /// Rust safety doesn't include calling drop function. See
+    /// [`forget`](mem::forget) for more information. However, caller must
+    /// guarantee that not calling drop function is fine for the item.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    ///
+    /// unsafe {
+    ///     v.push(0_i32);
+    ///     v.swap_remove_forget(0);
+    ///     assert!(v.is_empty());
+    /// }
+    /// ```
     pub fn swap_remove_forget(&mut self, index: usize) {
         // If index is out of bounds or len() - 1 overflows, swap() panics.
         self.swap(index, self.len().wrapping_sub(1));
         self.pop_forget();
     }
 
+    /// Replaces an item with another item in the vector.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any given indices is out of bounds.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    ///
+    /// unsafe {
+    ///     v.push(0_i32);
+    ///     v.push(1_i32);
+    ///     v.swap(0, 1);
+    ///     assert_eq!(v.pop(), Some(0));
+    ///     assert_eq!(v.pop(), Some(1));
+    /// }
+    /// ```
     pub fn swap(&mut self, index0: usize, index1: usize) {
-        assert!(index0 < self.len());
-        assert!(index1 < self.len());
+        assert!(index0 < self.len(), "{index0} is out of bounds");
+        assert!(index1 < self.len(), "{index1} is out of bounds");
 
         unsafe {
             let ptr0 = self.get_ptr(index0);
@@ -507,6 +1049,23 @@ impl AnyVec {
         }
     }
 
+    /// Returns a pointer to an item at the given index.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    ///
+    /// let value = 0x01020304_i32;
+    /// unsafe { v.push(value) };
+    ///
+    /// let ptr = v.get_raw(0).unwrap().cast::<i32>().as_ptr().cast_const();
+    /// unsafe {
+    ///     assert_eq!(std::ptr::read(ptr), value);
+    /// }
+    /// ```
     pub fn get_raw(&self, index: usize) -> Option<NonNull<u8>> {
         if index < self.len() {
             unsafe { Some(self.get_raw_unchecked(index)) }
@@ -515,120 +1074,259 @@ impl AnyVec {
         }
     }
 
+    /// Returns a pointer to an item at the given index.
+    ///
     /// # Safety
     ///
-    /// `index` must be inbound and result address must not overflow `isize`.
+    /// - Index must be in bounds.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    ///
+    /// let value = 0x01020304_i32;
+    /// unsafe {
+    ///     v.push(value);
+    ///     let ptr = v.get_raw_unchecked(0)
+    ///         .cast::<i32>()
+    ///         .as_ptr()
+    ///         .cast_const();
+    ///     assert_eq!(std::ptr::read(ptr), value);
+    /// }
+    /// ```
     pub unsafe fn get_raw_unchecked(&self, index: usize) -> NonNull<u8> {
-        NonNull::new_unchecked(self.get_ptr(index))
+        unsafe {
+            let item_ptr = self.get_ptr(index);
+            NonNull::new_unchecked(item_ptr)
+        }
     }
 
-    /// `index` is an index of T, not u8.
+    /// Returns shared reference to an item at the given index.
     ///
     /// # Safety
     ///
-    /// `index` must be inbound and result address must not overflow `isize`.
-    pub const unsafe fn get_ptr(&self, index: usize) -> *mut u8 {
-        let offset = index * self.item_size();
-        self.ptr.as_ptr().add(offset)
-    }
-
-    /// # Safety
+    /// - `T` must be the same type as the vector contains.
     ///
-    /// Type of the value `T` must be the same as the type the vector knows.
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    ///
+    /// unsafe {
+    ///     v.push(0_i32);
+    ///     assert_eq!(v.get(0), Some(&0_i32));
+    /// }
+    /// ```
     pub unsafe fn get<T: 'static>(&self, index: usize) -> Option<&T> {
-        debug_assert!(self.is_type_of(&TypeId::of::<T>()));
+        debug_assert!(
+            self.is_type_of::<T>(),
+            "expected `{}`, but received `{}`",
+            self.type_name(),
+            any::type_name::<T>()
+        );
 
         self.get_raw(index)
             .map(|ptr| unsafe { (ptr.as_ptr() as *const T).as_ref().unwrap_unchecked() })
     }
 
+    /// Returns mutable reference to an item at the given index.
+    ///
     /// # Safety
     ///
-    /// Type of the value `T` must be the same as the type the vector knows.
+    /// - `T` must be the same type as the vector contains.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    ///
+    /// unsafe {
+    ///     v.push(0_i32);
+    ///     *v.get_mut(0).unwrap() = 1_i32;
+    ///     assert_eq!(v.get(0), Some(&1_i32));
+    /// }
+    /// ```
     pub unsafe fn get_mut<T: 'static>(&mut self, index: usize) -> Option<&mut T> {
-        debug_assert!(self.is_type_of(&TypeId::of::<T>()));
+        debug_assert!(
+            self.is_type_of::<T>(),
+            "expected `{}`, but received `{}`",
+            self.type_name(),
+            any::type_name::<T>()
+        );
 
         self.get_raw(index)
             .map(|ptr| unsafe { (ptr.as_ptr() as *mut T).as_mut().unwrap_unchecked() })
     }
 
-    /// # Safety
+    /// Resizes the vector to the given length.
     ///
-    /// Type of the value `T` must be the same as the type the vector knows.
-    pub unsafe fn resize<T>(&mut self, new_len: usize, value: T)
+    /// If the new length is greater than previous length of the vector, then
+    /// the vector is extended with the given value. Otherwise, the vector is
+    /// shrunk.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `T` is not the same type as the vector contains.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    ///
+    /// unsafe {
+    ///     v.resize(2, 0_i32);
+    ///     assert_eq!(v.pop(), Some(0_i32));
+    ///     assert_eq!(v.pop(), Some(0_i32));
+    ///     assert!(v.is_empty());
+    /// }
+    /// ```
+    pub fn resize<T>(&mut self, new_len: usize, value: T)
     where
         T: Clone + 'static,
     {
+        // Panic: `self.resize_with` panics if the given type `T` is incorrect.
         self.resize_with(new_len, || value.clone());
     }
 
+    /// Resizes the vector to the given length.
+    ///
+    /// If the new length is greater than previous length of the vector, then
+    /// the vector is extended with clones of a value pointed by the given
+    /// pointer. Otherwise, the vector is shrunk.
+    ///
+    /// # Panics
+    ///
+    /// Panics if vector item is not [`Clone`].
+    ///
     /// # Safety
     ///
-    /// Conditions below must be met.
-    /// - Type of value pointed by `ptr` must be the same as the type the vector
-    ///   knows.
-    /// - Type must implement [`Clone`].
+    /// - `val_ptr` must point to a valid type that the vector contains.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    /// use std::ptr::NonNull;
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    ///
+    /// let value = 0x01020304_i32;
+    /// unsafe {
+    ///     let ptr = (&value as *const i32 as *const u8).cast_mut();
+    ///     v.resize_raw(2, NonNull::new(ptr).unwrap());
+    ///     assert_eq!(v.pop(), Some(value));
+    ///     assert_eq!(v.pop(), Some(value));
+    ///     assert!(v.is_empty());
+    /// }
+    /// ```
     pub unsafe fn resize_raw(&mut self, new_len: usize, val_ptr: NonNull<u8>) {
-        debug_assert!(self.tinfo.is_clone);
+        assert!(self.is_clone(), "expected `Clone` type");
 
-        let val_ptr = val_ptr.as_ptr().cast_const();
+        match new_len.cmp(&self.len()) {
+            Ordering::Less => self.truncate(new_len),
+            Ordering::Equal => {}
+            Ordering::Greater => {
+                self.reserve(new_len - self.len());
 
-        if new_len > self.len() {
-            self.reserve(new_len - self.len());
+                let (mut offset, stride) = self.get_ptr_offset(self.len());
+                let src = val_ptr.as_ptr().cast_const();
 
-            let (mut offset, stride) = self.get_ptr_offset(self.len());
+                let range = self.len()..new_len;
+                for _ in range {
+                    unsafe {
+                        let dst = self.ptr.as_ptr().add(offset);
+                        (self.tinfo.fn_clone)(src, dst);
+                    };
+                    offset += stride;
+                }
 
-            let range = self.len()..new_len;
-            for _ in range {
-                unsafe {
-                    let dest = self.ptr.as_ptr().add(offset);
-                    (self.tinfo.fn_clone)(val_ptr, dest);
-                };
-                offset += stride;
+                unsafe { self.set_len(new_len) };
             }
-
-            unsafe {
-                self.set_len(new_len);
-            }
-        } else {
-            self.truncate(new_len);
         }
     }
 
-    /// Resizes the vector with values the given function generates.
+    /// Resizes the vector to the given length.
     ///
-    /// Generated values will be added in order.
+    /// If the new length is greater than previous length of the vector, then
+    /// the vector is extended with values the given function generates. In this
+    /// case, generated values are appended in order. Otherwise, the vector is
+    /// shrunk.
     ///
-    /// # Safety
+    /// # Panics
     ///
-    /// Type of the value `T` must be the same as the type the vector knows.
-    pub unsafe fn resize_with<T, F>(&mut self, new_len: usize, mut f: F)
+    /// Panics if `T` is not the same type as the vector contains.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    ///
+    /// unsafe {
+    ///     v.resize_with(2, || 0_i32);
+    ///     assert_eq!(v.pop(), Some(0_i32));
+    ///     assert_eq!(v.pop(), Some(0_i32));
+    ///     assert!(v.is_empty());
+    /// }
+    /// ```
+    pub fn resize_with<T, F>(&mut self, new_len: usize, mut f: F)
     where
         T: 'static,
         F: FnMut() -> T,
     {
-        debug_assert!(self.is_type_of(&TypeId::of::<T>()));
+        assert!(
+            self.is_type_of::<T>(),
+            "expected `{}`, but received `{}`",
+            self.type_name(),
+            any::type_name::<T>()
+        );
 
-        if new_len > self.len() {
-            self.reserve(new_len - self.len());
+        match new_len.cmp(&self.len()) {
+            Ordering::Less => self.truncate(new_len),
+            Ordering::Equal => {}
+            Ordering::Greater => {
+                self.reserve(new_len - self.len());
 
-            let (mut offset, stride) = self.get_ptr_offset(self.len());
+                let (mut offset, stride) = self.get_ptr_offset(self.len());
 
-            let range = self.len()..new_len;
-            for _ in range {
-                let ptr = unsafe { self.ptr.as_ptr().add(offset) } as *mut T;
-                unsafe { ptr.write(f()) };
-                offset += stride;
+                let range = self.len()..new_len;
+                for _ in range {
+                    let ptr = unsafe { self.ptr.as_ptr().add(offset) } as *mut T;
+                    unsafe { ptr.write(f()) };
+                    offset += stride;
+                }
+
+                unsafe { self.set_len(new_len) };
             }
-
-            unsafe {
-                self.set_len(new_len);
-            }
-        } else {
-            self.truncate(new_len);
         }
     }
 
+    /// Shrinks the vector to the given length, and drops abandoned items.
+    ///
+    /// If the given length is greater than or equal to the current length of
+    /// the vector, nothing takes place.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    ///
+    /// unsafe { v.resize(10, 0_i32) };
+    /// v.truncate(5);
+    /// assert_eq!(v.len(), 5);
+    /// ```
     pub fn truncate(&mut self, len: usize) {
         if len >= self.len() {
             return;
@@ -637,21 +1335,49 @@ impl AnyVec {
         let (mut offset, stride) = self.get_ptr_offset(len);
 
         let range = len..self.len();
+        let fn_drop = self.fn_drop();
         for _ in range {
             unsafe {
                 let ptr = self.ptr.as_ptr().add(offset);
-                (self.fn_drop())(ptr);
+                fn_drop(ptr);
             }
             offset += stride;
         }
 
-        unsafe {
-            self.set_len(len);
-        }
+        unsafe { self.set_len(len) };
     }
 
+    /// Creates [`TypedAnyVec`] which looks like `Vec<T>`.
+    ///
+    /// You can call tons of useful methods on [`Vec`] by converting the vector.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `T` it not the same type as the vector contains.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    /// {
+    ///     let mut tv = v.as_vec_mut::<i32>();
+    ///     tv.push(0);
+    ///     tv.push(1);
+    /// }
+    /// unsafe {
+    ///     assert_eq!(v.pop(), Some(1_i32));
+    ///     assert_eq!(v.pop(), Some(0_i32));
+    /// }
+    /// ```
     pub fn as_vec_mut<T: 'static>(&mut self) -> TypedAnyVec<'_, T> {
-        assert!(self.is_type_of(&TypeId::of::<T>()));
+        assert!(
+            self.is_type_of::<T>(),
+            "expected `{}`, but received `{}`",
+            self.type_name(),
+            any::type_name::<T>()
+        );
 
         let typed = unsafe {
             Vec::from_raw_parts(self.ptr.as_ptr() as *mut T, self.len(), self.capacity())
@@ -659,16 +1385,70 @@ impl AnyVec {
         TypedAnyVec { typed, any: self }
     }
 
+    /// Creates a slice from the vector.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `T` it not the same type as the vector contains.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    /// unsafe {
+    ///     v.push(0_i32);
+    ///     v.push(1_i32);
+    /// }
+    /// assert_eq!(v.as_slice::<i32>(), &[0, 1]);
+    /// ```
     pub fn as_slice<T: 'static>(&self) -> &[T] {
-        assert!(self.is_type_of(&TypeId::of::<T>()));
+        assert!(
+            self.is_type_of::<T>(),
+            "expected `{}`, but received `{}`",
+            self.type_name(),
+            any::type_name::<T>()
+        );
 
         unsafe { slice::from_raw_parts(self.ptr.as_ptr() as *const T, self.len()) }
     }
 
+    /// Creates a mutable slice from the vector.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `T` it not the same type as the vector contains.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::{tinfo, ds::AnyVec};
+    ///
+    /// let mut v = AnyVec::new(tinfo!(i32));
+    /// unsafe { v.push(0_i32) };
+    /// let slice = v.as_mut_slice::<i32>();
+    /// assert_eq!(slice, &mut [0]);
+    /// ```
     pub fn as_mut_slice<T: 'static>(&mut self) -> &mut [T] {
-        assert!(self.is_type_of(&TypeId::of::<T>()));
+        assert!(
+            self.is_type_of::<T>(),
+            "expected `{}`, but received `{}`",
+            self.type_name(),
+            any::type_name::<T>()
+        );
 
         unsafe { slice::from_raw_parts_mut(self.ptr.as_ptr() as *mut T, self.len()) }
+    }
+
+    /// `index` is an index of T, not u8.
+    ///
+    /// # Safety
+    ///
+    /// `index` must be inbound and result address must not overflow `isize`.
+    pub(crate) const unsafe fn get_ptr(&self, index: usize) -> *mut u8 {
+        let offset = index * self.item_size();
+        unsafe { self.ptr.as_ptr().add(offset) }
     }
 
     /// # Safety
@@ -695,7 +1475,7 @@ impl AnyVec {
             alloc::handle_alloc_error(layout);
         }
 
-        self.ptr = NonNull::new_unchecked(ptr);
+        self.ptr = unsafe { NonNull::new_unchecked(ptr) };
         self.cap = new_cap;
     }
 
@@ -737,26 +1517,28 @@ impl AnyVec {
     }
 
     pub(crate) fn iter2(&self) -> FlatRawIter {
-        let this = (self as *const Self as *const u8).cast_mut();
-        let this = unsafe { NonNull::new_unchecked(this) };
-        let chunks = 1;
         unsafe fn fn_iter(this: NonNull<u8>, chunk_idx: usize) -> RawIter {
             if chunk_idx == 0 {
-                let this = this.cast::<AnyVec>().as_ref();
+                let this = unsafe { this.cast::<AnyVec>().as_ref() };
                 this.iter()
             } else {
                 RawIter::empty()
             }
         }
         unsafe fn fn_find(this: NonNull<u8>, item_idx: usize) -> (RawIter, usize, usize) {
-            let this = this.cast::<AnyVec>().as_ref();
+            let this = unsafe { this.cast::<AnyVec>().as_ref() };
             (this.iter(), 0, item_idx)
         }
         // If ZST, alignment will become stride.
         let stride = self.item_size().max(self.align());
         let len = self.len();
 
-        unsafe { FlatRawIter::new(this, chunks, fn_iter as _, fn_find as _, stride, len) }
+        unsafe {
+            let this = (self as *const Self as *const u8).cast_mut();
+            let this = NonNull::new_unchecked(this);
+            let chunks = 1;
+            FlatRawIter::new(this, chunks, fn_iter as _, fn_find as _, stride, len)
+        }
     }
 
     /// Maximum capacity only if the type is not zero sized.
@@ -780,12 +1562,13 @@ impl Clone for AnyVec {
             }
 
             let mut offset = 0;
+            let fn_clone = self.fn_clone();
             while offset < size {
                 unsafe {
                     let src = self.ptr.as_ptr().add(offset);
                     let dst = ptr.add(offset);
                     // If data type doesn't support clone, panics here.
-                    (self.fn_clone())(src, dst);
+                    fn_clone(src, dst);
                 }
                 offset += item_size;
             }
@@ -810,14 +1593,11 @@ impl Drop for AnyVec {
 
 impl AsRawIter for AnyVec {
     fn iter(&self) -> RawIter {
-        let start = self.ptr;
-        // If ZST, alignment will become stride.
-        let stride = self.item_size().max(self.align());
-        let end = unsafe { self.ptr.add(self.len() * stride) };
-        // Safety: We got both pointers from a vector,
-        // which proves they are valid, and stride must not be zero
-        // because align is not zero.
-        unsafe { RawIter::new(start, end, stride) }
+        unsafe {
+            // Safety: Alignment must be at least 1.
+            let stride = NonZeroUsize::new_unchecked(self.item_size().max(self.align()));
+            RawIter::new(self.ptr, self.len(), stride)
+        }
     }
 }
 
@@ -831,22 +1611,25 @@ impl IntoIterator for &AnyVec {
 }
 
 impl<'data> IntoParallelRefIterator<'data> for AnyVec {
-    type Item = SendSyncPtr<u8>;
     type Iter = ParRawIter;
+    type Item = SendSyncPtr<u8>;
 
     fn par_iter(&'data self) -> Self::Iter {
         AsRawIter::par_iter(self)
     }
 }
 
-/// [`Vec`]-like typed vector you can get from [`AnyVec`].
-/// When this is dropped, any changes you've made reflect to the `AnyVec`.
+/// A [`Vec`]-like type you can get from [`AnyVec`].
+///
+/// This struct implements [`Deref`] and [`DerefMut`] for `Vec<T>`, so that you
+/// can access the struct as `Vec<T>`. When this struct is dropped, any changes
+/// you've made are reflected to the `AnyVec`.
 pub struct TypedAnyVec<'a, T> {
     typed: Vec<T>,
     any: &'a mut AnyVec,
 }
 
-impl<T> ops::Deref for TypedAnyVec<'_, T> {
+impl<T> Deref for TypedAnyVec<'_, T> {
     type Target = Vec<T>;
 
     fn deref(&self) -> &Self::Target {
@@ -854,7 +1637,7 @@ impl<T> ops::Deref for TypedAnyVec<'_, T> {
     }
 }
 
-impl<T> ops::DerefMut for TypedAnyVec<'_, T> {
+impl<T> DerefMut for TypedAnyVec<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.typed
     }
@@ -888,7 +1671,7 @@ mod tests {
     }
 
     #[test]
-    fn test_anyvec_clone() {
+    fn test_any_vec_clone() {
         // Safety: Type is correct.
         unsafe {
             let mut a = AnyVec::new(crate::tinfo!(SA));
@@ -909,7 +1692,7 @@ mod tests {
 
     #[test]
     #[should_panic]
-    fn test_anyvec_uncloneable_panic() {
+    fn test_any_vec_non_cloneable_panic() {
         // Safety: Type is correct.
         unsafe {
             #[allow(dead_code)]
@@ -921,7 +1704,7 @@ mod tests {
     }
 
     #[test]
-    fn test_anyvec_drop() {
+    fn test_any_vec_drop() {
         use std::sync::{Arc, Mutex};
 
         struct X(Arc<Mutex<i32>>);
@@ -950,7 +1733,7 @@ mod tests {
     }
 
     #[test]
-    fn test_anyvec_push_pop() {
+    fn test_any_vec_push_pop() {
         // Safety: Type is correct.
         unsafe {
             let mut a = AnyVec::new(crate::tinfo!(SA));
@@ -980,7 +1763,7 @@ mod tests {
     }
 
     #[test]
-    fn test_anyvec_remove() {
+    fn test_any_vec_remove() {
         // Safety: Type is correct.
         unsafe {
             let mut a = AnyVec::new(crate::tinfo!(SA));
@@ -1005,7 +1788,7 @@ mod tests {
     }
 
     #[test]
-    fn test_anyvec_resize() {
+    fn test_any_vec_resize() {
         unsafe {
             // Tests resize().
             let mut v = AnyVec::new(crate::tinfo!(i32));
@@ -1038,7 +1821,7 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     #[should_panic]
-    fn test_anyvec_push_incorrect_type_panic() {
+    fn test_any_vec_push_incorrect_type_panic() {
         // Unsafe: It will be panicked in debug mode.
         unsafe {
             let mut a = AnyVec::new(crate::tinfo!(SA));
@@ -1052,7 +1835,7 @@ mod tests {
     #[cfg(debug_assertions)]
     #[test]
     #[should_panic]
-    fn test_anyvec_pop_incorrect_type_panic() {
+    fn test_any_vec_pop_incorrect_type_panic() {
         // Unsafe: It will be panicked in debug mode.
         unsafe {
             let mut a = AnyVec::new(crate::tinfo!(SB));
@@ -1065,7 +1848,7 @@ mod tests {
     }
 
     #[test]
-    fn test_anyvec_into_vec_push_pop() {
+    fn test_any_vec_into_vec_push_pop() {
         // Safety: Type is correct.
         unsafe {
             let mut a = AnyVec::new(crate::tinfo!(SA));
@@ -1091,14 +1874,15 @@ mod tests {
     }
 
     #[test]
-    fn test_anyvec_zst() {
+    fn test_any_vec_zst() {
         // Safety: Type is correct.
         unsafe {
             let mut v = AnyVec::new(crate::tinfo!(()));
             assert!(v.is_empty());
             assert_eq!(v.capacity(), usize::MAX);
 
-            // Pusing ZST must be possible, and length must be grown by pushing.
+            // Pushing ZST must be possible, and length must be grown by
+            // pushing.
             for i in 1..10 {
                 v.push(());
                 assert_eq!(v.len(), i);
@@ -1119,7 +1903,7 @@ mod tests {
             v.reserve(100);
             assert_eq!(v.capacity(), usize::MAX);
 
-            // Shrinknig capacity for ZST in the vector must have no effects.
+            // Shrinking capacity for ZST in the vector must have no effects.
             v.shrink_to_fit();
             assert_eq!(v.capacity(), usize::MAX);
         }

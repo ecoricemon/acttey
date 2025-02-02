@@ -1,5 +1,5 @@
-use crate::ActteyError;
-use my_ecs::prelude::{debug_format, Resource};
+use crate::{util::macros::debug_format, ActteyError};
+use my_ecs::prelude::Resource;
 use std::sync::Arc;
 
 #[derive(Debug, Resource)]

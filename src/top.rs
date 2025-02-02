@@ -1,29 +1,32 @@
 use crate::AppHasher;
-use my_ecs::ecs::cmd::Commander;
 use my_ecs::prelude::*;
-use std::{any::Any, error::Error};
+use std::error::Error;
 
 #[derive(Debug)]
-pub struct Acttey<const N: usize = 1> {
-    ecs: EcsApp<Worker, AppHasher, N>,
+pub struct Acttey {
+    ecs: EcsApp<Worker, AppHasher>,
 }
 
 impl Acttey {
     pub fn new() -> Self {
-        let pool = WorkerPool::with_num_cpus();
+        let pool = WorkerPool::with_all_cpus();
         let total = pool.len();
-        Self::_new(pool.into(), [total])
+        Self::_new(pool.into(), &[total][..])
     }
 }
 
-impl<const N: usize> Acttey<N> {
-    pub fn new_as(groups: [usize; N]) -> Self {
+impl Acttey {
+    pub fn new_as<G>(groups: G) -> Self
+    where
+        G: AsRef<[usize]>,
+    {
+        let groups = groups.as_ref();
         let total = groups.iter().sum();
         let pool = WorkerPool::with_len(total);
         Self::_new(pool.into(), groups)
     }
 
-    fn _new(workers: Vec<Worker>, groups: [usize; N]) -> Self {
+    fn _new(workers: Vec<Worker>, groups: &[usize]) -> Self {
         debug_assert_eq!(workers.len(), groups.iter().sum::<usize>());
 
         let ecs = Ecs::create(workers, groups);
@@ -31,17 +34,17 @@ impl<const N: usize> Acttey<N> {
     }
 
     pub fn step(&mut self) -> &mut Self {
-        self.ecs.run().schedule_all();
+        self.ecs.step();
         self
     }
 
     pub fn run(&mut self) -> &mut Self {
-        while !self.ecs.run().schedule_all().wait_for_idle().is_completed() {}
+        self.ecs.run();
         self
     }
 }
 
-impl<const N: usize> EcsEntry for Acttey<N> {
+impl EcsEntry for Acttey {
     fn add_system<T, Sys>(
         &mut self,
         desc: T,
@@ -91,7 +94,7 @@ impl<const N: usize> EcsEntry for Acttey<N> {
         WithResult::new(self, res)
     }
 
-    fn unregister_entity<C>(&mut self) -> WithResult<&mut Self, EntityContainer, EcsError>
+    fn unregister_entity<C>(&mut self) -> WithResult<&mut Self, Box<dyn ContainEntity>, EcsError>
     where
         C: Components,
     {
@@ -116,22 +119,22 @@ impl<const N: usize> EcsEntry for Acttey<N> {
         WithResult::new(self, res)
     }
 
-    fn register_resource<T>(
+    fn add_resource<T>(
         &mut self,
         desc: T,
     ) -> WithResult<&mut Self, ResourceIndex, EcsError<ResourceDesc>>
     where
         T: Into<ResourceDesc>,
     {
-        let res = self.ecs.register_resource(desc).take();
+        let res = self.ecs.add_resource(desc).take();
         WithResult::new(self, res)
     }
 
-    fn unregister_resource<R>(&mut self) -> WithResult<&mut Self, Option<Box<dyn Any>>, EcsError>
+    fn remove_resource<R>(&mut self) -> WithResult<&mut Self, Option<R>, EcsError>
     where
         R: Resource,
     {
-        let res = self.ecs.unregister_resource::<R>().take();
+        let res = self.ecs.remove_resource::<R>().take();
         WithResult::new(self, res)
     }
 
@@ -156,10 +159,13 @@ impl<const N: usize> EcsEntry for Acttey<N> {
         self.ecs.get_resource_index::<R>()
     }
 
-    fn execute_commands(
+    fn execute_commands<T>(
         &mut self,
-        cmds: impl Commands,
-    ) -> WithResult<&mut Self, (), Box<dyn Error + Send + Sync + 'static>> {
+        cmds: T,
+    ) -> WithResult<&mut Self, (), Box<dyn Error + Send + Sync + 'static>>
+    where
+        T: HelpExecuteManyCommands,
+    {
         let res = self.ecs.execute_commands(cmds).take();
         WithResult::new(self, res)
     }

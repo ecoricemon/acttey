@@ -4,6 +4,7 @@ help() {
     echo "Usage: $0 [commands] <argument>"
     echo "commands:"
     echo "  test <argument> : Run all tests."
+    echo "  doc             : Run doc test."
     echo "  exam <argument> : Run all examples."
     echo "  all <argument>  : Run all tests and examples."
     echo "  clean           : Clean project."
@@ -60,13 +61,6 @@ test() {
     local ret=0
 
     if [ $is_debug -eq 1 ]; then
-        print_title "Doc Test"
-        cargo test --doc --target $(get_host_triple)
-        ret=$?
-        if [ $ret -ne 0 ]; then
-            exit $ret
-        fi
-
         print_title "Test on Debug build"
         cargo test --tests --target $(get_host_triple)
         ret=$?
@@ -81,6 +75,17 @@ test() {
         if [ $ret -ne 0 ]; then
             exit $ret
         fi
+    fi
+}
+
+test_doc() {
+    local ret=0
+
+    print_title "Doc Test"
+    cargo test --doc --target $(get_host_triple)
+    ret=$?
+    if [ $ret -ne 0 ]; then
+        exit $ret
     fi
 }
 
@@ -159,6 +164,9 @@ case $cmd in
         else
             test_tsan
         fi
+        ;;
+    doc)
+        test_doc
         ;;
     exam)
         run_examples

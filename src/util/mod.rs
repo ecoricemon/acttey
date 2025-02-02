@@ -1,4 +1,6 @@
-pub use my_ecs::util::*;
+pub(crate) mod macros;
+
+use my_ecs::prelude::Or;
 use std::{borrow, borrow::Cow, cmp, fmt, hash, ops::Deref};
 
 pub trait AsOr<A: ?Sized, B: ?Sized> {

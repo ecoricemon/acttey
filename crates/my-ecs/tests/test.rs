@@ -208,14 +208,14 @@ fn test_mixed_reg_unreg_entity_resource() {
         _ => panic!()
     };
 
-    // Registers resources then adds failed systems again.
+    // Adds resources then adds failed systems again.
     // Expected behavior:
     // - rr_sys(Ra), rw_sys(Rb): Success
 
-    ecs.register_resource(Ra(10)).unwrap();
+    ecs.add_resource(Ra(10)).unwrap();
     ecs.add_system(SystemDesc::new().with_system(rr_sys)).unwrap();
 
-    ecs.register_resource(Rb(20)).unwrap();
+    ecs.add_resource(Rb(20)).unwrap();
     ecs.add_system(SystemDesc::new().with_system(rw_sys)).unwrap();
 
     // Runs ecs.
@@ -223,23 +223,23 @@ fn test_mixed_reg_unreg_entity_resource() {
     // - All systems are executed
 
     reset_vals(&r_val, &w_val, &rr_val, &rw_val, &ew_val_ac, &ew_val_bd);
-    ecs.run().schedule_all();
+    ecs.step();
     assert_eq!(*c.lock().unwrap(), [1, 1, 1, 1, 1]);
     assert_eq!(*rr_val.lock().unwrap(), 10);
     assert_eq!(*rw_val.lock().unwrap(), 20);
 
-    // Unregisters `Ra` and `Rb` then runs ecs.
+    // Removes `Ra` and `Rb` then runs ecs.
     // Expected behavior:
     // - rr_sys(Ra), rw_sys(Rb): Inactivated
 
-    ecs.unregister_resource::<Ra>().unwrap();
+    ecs.remove_resource::<Ra>().unwrap();
 
-    ecs.run().schedule_all();
+    ecs.step();
     assert_eq!(*c.lock().unwrap(), [2, 2, 1, 2, 2]);
 
-    ecs.unregister_resource::<Rb>().unwrap();
+    ecs.remove_resource::<Rb>().unwrap();
 
-    ecs.run().schedule_all();
+    ecs.step();
     assert_eq!(*c.lock().unwrap(), [3, 3, 1, 2, 3]);
 
     // Registers and adds `Ea` and `Eb` then runs ecs.
@@ -252,7 +252,7 @@ fn test_mixed_reg_unreg_entity_resource() {
     let eid_b = ecs.add_entity(ei_b, Eb { cb: Cb(2) }).unwrap();
 
     reset_vals(&r_val, &w_val, &rr_val, &rw_val, &ew_val_ac, &ew_val_bd);
-    ecs.run().schedule_all();
+    ecs.step();
     assert_eq!(*c.lock().unwrap(), [4, 4, 1, 2, 4]);
     assert_eq!(*r_val.lock().unwrap(), (1, 1)); // (sum, num) : [1]
     assert_eq!(*w_val.lock().unwrap(), (2, 1)); // (sum, num) : [2]
@@ -268,7 +268,7 @@ fn test_mixed_reg_unreg_entity_resource() {
     ecs.execute_command(|cmdr| cmdr.entity(eid_b).attach(Cd(4)).finish()).unwrap();
 
     reset_vals(&r_val, &w_val, &rr_val, &rw_val, &ew_val_ac, &ew_val_bd);
-    ecs.run().schedule_all();
+    ecs.step();
     assert_eq!(*c.lock().unwrap(), [5, 5, 1, 2, 5]);
     assert_eq!(*r_val.lock().unwrap(), (1, 1)); // (sum, num) : [1]
     assert_eq!(*w_val.lock().unwrap(), (2, 1)); // (sum, num) : [2]
@@ -280,7 +280,7 @@ fn test_mixed_reg_unreg_entity_resource() {
     // - No change
 
     reset_vals(&r_val, &w_val, &rr_val, &rw_val, &ew_val_ac, &ew_val_bd);
-    ecs.run().schedule_all();
+    ecs.step();
     assert_eq!(*c.lock().unwrap(), [6, 6, 1, 2, 6]);
     assert_eq!(*r_val.lock().unwrap(), (1, 1)); // (sum, num) : [1]
     assert_eq!(*w_val.lock().unwrap(), (2, 1)); // (sum, num) : [2]
@@ -295,7 +295,7 @@ fn test_mixed_reg_unreg_entity_resource() {
     ecs.unregister_entity::<(Cb, Cd)>().unwrap();
 
     reset_vals(&r_val, &w_val, &rr_val, &rw_val, &ew_val_ac, &ew_val_bd);
-    ecs.run().schedule_all();
+    ecs.step();
     assert_eq!(*c.lock().unwrap(), [7, 7, 1, 2, 7]);
     assert_eq!(*r_val.lock().unwrap(), (0, 0)); // (sum, num) : []
     assert_eq!(*w_val.lock().unwrap(), (0, 0)); // (sum, num) : []
@@ -329,7 +329,7 @@ fn test_async_wait() {
     let c_state = state.clone();
 
     ecs.add_system(SystemDesc::new().with_once(move || {
-        schedule_future(async move {
+        global::schedule_future(async move {
             // state 1: A bit of awaiting.
             *c_state.lock().unwrap() = 1;
             for millis in 1..10 {
@@ -351,7 +351,7 @@ fn test_async_wait() {
     .unwrap();
 
     // Waits until all tasks are executed completely.
-    while !ecs.run().schedule_all().wait_for_idle().is_completed() {}
+    ecs.run();
     drop(ecs);
 
     // `state` must have reached state 3.
@@ -368,7 +368,7 @@ fn test_async_abort() {
     let c_state = state.clone();
 
     ecs.add_system(SystemDesc::new().with_once(move || {
-        schedule_future(async move {
+        global::schedule_future(async move {
             // state 1: reachable.
             *c_state.lock().unwrap() = 1;
             for millis in 1..10_000 {
@@ -382,7 +382,7 @@ fn test_async_abort() {
     .unwrap();
 
     // Future task may be executed a few times.
-    ecs.run().schedule_all();
+    ecs.step();
 
     // Aborts remaining tasks.
     drop(ecs);

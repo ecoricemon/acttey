@@ -52,7 +52,7 @@ test('web test', async ({ page }) => {
   expect(errMsgs, errMsg).toHaveLength(expectedNumPanics);
 });
 
-// Creates a string of current tiem.
+// Creates a string of current time.
 function nowString() {
     const now = new Date(Date.now());
     const Y = now.getFullYear().toString();

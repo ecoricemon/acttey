@@ -39,9 +39,9 @@ pub fn web_panic_hook(_info: &PanicHookInfo<'_>) {
             payload,
         };
 
-        // Safety: Not a dangling pointer, and `SubContext` is not used.
-        // The corresponding thread was panicked a bit ago and
-        // it's running this function now.
+        // Safety: Not a dangling pointer, and `SubContext` is not used. The
+        // corresponding thread was panicked a bit ago, and it's running this
+        // function now.
         let cx = unsafe { ptr.as_ref() };
 
         // A sub worker was panicked while it was working on a task. That means

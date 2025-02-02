@@ -1,12 +1,40 @@
 use super::{sched::ctrl::SubContext, sys::system::SystemId};
-use crate::ds::prelude::*;
+use crate::ds::ManagedConstPtr;
 use std::{any::Any, fmt};
 
-pub trait Work {
-    /// If succeeded to wake the worker up, returns true.
-    fn unpark(&mut self, ctx: ManagedConstPtr<SubContext>) -> bool;
+pub mod prelude {
+    pub use super::Work;
+}
 
-    /// If succeeded to make the worker sleep, returns true.
+/// A trait for worker.
+///
+/// Worker should be able to `park` itself or `unpark`ed by a function call.
+/// When the worker is unparked, worker should get ready to handle messages
+/// using the passed [`SubContext`]. See an example code below.
+///
+/// ```ignore
+/// fn unpark(&mut self, cx: ManagedConstPtr<SubContext>) -> bool {
+///     // Sends `cx` to the associated worker.
+///     self.tx.send(cx).is_ok();
+/// }
+///
+/// fn worker_function(&self) {
+///     // Parking during idle.
+///     while let Ok(cx) = rx.recv() {
+///         // `SubContext` provides message handling function for you.
+///         SubContext::execute(cx);
+///     }
+/// }
+/// ```
+pub trait Work {
+    /// Wakes the associated worker then call [`SubContext::execute`] on the
+    /// worker, and then returns true if all is ok.
+    fn unpark(&mut self, cx: ManagedConstPtr<SubContext>) -> bool;
+
+    /// Blocks then returns true.
+    ///
+    /// It's highly recommended not to use long-term spin-lock because it may
+    /// last undefinitely.
     fn park(&mut self) -> bool {
         true
     }

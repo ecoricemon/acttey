@@ -1,7 +1,11 @@
 use super::select::{
     FilterInfo, FilterKey, FilteredRaw, SelectInfo, SelectKey, SelectedRaw, StoreSelectInfo,
 };
-use crate::{ds::prelude::*, ecs::resource::ResourceKey, util::TakeRecur};
+use crate::{
+    ds::{ATypeId, Borrowed, ManagedConstPtr, ManagedMutPtr, NonNullExt},
+    ecs::resource::ResourceKey,
+    util::TakeRecur,
+};
 use my_ecs_macros::repeat_macro;
 use std::{
     fmt,
@@ -190,7 +194,10 @@ pub trait EntQueryMut: 'static {
     }
 }
 
-/// A shallow wrapper struct for the [`Query::Output`].
+/// Read request for a set of components.
+///
+/// This is a part of a system request, clients need to declare the whole system
+/// request. Take a look at [`request`](crate::prelude::request).
 #[repr(transparent)]
 pub struct Read<'buf, R: Query>(pub(crate) R::Output<'buf>);
 
@@ -219,7 +226,10 @@ where
     }
 }
 
-/// A shallow wrapper struct for the [`QueryMut::Output`].
+/// Write request for a set of components.
+///
+/// This is a part of a system request, clients need to declare the whole system
+/// request. Take a look at [`request`](crate::prelude::request).
 #[repr(transparent)]
 pub struct Write<'buf, W: QueryMut>(pub(crate) W::Output<'buf>);
 
@@ -254,7 +264,10 @@ where
     }
 }
 
-/// A shallow wrapper struct for the [`ResQuery::Output`].
+/// Read request for a set of resources.
+///
+/// This is a part of a system request, clients need to declare the whole system
+/// request. Take a look at [`request`](crate::prelude::request).
 #[repr(transparent)]
 pub struct ResRead<'buf, RR: ResQuery>(pub(crate) RR::Output<'buf>);
 
@@ -283,7 +296,10 @@ where
     }
 }
 
-/// A shallow wrapper struct for the [`ResQueryMut::Output`].
+/// Write request for a set of resources.
+///
+/// This is a part of a system request, clients need to declare the whole system
+/// request. Take a look at [`request`](crate::prelude::request).
 #[repr(transparent)]
 pub struct ResWrite<'buf, RW: ResQueryMut>(pub(crate) RW::Output<'buf>);
 
@@ -318,7 +334,10 @@ where
     }
 }
 
-/// A shallow wrapper struct for the [`EntQueryMut::Output`].
+/// Write request for a set of entity container.
+///
+/// This is a part of a system request, clients need to declare the whole system
+/// request. Take a look at [`request`](crate::prelude::request).
 #[repr(transparent)]
 pub struct EntWrite<'buf, EW: EntQueryMut>(pub(crate) EW::Output<'buf>);
 
@@ -564,7 +583,7 @@ macro_rules! impl_res_query {
                 sys::query::{ResQuery, ResQueryInfo},
                 resource::Resource,
             },
-            ds::{borrow::Borrowed, ptr::{ManagedConstPtr, ManagedMutPtr}},
+            ds::{Borrowed, ManagedConstPtr, ManagedMutPtr, TypeIdExt},
         };
         use std::any::type_name;
         use paste::paste;
@@ -591,7 +610,7 @@ macro_rules! impl_res_query {
                     #[cfg(feature = "check")]
                     {
                         $(
-                            let ptr: NonNullExt<_> = _buf[$i].inner();
+                            let ptr: NonNullExt<_> = _buf[$i].as_nonnullext();
                             let lhs: &TypeIdExt = ptr.get_type().unwrap();
 
                             let rkey: ResourceKey = [<A $i>]::key();
@@ -602,12 +621,12 @@ macro_rules! impl_res_query {
                     }
 
                     #[allow(clippy::unused_unit)]
-                    ( $(
-                        _buf[$i].map_ref(|ptr| {
-                            let ptr: NonNullExt<[<A $i>]> = ptr.inner().cast();
-                            unsafe { ptr.as_ref() }
-                        })
-                    ),* )
+                    ( $( {
+                        let ptr: NonNullExt<[<A $i>]> = _buf[$i].as_nonnullext().cast();
+                        // Safety: Infallible, Plus output is bounded by input's
+                        // 'buf lifetime
+                        unsafe { ptr.as_ref() } // &'buf mut A#
+                    } ),* )
                 }
             }
         }
@@ -632,35 +651,23 @@ macro_rules! impl_res_query {
                     // But resource pointer must have the type info.
                     // So we can check if the pointers are correctly given.
                     #[cfg(feature = "check")]
-                    {
-                        $(
-                            let ptr: NonNullExt<_> = _buf[$i].inner();
-                            let lhs: &TypeIdExt = ptr.get_type().unwrap();
+                    { $(
+                        let ptr: NonNullExt<_> = _buf[$i].as_nonnullext();
+                        let lhs: &TypeIdExt = ptr.get_type().unwrap();
 
-                            let rkey: ResourceKey = [<A $i>]::key();
-                            let rhs: &TypeIdExt = rkey.get_inner();
+                        let rkey: ResourceKey = [<A $i>]::key();
+                        let rhs: &TypeIdExt = rkey.get_inner();
 
-                            assert_eq!(lhs, rhs);
-                        )*
-                    }
+                        assert_eq!(lhs, rhs);
+                    )* }
 
                     #[allow(clippy::unused_unit)]
-                    ( $(
-                        // Splitting slice via `split_first_mut` is quite tiresome task.
-                        // Anyway, we're connecting lifetime from each input to output,
-                        // so no problem.
-                        // Safety: Infallible.
-                        {
-                            let x: *mut Borrowed<ManagedMutPtr<u8>>
-                                = &mut _buf[$i] as *mut _;
-                            let x: &mut Borrowed<ManagedMutPtr<u8>>
-                                = unsafe { x.as_mut().unwrap_unchecked() };
-                            x.map_mut(|ptr| {
-                                let mut ptr: NonNullExt<[<A $i>]> = ptr.inner().cast();
-                                unsafe { ptr.as_mut() }
-                            })
-                        }
-                    ),* )
+                    ( $( {
+                        let mut ptr: NonNullExt<[<A $i>]> = _buf[$i].as_nonnullext().cast();
+                        // Safety: Infallible, Plus output is bounded by input's
+                        // 'buf lifetime
+                        unsafe { ptr.as_mut() } // &'buf mut A#
+                    } ),* )
                 }
             }
         }
@@ -683,13 +690,13 @@ macro_rules! impl_ent_query {
                     storage::EntityContainerRef
                 },
             },
-            ds::borrow::Borrowed,
+            ds::Borrowed,
         };
         use std::any::type_name;
         use paste::paste;
 
         // Implements `EntQueryMut` for (A0, A1, ...).
-        paste!{
+        paste! {
             #[allow(unused_parens)]
             #[allow(private_interfaces, private_bounds)]
             impl<$([<A $i>]: Filter),*> EntQueryMut for ( $([<A $i>]),* ) {

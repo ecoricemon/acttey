@@ -110,8 +110,8 @@ pub fn as_wgsl(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attr: Attribute = parse_quote! { #[repr(align(#align))] };
     item_struct.attrs.push(attr);
 
-    // Implements `my_wgsl::AsStruct`
-    let impl_as_struct = impl_as_struct(st_ident, &finfos);
+    // Implements `my_wgsl::CreateStruct`
+    let impl_create_struct = impl_create_struct(st_ident, &finfos);
 
     // Implements `From` for &[u8] if the struct doesn't contain runtime sized field.
     let is_last_zero_sized = finfos
@@ -130,7 +130,7 @@ pub fn as_wgsl(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     TokenStream::from(quote! {
         #item_struct
-        #impl_as_struct
+        #impl_create_struct
         #impl_from_for_u8_slice
         #validate
     })
@@ -143,7 +143,7 @@ fn push_pad_field(fields: &mut Vec<Field>, pad_size: u32) {
     fields.push(pad_field);
 }
 
-fn impl_as_struct(st_ident: &Ident, finfos: &[FieldInfo]) -> TokenStream2 {
+fn impl_create_struct(st_ident: &Ident, finfos: &[FieldInfo]) -> TokenStream2 {
     // For example, #[ignore] field is supposed to be hidden from WGSL.
     let finfos = finfos.iter().filter(|finfo| !finfo.is_wgsl_hidden());
 
@@ -155,16 +155,16 @@ fn impl_as_struct(st_ident: &Ident, finfos: &[FieldInfo]) -> TokenStream2 {
     let field_types: Vec<_> = finfos.map(|finfo| finfo.ty.name()).collect();
 
     quote! {
-        impl my_wgsl::ToIdent for #st_ident {
-            fn to_ident() -> String {
+        impl my_wgsl::CreateIdent for #st_ident {
+            fn create_ident() -> String {
                 stringify!(#st_ident).to_owned()
             }
         }
 
-        impl my_wgsl::AsStruct for #st_ident {
-            fn as_struct() -> my_wgsl::Struct {
+        impl my_wgsl::CreateStruct for #st_ident {
+            fn create_struct() -> my_wgsl::Struct {
                 my_wgsl::Struct {
-                    ident: <Self as my_wgsl::ToIdent>::to_ident(),
+                    ident: <Self as my_wgsl::CreateIdent>::create_ident(),
                     members: vec![#(
                         my_wgsl::StructMember {
                             attrs: my_wgsl::Attributes(vec![#(
@@ -220,16 +220,18 @@ fn validate_field(finfo: &FieldInfo, is_last: bool, is_uniform: bool) {
         // ref: https://www.w3.org/TR/WGSL/#address-space-layout-constraints
         let align = finfo.align.get();
         if is_uniform {
-            assert!(
-                align % 16 == 0,
+            assert_eq!(
+                align % 16,
+                0,
                 "Uniform address space requires array to have a multiple of 16 alignment"
             );
         }
         // In array, array's size must be a multiple of array/element alignment.
         if let Some(size) = finfo.size {
             let size = size.get();
-            assert!(
-                size % align == 0,
+            assert_eq!(
+                size % align,
+                0,
                 "size of fixed sized array must be a multiple of its alignment"
             );
         }
@@ -261,8 +263,8 @@ fn validate_wgsl_struct(
                 );
             )*
 
-            // Validates the whole struct's size
-            // when we know the exact size of the struct.
+            // Validates the whole size of the struct if we know the exact size
+            // of it.
             if !#is_last_zero_sized {
                 assert!(
                     #st_size as usize == std::mem::size_of::<#st_ident>(),
@@ -270,7 +272,7 @@ fn validate_wgsl_struct(
                 );
             }
 
-            // Validates the whole struct's alignment.
+            // Validates the whole alignment of the struct.
             assert!(
                 #st_align as usize == std::mem::align_of::<#st_ident>(),
                 concat!("calculated struct alignment(", #st_align_str, ") doesn't match")
@@ -437,7 +439,7 @@ enum FieldAttribute {
     Size(NonZeroU32),
     Align(NonZeroU32),
     WgslType(NestedType),
-    /// Outer attribute name and inner argumnet.
+    /// Outer attribute name and inner argument.
     Else(String, String),
     Ignore,
 }
@@ -446,18 +448,18 @@ impl FieldAttribute {
     fn from(attr: &Attribute) -> Option<Self> {
         // #[size(n)]
         if attr.path().is_ident(AttributeKind::Size.as_str()) {
-            let errmsg = "size expects a non zero number";
-            let lit: LitInt = attr.parse_args().expect(errmsg);
-            let v = lit.base10_parse::<u32>().expect(errmsg);
-            let v = NonZeroU32::new(v).expect(errmsg);
+            let reason = "size expects a non zero number";
+            let lit: LitInt = attr.parse_args().expect(reason);
+            let v = lit.base10_parse::<u32>().expect(reason);
+            let v = NonZeroU32::new(v).expect(reason);
             Some(Self::Size(v))
         }
         // #[align(n)]
         else if attr.path().is_ident(AttributeKind::Align.as_str()) {
-            let errmsg = "align expects a non zero number";
-            let lit: LitInt = attr.parse_args().expect(errmsg);
-            let v = lit.base10_parse::<u32>().expect(errmsg);
-            let v = NonZeroU32::new(v).expect(errmsg);
+            let reason = "align expects a non zero number";
+            let lit: LitInt = attr.parse_args().expect(reason);
+            let v = lit.base10_parse::<u32>().expect(reason);
+            let v = NonZeroU32::new(v).expect(reason);
             Some(Self::Align(v))
         }
         // #[wgsl_type(type)]
@@ -552,7 +554,7 @@ struct NestedType {
     /// Type name.
     outer: String,
 
-    /// Comma seperated generic types inside brackets <..>.
+    /// Comma separated generic types inside brackets <...>.
     generics: Vec<Self>,
 
     /// Type size in bytes.
@@ -920,7 +922,7 @@ fn round_up_by_align(align: u32, value: u32) -> u32 {
     (value + mask) & (!mask)
 }
 
-/// Implements `my_wgsl::ToIdent` and `my_wgsl::AsStruct` from literal struct.
+/// Implements `my_wgsl::CreateIdent` and `my_wgsl::CreateStruct` from literal struct.
 ///
 /// # Examples
 ///
@@ -946,10 +948,10 @@ pub fn wgsl_struct_from_str(item: TokenStream) -> TokenStream {
     let value = item_lit.value();
     let item: TokenStream2 = value.parse().unwrap();
     let item: TokenStream = item.into();
-    wgsl_struct(TokenStream::new(), item)
+    _wgsl_struct(TokenStream::new(), item)
 }
 
-/// Implements `my_wgsl::ToIdent` and `my_wgsl::AsStruct` for the struct.
+/// Implements `my_wgsl::CreateIdent` and `my_wgsl::CreateStruct` for the struct.
 ///
 /// # Examples
 ///
@@ -964,6 +966,10 @@ pub fn wgsl_struct_from_str(item: TokenStream) -> TokenStream {
 /// ```
 #[proc_macro_attribute]
 pub fn wgsl_struct(attr: TokenStream, item: TokenStream) -> TokenStream {
+    _wgsl_struct(attr, item)
+}
+
+fn _wgsl_struct(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Doesn't allow any attributes.
     assert!(attr.is_empty(), "use this macro without attributes");
 
@@ -978,15 +984,15 @@ pub fn wgsl_struct(attr: TokenStream, item: TokenStream) -> TokenStream {
         field.attrs.clear();
     }
 
-    // Implements `my_wgsl::AsStruct`
-    let impl_as_struct = impl_as_struct(st_ident, &finfos);
+    // Implements `my_wgsl::CreateStruct`
+    let impl_create_struct = impl_create_struct(st_ident, &finfos);
 
     TokenStream::from(quote! {
         #[allow(dead_code)] // Allows dead_code because we actually don't use this.
         #[allow(non_snake_case)] // Allows non snake case.
         #item_struct
 
-        #impl_as_struct
+        #impl_create_struct
     })
 }
 
@@ -1017,7 +1023,7 @@ pub fn wgsl_fn_from_str(item: TokenStream) -> TokenStream {
     let value = item_lit.value();
     let item: TokenStream2 = value.parse().unwrap();
     let item: TokenStream = item.into();
-    wgsl_fn(item)
+    _wgsl_fn(item)
 }
 
 /// Generates `my_wgsl::Function` from the given code.
@@ -1041,6 +1047,10 @@ pub fn wgsl_fn_from_str(item: TokenStream) -> TokenStream {
 /// ```
 #[proc_macro]
 pub fn wgsl_fn(item: TokenStream) -> TokenStream {
+    _wgsl_fn(item)
+}
+
+fn _wgsl_fn(item: TokenStream) -> TokenStream {
     let item_fn = parse_macro_input!(item as Function);
     let ident = &item_fn.ident;
 
@@ -1340,9 +1350,9 @@ fn move_to_punct(input: &ParseBuffer, targets: &[char], buf: &mut Vec<Statement>
                     // If the `tt` is a `Group` like {..},
                     TokenTree2::Group(group) => {
                         match group.delimiter() {
-                            // {..} is a sort of `CompoundStatement`, so parse along it.
+                            // {...} is a sort of `CompoundStatement`, so parse along it.
                             Delimiter2::Brace => {
-                                // `group.stream()` returns inner content of {..},
+                                // `group.stream()` returns inner content of {...},
                                 // so add {} again to parse as `CompoundStatement`.
                                 let inner = group.stream();
                                 let comp_stmt = TokenStream::from(quote! {{#inner}});

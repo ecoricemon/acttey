@@ -1,3 +1,21 @@
+//! Utility macros.
+
+/// Returns type name from the given value using
+/// [`type_name`](std::any::type_name).
+///
+/// # Examples
+///
+/// ```
+/// use my_ecs::type_name;
+///
+/// fn foo() {}
+/// struct Bar;
+/// let baz = 0;
+///
+/// println!("{}", type_name!(foo));
+/// println!("{}", type_name!(Bar));
+/// println!("{}", type_name!(baz));
+/// ```
 #[macro_export]
 macro_rules! type_name {
     ($e:expr) => {{
@@ -13,26 +31,30 @@ macro_rules! type_name {
     }};
 }
 
+/// Prints out the given string regardless of build target.
+///
+/// If build target is `wasm32`, this macro calls `web_sys::console::log_1`.
+/// Otherwise [`println`] is called.
 #[macro_export]
-macro_rules! debug_format {
-    ($($t:tt)*) => {{
-        #[cfg(debug_assertions)]
+macro_rules! log {
+    ($($t:tt)*) => {
+        #[cfg(target_arch = "wasm32")]
         {
-            format!($($t)*)
+            $crate::prelude::web_util::console_log(format!($($t)*))
         }
-        #[cfg(not(debug_assertions))]
+        #[cfg(not(target_arch = "wasm32"))]
         {
-            String::new()
+            println!($($t)*)
         }
-    }};
+    }
 }
 
 /// Implements [`From`] and [`TryFrom`] for the enum.
 ///
 /// # Examples
 ///
-/// ```
-/// # use my_ecs::impl_from_for_enum;
+/// ```ignore
+/// # use my_ecs::util::macros::impl_from_for_enum;
 /// # use std::borrow::Cow;
 ///
 /// enum MyEnum<'a, 'b: 'a, X, Y: Send + Sync, const N: usize, const M: usize> {
@@ -49,7 +71,6 @@ macro_rules! debug_format {
 /// );
 ///
 /// ```
-#[macro_export]
 macro_rules! impl_from_for_enum {
     // ()
     (
@@ -293,49 +314,8 @@ macro_rules! impl_from_for_enum {
         }
     };
 }
+pub(crate) use impl_from_for_enum;
 
-#[macro_export]
-macro_rules! log {
-    ($($t:tt)*) => {
-        #[cfg(target_arch = "wasm32")]
-        {
-            $crate::util::macros::console_log(format!($($t)*))
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            println!($($t)*)
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn console_log(s: String) {
-    web_sys::console::log_1(&s.into());
-}
-
-/// Sometimes, we want exiting early in a function due to deeply nested statements.
-/// In that case, you can use this macro to hide boilerplate code.
-//
-// TODO: I heard Rust made something like this...
-#[macro_export]
-macro_rules! unwrap_or {
-    ($rhs:expr) => {
-        if let Some(x) = $rhs {
-            x
-        } else {
-            return;
-        }
-    };
-    ($rhs:expr => $($else:tt)*) => {
-        if let Some(x) = $rhs {
-            x
-        } else {
-            $($else)*
-        }
-    };
-}
-
-#[macro_export]
 macro_rules! impl_into_iterator_body_for_parallel {
     ($item:ty, $to:ty) => {
         type Item = $item;
@@ -347,9 +327,9 @@ macro_rules! impl_into_iterator_body_for_parallel {
         }
     };
 }
+pub(crate) use impl_into_iterator_body_for_parallel;
 
 // bound matching pattern.
-#[macro_export]
 macro_rules! impl_into_iterator_for_parallel {
     // ()
     (
@@ -359,7 +339,7 @@ macro_rules! impl_into_iterator_for_parallel {
     ) => {
         impl IntoIterator for $for
         {
-            $crate::impl_into_iterator_body_for_parallel!($item, $to);
+            $crate::util::macros::impl_into_iterator_body_for_parallel!($item, $to);
         }
     };
     // (consts)
@@ -375,7 +355,7 @@ macro_rules! impl_into_iterator_for_parallel {
             $( $c_id ),*
         >
         {
-            $crate::impl_into_iterator_body_for_parallel!($item, $to);
+            $crate::util::macros::impl_into_iterator_body_for_parallel!($item, $to);
         }
     };
     // (bounds, ..)
@@ -394,7 +374,7 @@ macro_rules! impl_into_iterator_for_parallel {
             $(, $( $c_id ),* )?
         >
         {
-            $crate::impl_into_iterator_body_for_parallel!($item, $to);
+            $crate::util::macros::impl_into_iterator_body_for_parallel!($item, $to);
         }
     };
     // (lifetimes, ..)
@@ -416,12 +396,12 @@ macro_rules! impl_into_iterator_for_parallel {
             $(, $( $c_id ),* )?
         >
         {
-            $crate::impl_into_iterator_body_for_parallel!($item, $to);
+            $crate::util::macros::impl_into_iterator_body_for_parallel!($item, $to);
         }
     };
 }
+pub(crate) use impl_into_iterator_for_parallel;
 
-#[macro_export]
 macro_rules! impl_parallel_iterator_body {
     ($item:ty) => {
         type Item = $item;
@@ -435,8 +415,8 @@ macro_rules! impl_parallel_iterator_body {
         }
     };
 }
+pub(crate) use impl_parallel_iterator_body;
 
-#[macro_export]
 macro_rules! impl_indexed_parallel_iterator_body {
     () => {
         #[inline]
@@ -458,9 +438,9 @@ macro_rules! impl_indexed_parallel_iterator_body {
         }
     };
 }
+pub(crate) use impl_indexed_parallel_iterator_body;
 
 // bound matching pattern.
-#[macro_export]
 macro_rules! impl_parallel_iterator {
     // ()
     (
@@ -468,12 +448,12 @@ macro_rules! impl_parallel_iterator {
         "item" = $item:ty $(;)?
     ) => {
         impl rayon::iter::ParallelIterator for $for {
-            $crate::impl_parallel_iterator_body!($item);
+            $crate::util::macros::impl_parallel_iterator_body!($item);
         }
 
         impl rayon::iter::IndexedParallelIterator for $for
         {
-            $crate::impl_indexed_parallel_iterator_body!();
+            $crate::util::macros::impl_indexed_parallel_iterator_body!();
         }
     };
     // (consts)
@@ -487,7 +467,7 @@ macro_rules! impl_parallel_iterator {
         > rayon::iter::ParallelIterator for $for<
             $( $c_id ),*
         > {
-            $crate::impl_parallel_iterator_body!($item);
+            $crate::util::macros::impl_parallel_iterator_body!($item);
         }
 
         impl<
@@ -496,7 +476,7 @@ macro_rules! impl_parallel_iterator {
             $( $c_id ),*
         >
         {
-            $crate::impl_indexed_parallel_iterator_body!();
+            $crate::util::macros::impl_indexed_parallel_iterator_body!();
         }
     };
     // (bounds, ..)
@@ -513,7 +493,7 @@ macro_rules! impl_parallel_iterator {
             $( $b_id ),*
             $(, $( $c_id ),* )?
         > {
-            $crate::impl_parallel_iterator_body!($item);
+            $crate::util::macros::impl_parallel_iterator_body!($item);
         }
 
         impl<
@@ -524,7 +504,7 @@ macro_rules! impl_parallel_iterator {
             $(, $( $c_id ),* )?
         >
         {
-            $crate::impl_indexed_parallel_iterator_body!();
+            $crate::util::macros::impl_indexed_parallel_iterator_body!();
         }
     };
     // (lifetimes, ..)
@@ -544,7 +524,7 @@ macro_rules! impl_parallel_iterator {
             $(, $( $b_id ),* )?
             $(, $( $c_id ),* )?
         > {
-            $crate::impl_parallel_iterator_body!($item);
+            $crate::util::macros::impl_parallel_iterator_body!($item);
         }
 
         impl<
@@ -557,12 +537,12 @@ macro_rules! impl_parallel_iterator {
             $(, $( $c_id ),* )?
         >
         {
-            $crate::impl_indexed_parallel_iterator_body!();
+            $crate::util::macros::impl_indexed_parallel_iterator_body!();
         }
     };
 }
+pub(crate) use impl_parallel_iterator;
 
-#[macro_export]
 macro_rules! impl_unindexed_producer_body {
     ($item:ty) => {
         type Item = $item;
@@ -583,9 +563,9 @@ macro_rules! impl_unindexed_producer_body {
         }
     };
 }
+pub(crate) use impl_unindexed_producer_body;
 
 // bound matching pattern.
-#[macro_export]
 macro_rules! impl_unindexed_producer {
     // ()
     (
@@ -594,7 +574,7 @@ macro_rules! impl_unindexed_producer {
     ) => {
         impl rayon::iter::plumbing::UnindexedProducer for $for
         {
-            $crate::impl_unindexed_producer_body!($item);
+            $crate::util::macros::impl_unindexed_producer_body!($item);
         }
     };
     // (consts)
@@ -609,7 +589,7 @@ macro_rules! impl_unindexed_producer {
             $( $c_id ),*
         >
         {
-            $crate::impl_unindexed_producer_body!($item);
+            $crate::util::macros::impl_unindexed_producer_body!($item);
         }
     };
     // (bounds, ..)
@@ -627,7 +607,7 @@ macro_rules! impl_unindexed_producer {
             $(, $( $c_id ),* )?
         >
         {
-            $crate::impl_unindexed_producer_body!($item);
+            $crate::util::macros::impl_unindexed_producer_body!($item);
         }
     };
     // (lifetimes, ..)
@@ -648,7 +628,22 @@ macro_rules! impl_unindexed_producer {
             $(, $( $c_id ),* )?
         >
         {
-            $crate::impl_unindexed_producer_body!($item);
+            $crate::util::macros::impl_unindexed_producer_body!($item);
         }
     };
 }
+pub(crate) use impl_unindexed_producer;
+
+macro_rules! debug_format {
+    ($($t:tt)*) => {{
+        #[cfg(debug_assertions)]
+        {
+            format!($($t)*)
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            String::new()
+        }
+    }};
+}
+pub(crate) use debug_format;

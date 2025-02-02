@@ -6,6 +6,7 @@ help() {
     echo "Usage: $0 [commands] <argument>"
     echo "commands:"
     echo "  test <argument> : Run all tests."
+    echo "  doc             : Run doc test."
     echo "  exam <argument> : Run all examples."
     echo "  all <argument>  : Run all tests and examples."
     echo "  clean           : Clean project."
@@ -62,13 +63,6 @@ test() {
     local ret=0
 
     if [ $is_debug -eq 1 ]; then
-        print_title "Doc Test"
-        cargo test --doc --target $(get_host_triple)
-        ret=$?
-        if [ $ret -ne 0 ]; then
-            exit $ret
-        fi
-
         print_title "Test on Debug build"
         cargo test --tests -F check,stat --target $(get_host_triple)
         ret=$?
@@ -114,6 +108,17 @@ test_tsan() {
     print_title "Test with thread sanitizer"
     RUSTFLAGS='-Zsanitizer=thread' \
         cargo +nightly-2024-06-20 run --example tsan --target $(get_host_triple)
+    ret=$?
+    if [ $ret -ne 0 ]; then
+        exit $ret
+    fi
+}
+
+test_doc() {
+    local ret=0
+    
+    print_title "Doc Test"
+    cargo test --doc --target $(get_host_triple)
     ret=$?
     if [ $ret -ne 0 ]; then
         exit $ret
@@ -206,10 +211,14 @@ case $cmd in
             test_tsan
         fi
         ;;
+    doc)
+        test_doc
+        ;;
     exam)
         run_examples
         ;;
     all)
+        test_doc
         test
         run_examples
         ;;

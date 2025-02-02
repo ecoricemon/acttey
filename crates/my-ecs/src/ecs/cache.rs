@@ -13,7 +13,7 @@ use super::{
     },
     wait::{WaitIndices, WaitRetryIndices},
 };
-use crate::ds::prelude::*;
+use crate::ds::{AsDedupVec, DedupVec, NonNullExt};
 use std::{
     cell::{Ref, RefCell},
     collections::{HashMap, HashSet},
@@ -30,9 +30,9 @@ use std::{
 /// | System activation       | Creates a cache item   |
 /// | System removal          | Removes a cache item   |
 /// | Entity registration     | May update cache items |
-/// | Entity unregistration   | May update cache items |
+/// | Entity removal          | May update cache items |
 /// | Resource registration   | None                   |
-/// | Resource unregistration | May remove cache items |
+/// | Resource removal        | May remove cache items |
 ///
 /// Do not forget to call proper methods for events.
 #[derive(Debug)]
@@ -115,7 +115,7 @@ where
         /// Creates 'wait indices' and 'buffer for filtered data' for a query.
         ///
         /// - 'Wait indices' are a set of entity and component index pairs.
-        ///   We can find specific components requered by the query using them.
+        ///   We can find specific components requested by the query using them.
         ///   They are a part of [`WaitIndices`].
         ///
         /// - 'Buffer for filtered data' is a set of buffer that hold component data.
@@ -143,7 +143,7 @@ where
         /// Creates 'wait indices' for a resource query.
         ///
         /// - 'Wait indices' are a set of resource indices.
-        ///   We can find specific resources requered by the resource query using them.
+        ///   We can find specific resources requested by the resource query using them.
         ///   They are a part of [`WaitIndices`].
         fn cache_res_query<S>(
             rqinfo: &ResQueryInfo,
@@ -164,8 +164,8 @@ where
         /// Creates 'wait indices' for an entity query.
         ///
         /// - 'Wait indices' are a set of entity indices.
-        ///   We can find specific entity contianers requered by the entity query using them.
-        ///   They are a part of [`WaitIndices`].
+        ///   We can find specific entity containers requested by the entity
+        ///   query using them. They are a part of [`WaitIndices`].
         fn cache_ent_query<S>(
             eqinfo: &EntQueryInfo,
             ent_stor: &EntityStorage<S>,
@@ -189,7 +189,7 @@ where
     /// Removes system's cache item.
     ///
     /// If the cache item was already removed by other events like resource
-    /// unregistration, nothing takes place.
+    /// removal, nothing takes place.
     ///
     /// You can call this method before or after you activate the system.
     pub(crate) fn remove_item(&mut self, sid: SystemId) {
@@ -202,7 +202,7 @@ where
     }
 
     /// Updates related cache items for the newly registered entity. In this
-    /// method, operations below can heppen.
+    /// method, operations below can happen.
     /// - Read and write queries in cache items can be updated.
     ///
     /// Note that you must call this method after you register the entity.
@@ -531,7 +531,7 @@ pub(super) struct CacheNotiMap<S> {
     /// A mapping between systems and their read query targets.
     ///
     /// Key: Target component key that system's read query is requesting.
-    /// Value: Pair of system id and index.
+    /// Value: A pair of system id and index.
     /// - Systems that need to be notified for reg/unreg of the component.
     /// - Index to a specific [`Select`](crate::ecs::sys::select::Select) in a
     ///   read query. For example, in a read query (S0, S1, S2), 0, 1, and 2
@@ -541,7 +541,7 @@ pub(super) struct CacheNotiMap<S> {
     /// A mapping between systems and their write query targets.
     ///
     /// Key: Target component key that system's write query is requesting.
-    /// Value: Pair of system id and index.
+    /// Value: A pair of system id and index.
     /// - Systems that need to be notified for reg/unreg of the component.
     /// - Index to a specific [`Select`](crate::ecs::sys::select::Select) in a
     ///   write query. For example, in a write query (S0, S1, S2), 0, 1, and 2
@@ -1030,10 +1030,10 @@ impl CacheItem {
 }
 
 /// Cache storage at a time.
-/// This dosen't allow new item to be registered,
+/// This does not allow new item to be registered,
 /// but you can read or write each item in the cache.
 #[derive(Debug)]
-pub(super) struct RefreshCacheStorage<'a, S> {
+pub(crate) struct RefreshCacheStorage<'a, S> {
     pub(super) cache_stor: &'a mut CacheStorage<S>,
     pub(super) ent_stor: &'a mut EntityStorage<S>,
     pub(super) res_stor: &'a mut ResourceStorage<S>,
@@ -1043,7 +1043,7 @@ impl<'a, S> RefreshCacheStorage<'a, S>
 where
     S: BuildHasher,
 {
-    pub(crate) fn new(
+    pub(super) fn new(
         cache_stor: &'a mut CacheStorage<S>,
         ent_stor: &'a mut EntityStorage<S>,
         res_stor: &'a mut ResourceStorage<S>,
@@ -1055,11 +1055,11 @@ where
         }
     }
 
-    pub(crate) fn get(&self, sid: &SystemId) -> Option<&CacheItem> {
+    pub(super) fn get(&self, sid: &SystemId) -> Option<&CacheItem> {
         self.cache_stor.items.get(sid).map(|(item, _sinfo)| item)
     }
 
-    pub(crate) fn get_mut(&mut self, sid: &SystemId) -> Option<RefreshCacheItem<S>> {
+    pub(super) fn get_mut(&mut self, sid: &SystemId) -> Option<RefreshCacheItem<S>> {
         self.cache_stor
             .items
             .get_mut(sid)
@@ -1295,8 +1295,8 @@ mod tests {
 
         // Res: None -> R0, R1
         // Cache: None
-        res_stor.register(ResourceDesc::new().with_owned(R0(0))).unwrap();
-        res_stor.register(ResourceDesc::new().with_owned(R1(0))).unwrap();
+        res_stor.add(ResourceDesc::new().with_owned(R0(0))).unwrap();
+        res_stor.add(ResourceDesc::new().with_owned(R1(0))).unwrap();
         let sys = FnSystem::from(|_: ResRead<(R0, R1)>| {});
         let sdata = sys.into_data();
 
@@ -1305,23 +1305,23 @@ mod tests {
         // Cache: None -> Sys -> None
         cache_stor.create_item(&sdata, ent_stor, res_stor);
         cache_stor.update_by_resource_unreg(&ResourceKey::of::<R0>(), |_| {});
-        res_stor.unregister(&ResourceKey::of::<R0>()).unwrap();
+        res_stor.remove(&ResourceKey::of::<R0>()).unwrap();
         assert!(cache_stor.items.is_empty());
         assert!(cache_stor.noti.is_empty());
 
         // 2. With R0 and R1, Del R1: Removed item
         // Res: R1 -> R0, R1 -> R0
         // Cache: None -> Sys -> None
-        res_stor.register(ResourceDesc::new().with_owned(R0(0))).unwrap();
+        res_stor.add(ResourceDesc::new().with_owned(R0(0))).unwrap();
         cache_stor.create_item(&sdata, ent_stor, res_stor);
         cache_stor.update_by_resource_unreg(&ResourceKey::of::<R1>(), |_| {});
-        res_stor.unregister(&ResourceKey::of::<R1>()).unwrap();
+        res_stor.remove(&ResourceKey::of::<R1>()).unwrap();
         assert!(cache_stor.items.is_empty());
         assert!(cache_stor.noti.is_empty());
 
         // Clean up
-        res_stor.unregister(&ResourceKey::of::<R0>());
-        res_stor.unregister(&ResourceKey::of::<R1>());
+        res_stor.remove(&ResourceKey::of::<R0>());
+        res_stor.remove(&ResourceKey::of::<R1>());
         cache_stor.remove_item(sdata.id());
         assert!(cache_stor.items.is_empty());
         assert!(cache_stor.noti.is_empty());
@@ -1339,8 +1339,8 @@ mod tests {
 
         // Res: None -> R0, R1
         // Cache: None
-        res_stor.register(ResourceDesc::new().with_owned(R0(0))).unwrap();
-        res_stor.register(ResourceDesc::new().with_owned(R1(0))).unwrap();
+        res_stor.add(ResourceDesc::new().with_owned(R0(0))).unwrap();
+        res_stor.add(ResourceDesc::new().with_owned(R1(0))).unwrap();
         let sys = FnSystem::from(|_: ResWrite<(R0, R1)>| {});
         let sdata = sys.into_data();
 
@@ -1349,23 +1349,23 @@ mod tests {
         // Cache: None -> Sys -> None
         cache_stor.create_item(&sdata, ent_stor, res_stor);
         cache_stor.update_by_resource_unreg(&ResourceKey::of::<R0>(), |_| {});
-        res_stor.unregister(&ResourceKey::of::<R0>()).unwrap();
+        res_stor.remove(&ResourceKey::of::<R0>()).unwrap();
         assert!(cache_stor.items.is_empty());
         assert!(cache_stor.noti.is_empty());
 
         // 2. With R0 and R1, Del R1: Removed item
         // Res: R1 -> R0, R1 -> R0
         // Cache: None -> Sys -> None
-        res_stor.register(ResourceDesc::new().with_owned(R0(0))).unwrap();
+        res_stor.add(ResourceDesc::new().with_owned(R0(0))).unwrap();
         cache_stor.create_item(&sdata, ent_stor, res_stor);
         cache_stor.update_by_resource_unreg(&ResourceKey::of::<R1>(), |_| {});
-        res_stor.unregister(&ResourceKey::of::<R1>()).unwrap();
+        res_stor.remove(&ResourceKey::of::<R1>()).unwrap();
         assert!(cache_stor.items.is_empty());
         assert!(cache_stor.noti.is_empty());
 
         // Clean up
-        res_stor.unregister(&ResourceKey::of::<R0>());
-        res_stor.unregister(&ResourceKey::of::<R1>());
+        res_stor.remove(&ResourceKey::of::<R0>());
+        res_stor.remove(&ResourceKey::of::<R1>());
         cache_stor.remove_item(sdata.id());
         assert!(cache_stor.items.is_empty());
         assert!(cache_stor.noti.is_empty());
@@ -1435,9 +1435,9 @@ mod tests {
     ) where
         S: BuildHasher + Default + Clone + 'static,
     {
-        res_stor.register(ResourceDesc::new().with_owned(R0(0))).unwrap();
-        res_stor.register(ResourceDesc::new().with_owned(R1(0))).unwrap();
-        ent_stor.register(E5_C2::as_entity_descriptor()).unwrap();
+        res_stor.add(ResourceDesc::new().with_owned(R0(0))).unwrap();
+        res_stor.add(ResourceDesc::new().with_owned(R1(0))).unwrap();
+        ent_stor.register(E5_C2::entity_descriptor()).unwrap();
 
         let sys = FnSystem::from(|
             _: Read<S0>, 
@@ -1472,7 +1472,7 @@ mod tests {
         S: BuildHasher + Default + Clone + 'static,
     {
         // Register entity and then updates cache.
-        let ei = ent_stor.register(E::as_entity_descriptor()).unwrap();
+        let ei = ent_stor.register(E::entity_descriptor()).unwrap();
         cache_stor.update_by_entity_reg(EntityKeyRef::Index(&ei), ent_stor, res_stor);
 
         // Validates.
@@ -1551,7 +1551,7 @@ mod tests {
         validate_buffer_addresses(&item.buf, &sys_idxs, ent_stor, res_stor);
     }
 
-    /// Checks whether or not wait indices are the same as indices gotten from
+    /// Checks whether wait indices are the same as indices gotten from
     /// storages.
     fn validate_wait_indices(waits: &WaitIndices, sys_idxs: &SystemIndices) {
         let WaitIndices {
@@ -1688,14 +1688,14 @@ mod tests {
         assert_eq!(buf_res_read.len(), sys_res_read.len());
         for (buf_ptr, ri) in buf_res_read.iter().zip(sys_res_read) {
             let sys_ptr = unsafe { res_stor.get_ptr(*ri).unwrap() };
-            assert_eq!(buf_ptr.inner(), sys_ptr);
+            assert_eq!(buf_ptr.as_nonnullext(), sys_ptr);
         }
 
         // Validates resource write query.
         assert_eq!(buf_res_write.len(), sys_res_write.len());
         for (buf_ptr, ri) in buf_res_write.iter().zip(sys_res_write) {
             let sys_ptr = unsafe { res_stor.get_ptr(*ri).unwrap() };
-            assert_eq!(buf_ptr.inner(), sys_ptr);
+            assert_eq!(buf_ptr.as_nonnullext(), sys_ptr);
         }
 
         // Validates entity write query.

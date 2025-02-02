@@ -1,6 +1,6 @@
 use super::task::{ParTask, Task};
 use crate::{
-    ds::prelude::*,
+    ds::{Signal, UnsafeFuture},
     ecs::{
         cmd::CommandObject,
         worker::{Message, WorkerId},
@@ -26,14 +26,16 @@ thread_local! {
 #[derive(Debug)]
 pub(crate) struct SubComm {
     /// Global task queue contains [`Task::System`] only.
-    /// It works in spmc fashion and push/pop occurs as follows.
+    /// It works in 'single producer multiple consumers' fashion and push/pop
+    /// occurs as follows.
     /// - 'Push' occurs by main worker.
     /// - 'Pop' occurs by all sub workers.
     injector: Arc<cb::Injector<Task>>,
 
     /// Local task queue contains [`Task::System`], [`Task::Parallel`], and
     /// [`Task::Future`].
-    /// It works in spmc fashion and push/pop occurs as follows.
+    /// It works in 'single producer multiple consumers' fashion and push/pop
+    /// occurs as follows.
     /// - 'Push' occurs by sub worker.
     /// - 'Pop' occurs by both this sub worker and siblings via [`cb::Stealer`].
     local: cb::Worker<Task>,
@@ -42,13 +44,14 @@ pub(crate) struct SubComm {
     siblings: Arc<[cb::Stealer<Task>]>,
 
     /// Local future task queue contains [`Task::Future`] only.
-    /// It works in mpmc fashion and push/pop occurs as follows.
+    /// It works in 'multiple producers multiple consumers' fashion and
+    /// push/pop occurs as follows.
     /// - 'Push' occurs by a thread that called the most inner future's poll().
     /// - 'Pop' occurs by each sub worker.
     //
-    // `crossbeam::Worker<T>` is not a mpmc queue, so uses another `Injector`
-    // instead. But if it causes some kind of performance issue, then consider
-    // using another queue.
+    // `crossbeam::Worker<T>` is not a 'multiple producers multiple consumers'
+    // queue, so uses another `Injector` instead. But if it causes some kind of
+    // performance issue, then consider using another queue.
     futures: Arc<[cb::Injector<Task>]>,
 
     /// Channel sending messages to main worker.

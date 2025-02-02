@@ -1,11 +1,11 @@
 use super::par::FnContext;
 use crate::{
-    ds::prelude::*,
+    ds::{ManagedMutPtr, UnsafeFuture},
     ecs::sys::{
         request::SystemBuffer,
         system::{Invoke, SystemId},
     },
-    impl_from_for_enum,
+    util::macros::impl_from_for_enum,
 };
 use std::{
     any::Any,
@@ -169,15 +169,15 @@ where
     /// Then takes function out from the function slot and executes it,
     /// and then puts the returned value in the return slot.
     unsafe fn execute(data: NonNull<u8>, f_cx: FnContext) {
-        let this: &Self = data.cast().as_ref();
-        let f = (*this.f.get()).take().unwrap_unchecked();
+        let this: &Self = unsafe { data.cast().as_ref() };
+        let f = unsafe { (*this.f.get()).take().unwrap_unchecked() };
 
         #[cfg(not(target_arch = "wasm32"))]
         {
             let executor = std::panic::AssertUnwindSafe(move || f(f_cx));
             match std::panic::catch_unwind(executor) {
-                Ok(res) => *this.res.get() = Some(res),
-                Err(payload) => *this.panic.get() = Some(payload),
+                Ok(res) => unsafe { *this.res.get() = Some(res) },
+                Err(payload) => unsafe { *this.panic.get() = Some(payload) },
             }
             this.flag.done();
         }
@@ -201,7 +201,7 @@ where
         if let Some(res) = self.res.into_inner() {
             Ok(res)
         } else {
-            let payload = self.panic.into_inner().unwrap_unchecked();
+            let payload = unsafe { self.panic.into_inner().unwrap_unchecked() };
             Err(payload)
         }
     }

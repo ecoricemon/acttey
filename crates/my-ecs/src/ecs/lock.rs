@@ -9,7 +9,7 @@ use super::{
     worker::Message,
     DynResult,
 };
-use crate::ds::prelude::*;
+use crate::ds::ManagedMutPtr;
 use std::{
     fmt,
     future::Future,
@@ -31,7 +31,7 @@ where
     RequestLockFuture::new()
 }
 
-// NOTE: This struct references internal fields. Therefore it must not be moved.
+// NOTE: This struct references internal fields so that it must not be moved.
 pub struct RequestLockFuture<'buf, Req> {
     cmd: Option<RequestLockCommand<Req>>,
     lock: Mutex<RequestLock>,
@@ -142,9 +142,7 @@ fn cancel_future_or_abort(lock: &Mutex<RequestLock>) {
 
         // If command or system could not be executed, something went wrong.
         if i > LIMIT {
-            crate::log!(
-                "[E] aborting due to unexecuted command or system related to request_lock()"
-            );
+            crate::log!("something associated with `request_lock` went wrong");
             std::process::abort();
         }
     }

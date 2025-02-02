@@ -1,26 +1,31 @@
 // Initialize wasm.
-import * as wasm from "./pkg/wasm-index.js";
+import * as wasm from './pkg/wasm-index.js';
 await wasm.default();
+
+const btn = document.getElementById('btnCpu');
+const text = btn.innerHTML.replace('N', wasm.numCpus());
+btn.innerHTML = text;
 
 // === Buttons ===
 
-document.getElementById("btnSingle").addEventListener("click", () => draw(1));
-document.getElementById("btnMulti").addEventListener("click", () => draw(0));
-document.getElementById("btnGpu").addEventListener("click", () => draw(-1));
-document.getElementById("btnStop").addEventListener("click", stop);
+const drawBtns = ['btnCpu', 'btnGpu', 'btnCpuGpu'];
+
+drawBtns.forEach((id) => document.getElementById(id).addEventListener('click', () => draw(id)));
+document.getElementById('btnStop').addEventListener('click', stop);
 
 function enableDrawButtons() {
-  document.getElementById("btnSingle").disabled = false;
-  document.getElementById("btnMulti").disabled = false;
-  document.getElementById("btnGpu").disabled = false;
-  document.getElementById("btnStop").disabled = true;
+  drawBtns.forEach((id) => {
+    const btn = document.getElementById(id);
+    btn.disabled = false;
+    btn.style.color = 'white';
+  });
+  document.getElementById('btnStop').disabled = true;
 }
 
-function disableDrawButtons() {
-  document.getElementById("btnSingle").disabled = true;
-  document.getElementById("btnMulti").disabled = true;
-  document.getElementById("btnGpu").disabled = true;
-  document.getElementById("btnStop").disabled = false;
+function disableDrawButtons(id) {
+  drawBtns.forEach((id) => document.getElementById(id).disabled = true);
+  document.getElementById(id).style.color = '#2069FA';
+  document.getElementById('btnStop').disabled = false;
 }
 
 enableDrawButtons();
@@ -29,14 +34,14 @@ enableDrawButtons();
 
 // We're going to draw fractal images onto this fixed size canvas not to
 // bring difference caused by real canvas size.
-const baseCanvas = document.createElement("canvas");
-baseCanvas.width = 500;
-baseCanvas.height = 500;
-const baseCtx = baseCanvas.getContext("2d");
+const baseCanvas = document.createElement('canvas');
+baseCanvas.width = wasm.canvasWidth();
+baseCanvas.height = wasm.canvasHeight();
+const baseCx = baseCanvas.getContext('2d');
 
 // This is real canvas we will see on the screen.
-const canvas = document.getElementById("canvas");
-const ctx = canvas.getContext("2d");
+const canvas = document.getElementById('canvas');
+const cx = canvas.getContext('2d');
 
 // Wasm will fill this buffer with a fractal image.
 const buf = new Uint8ClampedArray(baseCanvas.width * baseCanvas.height * 4);
@@ -66,18 +71,24 @@ function zoomInTargetArea() {
 
 // === Measurement ===
 
-let start = performance.now();
+let start = undefined;
 let frames = 0;
+let discarded = 0;
 let timer = undefined;
 
 function resetMeasure() {
   start = performance.now();
   frames = 0;
+  discarded = 0;
   timer = setInterval(() => {
     const elapsed = performance.now() - start;
     const x = (frames / elapsed) * 1000;
     const fps = Math.round(x * 10) / 10;
-    document.getElementById("fps").innerHTML = `${fps} frames/sec`;
+    let content = `${fps} fps`;
+    if (discarded != 0) {
+      content = `${fps} fps (${discarded} discarded)`;
+    }
+    document.getElementById('fps').innerHTML = content;
   }, 1000);
 }
 
@@ -91,15 +102,33 @@ function stopMeasure() {
 
 let app = undefined;
 let run = false;
+let age = 0;
 
-function draw(numWorkers) {
+function draw(id) {
   if (!run) {
+    if ((id == 'btnGpu' || id == 'btnCpuGpu') && !navigator.gpu) {
+      window.alert('GPU is not available');
+      return;
+    }
     resetTargetArea();
-    disableDrawButtons();
+    disableDrawButtons(id);
     resetMeasure();
+    age = wasm.startAge();
     run = true;
-    createApp(numWorkers);
-    requestCalculation();
+    createApp(id);
+    switch (id) {
+      case 'btnCpu':
+        requestCalculation(true);
+        break;
+      case 'btnGpu':
+        requestCalculation(false);
+        break;
+      case 'btnCpuGpu':
+        requestCalculation(true);
+        zoomInTargetArea();
+        requestCalculation(false);
+        break;
+    }
   }
 }
 
@@ -112,16 +141,16 @@ function stop() {
   }
 }
 
-function createApp(numWorkers) {
-  app = new wasm.App(numWorkers);
+function createApp(ty) {
+  app = new wasm.App(ty);
 
-  app.setOnMessage(() => {
+  app.setOnMessage((isCpu) => {
     drawImage();
     frames += 1;
 
     if (run && width > 0.0001) {
       zoomInTargetArea();
-      requestCalculation();
+      requestCalculation(isCpu);
     } else {
       stop();
     }
@@ -129,33 +158,47 @@ function createApp(numWorkers) {
 }
 
 // Function to request fractal image calculation to wasm.
-function requestCalculation() {
-  app.calcImage(
-    baseCanvas.width,
-    baseCanvas.height,
+function requestCalculation(isCpu) {
+  const f = isCpu ? 'calcImageOnCpu' : 'calcImageOnGpu';
+  app[f](
+    age,
     x - width / 2,
     x + width / 2,
     y - height / 2,
     y + height / 2
   );
+  age += 1;
 }
 
 // Function to draw image using data gotten from wasm with scaling.
 function drawImage() {
-  canvas.width = canvas.clientWidth;
-  canvas.height = canvas.clientHeight;
+  while (true) {
+    switch (app.getResult(buf)) {
+      case 'ready':
+        draw();
+        break;
+      case 'discarded':
+        discarded += 1;
+        break;
+      case 'none':
+        return;
+    }
+  }
 
-  app.getResult(buf);
-  baseCtx.putImageData(imageData, 0, 0);
-  ctx.drawImage(
-    baseCanvas,
-    0,
-    0,
-    baseCanvas.width,
-    baseCanvas.height,
-    0,
-    0,
-    canvas.width,
-    canvas.height
-  );
+  function draw() {
+    baseCx.putImageData(imageData, 0, 0);
+    canvas.width = canvas.clientWidth; // this clears canvas
+    canvas.height = canvas.clientHeight;
+    cx.drawImage(
+      baseCanvas,
+      0,
+      0,
+      baseCanvas.width,
+      baseCanvas.height,
+      0,
+      0,
+      canvas.width,
+      canvas.height
+    );
+  }
 }

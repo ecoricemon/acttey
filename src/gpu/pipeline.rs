@@ -1,9 +1,9 @@
 use super::common::{HasLabel, LabelledGenVec};
 use crate::{
-    util::{AsOr, Or, StaticStr},
+    util::{AsOr, StaticStr},
     ActteyError,
 };
-use my_ecs::prelude::{Resource, ResourceId, ResourceIndex};
+use my_ecs::prelude::{Or, Resource, ResourceId, ResourceIndex};
 use std::{fmt, ops::Deref, sync::Arc};
 
 #[derive(Debug, Resource)]

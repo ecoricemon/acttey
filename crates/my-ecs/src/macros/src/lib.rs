@@ -14,25 +14,6 @@ use syn::{
     Result, Token, Type, TypePath, Visibility,
 };
 
-/// Derive macro generating an impl of the trait `Component`.
-///
-/// # Examples
-///
-/// ```ignore
-/// # use my_ecs_macros::Component;
-///
-/// #[derive(Component)]
-/// struct CompA;
-///
-/// #[derive(Component)]
-/// struct CompB(u8);
-///
-/// #[derive(Component)]
-/// struct CompC {
-///     vel: (f32, f32, f32),
-///     acc: (f32, f32, f32),
-/// }
-/// ```
 #[proc_macro_derive(Component)]
 pub fn derive_component(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
@@ -40,35 +21,20 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
 
     TokenStream::from(quote! {
         // Implements `Component` trait.
-        impl my_ecs::ecs::ent::component::Component for #ident {
+        impl my_ecs::prelude::Component for #ident {
             const IS_DEFAULT: bool
-                = my_ecs::ds::types::TypeHelper::<#ident>::IS_DEFAULT;
-            const FN_DEFAULT: my_ecs::ds::types::FnDefaultRaw
-                = my_ecs::ds::types::TypeHelper::<#ident>::FN_DEFAULT;
+                = my_ecs::ds::TypeHelper::<#ident>::IS_DEFAULT;
+            const FN_DEFAULT: my_ecs::ds::FnDefaultRaw
+                = my_ecs::ds::TypeHelper::<#ident>::FN_DEFAULT;
             const IS_CLONE: bool
-                = my_ecs::ds::types::TypeHelper::<#ident>::IS_CLONE;
-            const FN_CLONE: my_ecs::ds::types::FnCloneRaw
-                = my_ecs::ds::types::TypeHelper::<#ident>::FN_CLONE;
+                = my_ecs::ds::TypeHelper::<#ident>::IS_CLONE;
+            const FN_CLONE: my_ecs::ds::FnCloneRaw
+                = my_ecs::ds::TypeHelper::<#ident>::FN_CLONE;
         }
     })
 }
 
-/// # Examples
-///
-/// ```ignore
-/// # use my_ecs_macros::{Component, Entity};
-///
-/// #[derive(Component)]
-/// struct CompA;
-///
-/// #[derive(Entity)]
-/// #[container(ChunkSparseSet)]
-/// #[hasher(ahash::RandomState)]
-/// struct EntA {
-///     a: CompA,
-/// }
-/// ```
-#[proc_macro_derive(Entity, attributes(container, hasher))]
+#[proc_macro_derive(Entity, attributes(container, random_state))]
 pub fn derive_entity(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let vis = input.vis.clone();
@@ -88,17 +54,17 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
         .map(|ident| ident.to_string())
         .collect::<Vec<_>>();
 
-    // Validates that all fields implement `Compoenent` trait.
+    // Validates that all fields implement `Component` trait.
     let validate_impl_component = quote! {
         const _: () = {
-            const fn validate<T: my_ecs::ecs::ent::component::Component>() {}
+            const fn validate<T: my_ecs::prelude::Component>() {}
             #(
                 validate::<#field_types>();
             )*
         };
     };
 
-    // Determines container and hasher for `EntityReg`.
+    // Determines container and hasher builder for `EntityReg`.
     let container = input
         .attrs
         .iter()
@@ -112,11 +78,11 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
         })
         .next()
         .unwrap_or(quote! { SparseSet });
-    let hasher = input
+    let random_state = input
         .attrs
         .iter()
         .filter_map(|attr| {
-            if attr.path().is_ident("hasher") {
+            if attr.path().is_ident("random_state") {
                 let ty: Path = attr.parse_args().unwrap();
                 Some(quote! { #ty })
             } else {
@@ -128,15 +94,15 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
 
     // Implements `AsEntityReg` trait.
     let impl_as_entity_ref = quote! {
-        impl my_ecs::ecs::ent::storage::AsEntityReg for #ident {
-            fn as_entity_descriptor() -> my_ecs::ecs::ent::storage::EntityReg {
-                let name = my_ecs::ecs::ent::entity::EntityName::new(
+        impl my_ecs::prelude::AsEntityReg for #ident {
+            fn entity_descriptor() -> my_ecs::prelude::EntityReg {
+                let name = my_ecs::prelude::EntityName::new(
                     #ident_str.into()
                 );
                 let cont = Box::new(
-                    my_ecs::default::ent_cont::#container::<#hasher>::new()
+                    my_ecs::prelude::#container::<#random_state>::new()
                 );
-                let mut desc = my_ecs::ecs::ent::storage::EntityReg::new(
+                let mut desc = my_ecs::prelude::EntityReg::new(
                     Some(name), cont
                 );
                 #(
@@ -150,27 +116,27 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
     // Implements `Components` trait.
     let num_fields = field_types.len();
     let impl_components = quote! {
-        impl my_ecs::ecs::ent::component::Components for #ident {
-            type Keys = [my_ecs::ecs::ent::component::ComponentKey; #num_fields];
-            type Infos = [my_ecs::ds::types::TypeInfo; #num_fields];
+        impl my_ecs::prelude::Components for #ident {
+            type Keys = [my_ecs::prelude::ComponentKey; #num_fields];
+            type Infos = [my_ecs::ds::TypeInfo; #num_fields];
 
             const LEN: usize = #num_fields;
 
             fn keys() -> Self::Keys {
                 [#(
-                    <#field_types as my_ecs::ecs::ent::component::Component>::key()
+                    <#field_types as my_ecs::prelude::Component>::key()
                 ),*]
             }
 
             fn infos() -> Self::Infos {
                 [#(
-                    <#field_types as my_ecs::ecs::ent::component::Component>::type_info()
+                    <#field_types as my_ecs::prelude::Component>::type_info()
                 ),*]
             }
 
             fn sorted_keys() -> Self::Keys {
                 let mut keys = [#(
-                    <#field_types as my_ecs::ecs::ent::component::Component>::key()
+                    <#field_types as my_ecs::prelude::Component>::key()
                 ),*];
                 keys.sort_unstable();
                 keys
@@ -215,9 +181,9 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                     let mut is_full = true;
 
                     #(
-                        if my_ecs::ds::types::TypeHelper::<#field_types>::IS_DEBUG {
-                            let helper = my_ecs::ds::types::DebugHelper {
-                                f: my_ecs::ds::types::TypeHelper::<#field_types>::FN_FMT,
+                        if my_ecs::ds::TypeHelper::<#field_types>::IS_DEBUG {
+                            let helper = my_ecs::ds::DebugHelper {
+                                f: my_ecs::ds::TypeHelper::<#field_types>::FN_FMT,
                                 ptr: self.#field_idents as *const #field_types as *const u8,
                             };
                             s.field(#field_ident_strs, &helper);
@@ -253,7 +219,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
     // Implements `Entity` trait.
     let col_idxs = (0..field_idents.len()).collect::<Vec<_>>();
     let impl_entity = quote! {
-        impl my_ecs::ecs::ent::entity::Entity for #ident {
+        impl my_ecs::prelude::Entity for #ident {
             type Ref<'cont> = #ref_ident<'cont>;
             type Mut<'cont> = #mut_ident<'cont>;
 
@@ -263,7 +229,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                 ),*
             ];
 
-            fn to_column_index(fi: usize) -> usize {
+            fn field_to_column_index(fi: usize) -> usize {
                 use std::{sync::OnceLock, any::TypeId};
 
                 static MAP: OnceLock<[usize; #num_fields]> = OnceLock::new();
@@ -290,7 +256,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                 map[fi]
             }
 
-            fn get_ref_from<Cont: my_ecs::ecs::ent::entity::ContainEntity + ?Sized>(
+            fn get_ref_from<Cont: my_ecs::prelude::ContainEntity + ?Sized>(
                 cont: &Cont, vi: usize
             ) -> Self::Ref<'_> {
                 unsafe { #ref_ident {
@@ -298,7 +264,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                         #field_idents:
                             // NonNull<u8>
                             cont.value_ptr_by_value_index(
-                                Self::to_column_index(#col_idxs),
+                                Self::field_to_column_index(#col_idxs),
                                 vi
                             ).unwrap()
                             // NonNull<u8> -> NonNull<field_type>
@@ -309,7 +275,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                 } }
             }
 
-            fn get_mut_from<Cont: my_ecs::ecs::ent::entity::ContainEntity + ?Sized>(
+            fn get_mut_from<Cont: my_ecs::prelude::ContainEntity + ?Sized>(
                 cont: &mut Cont, vi: usize
             ) -> Self::Mut<'_> {
                 unsafe { #mut_ident {
@@ -317,7 +283,7 @@ pub fn derive_entity(input: TokenStream) -> TokenStream {
                         #field_idents:
                             // NonNull<u8>
                             cont.value_ptr_by_value_index(
-                                Self::to_column_index(#col_idxs),
+                                Self::field_to_column_index(#col_idxs),
                                 vi
                             ).unwrap()
                             // NonNull<u8> -> NonNull<field_type>
@@ -350,42 +316,26 @@ pub fn derive_resource(input: TokenStream) -> TokenStream {
 
     TokenStream::from(quote! {
         // Implements the trait `Resource`.
-        impl my_ecs::ecs::resource::Resource for #ident {}
+        impl my_ecs::prelude::Resource for #ident {}
     })
+}
+
+#[proc_macro]
+pub fn request(input: TokenStream) -> TokenStream {
+    let req = parse_macro_input!(input as Request);
+
+    TokenStream::from(quote! { #req })
 }
 
 #[proc_macro]
 pub fn filter(input: TokenStream) -> TokenStream {
     let sel = parse_macro_input!(input as Select);
 
-    // Validates if the Select::Target implement Component.
-    let validate_impl_comp_for_target = if let Some(target) = &sel.target {
-        quote! {
-            const _: () = {
-                const fn validate<T: my_ecs::ecs::ent::component::Component>() {}
-                validate::<#target>();
-            };
-        }
-    } else {
-        TokenStream2::new()
-    };
-
-    // Validates if the Filter types implement Component.
+    // Validates if the Filter types implement `Component`.
     let empty = Punctuated::<TypePath, Token![,]>::new();
     let all = get_iter(&sel.filter.all, &empty);
     let any = get_iter(&sel.filter.any, &empty);
     let none = get_iter(&sel.filter.none, &empty);
-    let all_clone = all.clone();
-    let any_clone = any.clone();
-    let none_clone = none.clone();
-    let validate_impl_comp_for_filter = quote! {
-        const _: () = {
-            const fn validate<T: my_ecs::ecs::ent::component::Component>() {}
-            #(validate::<#all_clone>();)*
-            #(validate::<#any_clone>();)*
-            #(validate::<#none_clone>();)*
-        };
-    };
 
     // Validates that `Target`, `All` and `Any` doesn't overlap `None`.
     let validate_non_overlap = if let Some(target) = &sel.target {
@@ -415,8 +365,6 @@ pub fn filter(input: TokenStream) -> TokenStream {
     }
 
     return TokenStream::from(quote! {
-        #validate_impl_comp_for_target
-        #validate_impl_comp_for_filter
         #validate_non_overlap
         #sel
     });
@@ -424,10 +372,10 @@ pub fn filter(input: TokenStream) -> TokenStream {
     // === Internal helper functions ===
 
     fn get_iter<'a>(
-        x: &'a Option<(Token![,], Ident, FilterList)>,
+        x: &'a Option<(Token![,], Ident, Token![=], Types)>,
         empty: &'a Punctuated<TypePath, Token![,]>,
     ) -> syn::punctuated::Iter<'a, TypePath> {
-        if let Some((_, _, list)) = x {
+        if let Some((_, _, _, list)) = x {
             list.types.iter()
         } else {
             empty.iter()
@@ -446,10 +394,144 @@ pub fn filter(input: TokenStream) -> TokenStream {
         quote! {
             const _: () = {#(
                 assert!(
-                    !my_ecs::ds::types::TypeHelper::<(#pair_as, #pair_bs)>::IS_EQUAL_TYPE,
+                    !my_ecs::ds::TypeHelper::<(#pair_as, #pair_bs)>::IS_EQUAL_TYPE,
                     "Types in `Target`, `All`, and `Any` must not be included in `None`",
                 );
             )*};
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Request {
+    vis: Visibility,
+    ident: Ident,
+    read: Option<(Token![,], Ident, Token![=], Types)>,
+    write: Option<(Token![,], Ident, Token![=], Types)>,
+    res_read: Option<(Token![,], Ident, Token![=], Types)>,
+    res_write: Option<(Token![,], Ident, Token![=], Types)>,
+    ent_write: Option<(Token![,], Ident, Token![=], Types)>,
+}
+
+impl Parse for Request {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let vis = input.parse()?;
+        let ident = input.parse()?;
+
+        let mut read = None;
+        let mut write = None;
+        let mut res_read = None;
+        let mut res_write = None;
+        let mut ent_write = None;
+        while input.peek(Token![,]) || input.peek(Ident) {
+            let comma: Token![,] = if input.peek(Token![,]) {
+                input.parse()?
+            } else {
+                Comma::default()
+            };
+            let ident: Ident = input.parse()?;
+            let ident_str = ident.to_string();
+            match ident_str.to_ascii_lowercase().as_str() {
+                "read" => {
+                    if read.is_some() {
+                        return Err(Error::new(ident.span(), "duplicate `Read`"));
+                    }
+                    let eq: Token![=] = input.parse()?;
+                    let types: Types = input.parse()?;
+                    read = Some((comma, ident, eq, types));
+                }
+                "write" => {
+                    if write.is_some() {
+                        return Err(Error::new(ident.span(), "duplicate `Write`"));
+                    }
+                    let eq: Token![=] = input.parse()?;
+                    let types: Types = input.parse()?;
+                    write = Some((comma, ident, eq, types));
+                }
+                "resread" => {
+                    if res_read.is_some() {
+                        return Err(Error::new(ident.span(), "duplicate `ResRead`"));
+                    }
+                    let eq: Token![=] = input.parse()?;
+                    let types: Types = input.parse()?;
+                    res_read = Some((comma, ident, eq, types));
+                }
+                "reswrite" => {
+                    if res_write.is_some() {
+                        return Err(Error::new(ident.span(), "duplicate `ResWrite`"));
+                    }
+                    let eq: Token![=] = input.parse()?;
+                    let types: Types = input.parse()?;
+                    res_write = Some((comma, ident, eq, types));
+                }
+                "entwrite" => {
+                    if ent_write.is_some() {
+                        return Err(Error::new(ident.span(), "duplicate `EntWrite`"));
+                    }
+                    let eq: Token![=] = input.parse()?;
+                    let types: Types = input.parse()?;
+                    ent_write = Some((comma, ident, eq, types));
+                }
+                _ => {
+                    return Err(Error::new(
+                        ident.span(),
+                        "expected `Read`, `Write`, `ResRead`, `ResWrite`, or `EntWrite`",
+                    ));
+                }
+            }
+        }
+
+        Ok(Self {
+            vis,
+            ident,
+            read,
+            write,
+            res_read,
+            res_write,
+            ent_write,
+        })
+    }
+}
+
+impl ToTokens for Request {
+    fn to_tokens(&self, tokens: &mut TokenStream2) {
+        let vis = &self.vis;
+        let ident = &self.ident;
+        let read = helper(&self.read);
+        let write = helper(&self.write);
+        let res_read = helper(&self.res_read);
+        let res_write = helper(&self.res_write);
+        let ent_write = helper(&self.ent_write);
+
+        // Declares the struct.
+        tokens.append_all(quote! {
+            #vis struct #ident;
+        });
+
+        // Implements `Request` for the struct.
+        tokens.append_all(quote! {
+            impl my_ecs::prelude::Request for #ident {
+                type Read = #read;
+                type Write = #write;
+                type ResRead = #res_read;
+                type ResWrite = #res_write;
+                type EntWrite = #ent_write;
+            }
+        });
+
+        // === Internal helper functions ===
+
+        fn helper(x: &Option<(Token![,], Ident, Token![=], Types)>) -> TokenStream2 {
+            if let Some((_, _, _, types)) = x {
+                let types = &types.types;
+                if types.len() == 1 {
+                    quote! { #types }
+                } else {
+                    quote! {( #types )}
+                }
+            } else {
+                quote! {()}
+            }
         }
     }
 }
@@ -507,44 +589,41 @@ impl ToTokens for Select {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
         let vis = &self.vis;
         let ident = &self.ident;
-        let all = from_list(&self.filter.all);
-        let any = from_list(&self.filter.any);
-        let none = from_list(&self.filter.none);
-        let exact = from_list(&self.filter.exact);
+        let all = helper(&self.filter.all);
+        let any = helper(&self.filter.any);
+        let none = helper(&self.filter.none);
+        let exact = helper(&self.filter.exact);
 
-        let decl_struct = quote! {
+        // Declares the struct.
+        tokens.append_all(quote! {
             #vis struct #ident;
-        };
+        });
 
-        let impl_filter = quote! {
-            impl my_ecs::ecs::sys::select::Filter for #ident {
+        // Implements `Filter` for the struct.
+        tokens.append_all(quote! {
+            impl my_ecs::prelude::Filter for #ident {
                 type All = #all;
                 type Any = #any;
                 type None = #none;
                 type Exact = #exact;
             }
-        };
+        });
 
-        let impl_select = if let Some(target) = &self.target {
-            quote! {
-                impl my_ecs::ecs::sys::select::Select for #ident {
+        // Implements `Select` for the struct if needed.
+        if let Some(target) = &self.target {
+            tokens.append_all(quote! {
+                impl my_ecs::prelude::Select for #ident {
                     type Target = #target;
                     type Filter = #ident;
                 }
-            }
-        } else {
-            TokenStream2::new()
-        };
-
-        tokens.append_all(decl_struct);
-        tokens.append_all(impl_select);
-        tokens.append_all(impl_filter);
+            });
+        }
 
         // === Internal helper functions ===
 
-        fn from_list(x: &Option<(Token![,], Ident, FilterList)>) -> TokenStream2 {
-            if let Some((_, _, list)) = x.as_ref() {
-                let types = &list.types;
+        fn helper(x: &Option<(Token![,], Ident, Token![=], Types)>) -> TokenStream2 {
+            if let Some((_, _, _, types)) = x {
+                let types = &types.types;
                 if types.len() == 1 {
                     quote! { #types }
                 } else {
@@ -566,7 +645,7 @@ struct SelectTarget {
 impl Parse for SelectTarget {
     fn parse(input: ParseStream) -> Result<Self> {
         let eq: Token![=] = input.parse()?;
-        let ty: syn::TypePath = input.parse()?;
+        let ty: TypePath = input.parse()?;
 
         Ok(Self { _eq: eq, ty })
     }
@@ -582,10 +661,10 @@ impl ToTokens for SelectTarget {
 
 #[derive(Debug)]
 struct Filter {
-    all: Option<(Token![,], Ident, FilterList)>,
-    any: Option<(Token![,], Ident, FilterList)>,
-    none: Option<(Token![,], Ident, FilterList)>,
-    exact: Option<(Token![,], Ident, FilterList)>,
+    all: Option<(Token![,], Ident, Token![=], Types)>,
+    any: Option<(Token![,], Ident, Token![=], Types)>,
+    none: Option<(Token![,], Ident, Token![=], Types)>,
+    exact: Option<(Token![,], Ident, Token![=], Types)>,
 }
 
 impl Parse for Filter {
@@ -602,34 +681,38 @@ impl Parse for Filter {
             };
             let ident: Ident = input.parse()?;
             let ident_str = ident.to_string();
-            match ident_str.as_str() {
-                "All" => {
+            match ident_str.to_ascii_lowercase().as_str() {
+                "all" => {
                     if all.is_some() {
                         return Err(Error::new(ident.span(), "duplicate `All`"));
                     }
-                    let list: FilterList = input.parse()?;
-                    all = Some((comma, ident, list));
+                    let eq: Token![=] = input.parse()?;
+                    let types: Types = input.parse()?;
+                    all = Some((comma, ident, eq, types));
                 }
-                "Any" => {
+                "any" => {
                     if any.is_some() {
                         return Err(Error::new(ident.span(), "duplicate `Any`"));
                     }
-                    let list: FilterList = input.parse()?;
-                    any = Some((comma, ident, list));
+                    let eq: Token![=] = input.parse()?;
+                    let types: Types = input.parse()?;
+                    any = Some((comma, ident, eq, types));
                 }
-                "None" => {
+                "none" => {
                     if none.is_some() {
                         return Err(Error::new(ident.span(), "duplicate `None`"));
                     }
-                    let list: FilterList = input.parse()?;
-                    none = Some((comma, ident, list));
+                    let eq: Token![=] = input.parse()?;
+                    let types: Types = input.parse()?;
+                    none = Some((comma, ident, eq, types));
                 }
-                "Exact" => {
+                "exact" => {
                     if exact.is_some() {
                         return Err(Error::new(ident.span(), "duplicate `Exact`"));
                     }
-                    let list: FilterList = input.parse()?;
-                    exact = Some((comma, ident, list));
+                    let eq: Token![=] = input.parse()?;
+                    let types: Types = input.parse()?;
+                    exact = Some((comma, ident, eq, types));
                 }
                 _ => {
                     return Err(Error::new(
@@ -657,16 +740,13 @@ impl Parse for Filter {
 }
 
 #[derive(Debug)]
-struct FilterList {
-    _eq: Token![=],
+struct Types {
     _paren: Option<token::Paren>,
     types: Punctuated<TypePath, Token![,]>,
 }
 
-impl Parse for FilterList {
+impl Parse for Types {
     fn parse(input: ParseStream) -> Result<Self> {
-        let eq: Token![=] = input.parse()?;
-
         let (paren, types) = if input.peek(token::Paren) {
             let content;
             let paren = Some(parenthesized!(content in input));
@@ -680,10 +760,20 @@ impl Parse for FilterList {
         };
 
         Ok(Self {
-            _eq: eq,
             _paren: paren,
             types,
         })
+    }
+}
+
+impl ToTokens for Types {
+    fn to_tokens(&self, tokens: &mut TokenStream2) {
+        let types = &self.types;
+        if types.len() == 1 {
+            tokens.append_all(quote! { #types });
+        } else {
+            tokens.append_all(quote! {( #types )});
+        }
     }
 }
 

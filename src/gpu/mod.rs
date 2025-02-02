@@ -10,7 +10,9 @@ pub mod prelude {
     pub use super::bind::{BindGroup, BindGroupLayoutStorage, BindGroupStorage};
     pub use super::buffer::{GpuBuffer, GpuBufferStorage};
     pub use super::context::Gpu;
-    pub use super::encoder::{CommandEncoder, CommandEncoderStorage, ComputePass};
+    pub use super::encoder::{
+        CommandEncoder, CommandEncoderStorage, ComputePass, ComputePassCommand,
+    };
     pub use super::pipeline::{ComputePipeline, ComputePipelineStorage, PipelineLayoutStorage};
     pub use super::shader::{EntryPoint, Shader, ShaderStorage};
 }

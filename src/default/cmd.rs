@@ -9,7 +9,6 @@ use crate::{
     },
     ActteyError,
 };
-pub use my_ecs::prelude::cmd as ecs;
 use my_ecs::prelude::*;
 use std::sync::Arc;
 
@@ -35,7 +34,7 @@ impl Command for GpuInit {
         let gpu = ecs.get_resource::<Gpu>().unwrap();
         let dev = Arc::clone(gpu.device());
 
-        // Resgisters `GpuBufferStorage` as a resource if it doesn't exist.
+        // Registers `GpuBufferStorage` as a resource if it doesn't exist.
         let ri = helper(&mut ecs, || Ok(GpuBufferStorage::new(Arc::clone(&dev))))?;
         let stor = ecs.get_resource_mut::<GpuBufferStorage>().unwrap();
         stor.set_resource_index(ri);
@@ -82,7 +81,7 @@ impl Command for GpuInit {
 
         // === Internal helper functions ===
 
-        /// Registers `R` if it doesn't exist in ECS, then returns its index.
+        /// Adds `R` if it doesn't exist in ECS, then returns its index.
         fn helper<R, F>(ecs: &mut Ecs<'_>, f: F) -> DynResult<ResourceIndex>
         where
             R: Resource,
@@ -92,10 +91,10 @@ impl Command for GpuInit {
                 Ok(ri)
             } else {
                 let r = f()?;
-                let dedi = cfg!(target_arch = "wasm32");
-                let desc = ResourceDesc::new().with_owned(r).with_dedicated(dedi);
+                let is_web = cfg!(target_arch = "wasm32");
+                let desc = ResourceDesc::new().with_owned(r).with_dedicated(is_web);
                 let ri = ecs
-                    .register_resource(desc)
+                    .add_resource(desc)
                     .take()
                     .map_err(EcsError::without_data)?;
                 Ok(ri)
