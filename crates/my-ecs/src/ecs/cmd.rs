@@ -1,15 +1,15 @@
 use super::{
     ent::{component::Component, entity::EntityId},
     entry::Ecs,
-    sched::ctrl::SUB_CONTEXT,
-    share::{self, EntMoveStorage, Shared},
+    post::EntMoveStorage,
+    sched::comm::CommandSender,
     DynResult,
 };
 use crate::{ds::ReadyFuture, util::macros::impl_from_for_enum};
 use std::{fmt, ptr::NonNull, sync::MutexGuard};
 
 pub mod prelude {
-    pub use super::{Command, Commander};
+    pub use super::Command;
 }
 
 /// Command to an ECS instance.
@@ -193,71 +193,6 @@ impl RawCommand {
     }
 }
 
-/// A handy command generator.
-///
-/// The generator provides commands shown below for now.
-/// * Entity move command
-///   - Entity move command is about moving an entity from one container to
-///     another. For example, if removing `Ca` from `Ea { Ca, Cb }`, then it
-///     moves from entity container for `Ea { Ca, Cb }` to another `Eb { Cb }`.
-pub struct Commander<'s> {
-    shared: &'s Shared,
-}
-
-impl<'s> Commander<'s> {
-    pub(crate) const fn new(shared: &'s Shared) -> Self {
-        Self { shared }
-    }
-
-    /// Creates entity move command builder.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use my_ecs::prelude::*;
-    ///
-    /// #[derive(Component)] struct Ca;
-    /// #[derive(Component)] struct Cb;
-    /// #[derive(Entity)] struct Ea { a: Ca, b: Cb }
-    ///
-    /// let mut ecs = Ecs::default(WorkerPool::new(), []);
-    ///
-    /// // Adds an entity `Ea { Ca, Cb }`.
-    /// let ei = ecs.register_entity_of::<Ea>().unwrap();
-    /// let eid = ecs.add_entity(ei, Ea { a: Ca, b: Cb }).unwrap();
-    ///
-    /// // Removes `Ca` from `Ea { Ca, Cb }`.
-    /// ecs.execute_command(|cmdr| cmdr.entity(eid).detach::<Ca>().finish()).unwrap();
-    /// ```
-    pub fn entity(&self, eid: EntityId) -> EntityMoveCommandBuilder<'_, true> {
-        let guard = self.shared.lock_entity_move_storage();
-        EntityMoveCommandBuilder::with_guard(eid, guard)
-    }
-}
-
-/// Scheduler the given command.
-pub fn schedule_command<F>(f: F)
-where
-    F: FnOnce(Ecs) -> DynResult<()> + Send + 'static,
-{
-    let wrapped = Some(f);
-    let boxed: Box<dyn Command> = Box::new(wrapped);
-    schedule_command_object(boxed.into());
-}
-
-pub(crate) fn schedule_command_object(cmd: CommandObject) {
-    let ptr = SUB_CONTEXT.get();
-    assert!(!ptr.is_dangling(), "expected sub worker context");
-
-    // Safety: Current worker has valid sub context pointer.
-    let comm = unsafe { ptr.as_ref().get_comm() };
-    comm.send_command(cmd);
-}
-
-pub fn entity<'g>(eid: EntityId) -> EntityMoveCommandBuilder<'g, false> {
-    EntityMoveCommandBuilder::new(eid)
-}
-
 /// A command builder to attach or detach some components to or from an entity.
 ///
 /// By attaching or detathcing components, entity move from one entity container
@@ -265,32 +200,34 @@ pub fn entity<'g>(eid: EntityId) -> EntityMoveCommandBuilder<'g, false> {
 /// container. If destination entity container doesn't exist at the time, new
 /// entity container is generated first then the entity moves into it.
 ///
-/// * MAIN - Whether the builder is on main context or not. They must be
-///   distinguashed due to internal restrictions.
-pub struct EntityMoveCommandBuilder<'g, const MAIN: bool> {
+/// There are two options about how to handle built command.
+/// * Call [`EntityMoveCommandBuilder::finish`]
+///   - Just build a command then give it to the caller.
+/// * Drop the builder without calling the `finish` method.
+///   - If something has changed, build a command then send it to main worker in
+///     order to handle it.
+pub struct EntityMoveCommandBuilder<'a> {
+    tx_cmd: &'a CommandSender,
+    guard: MutexGuard<'a, EntMoveStorage>,
     eid: EntityId,
-    guard: MutexGuard<'g, EntMoveStorage>,
     len: usize,
 }
 
-impl EntityMoveCommandBuilder<'_, false> {
-    fn new(eid: EntityId) -> Self {
-        let shared = share::get_shared();
-        let guard = shared.lock_entity_move_storage();
-        Self { eid, guard, len: 0 }
-    }
-}
-
-impl<'g> EntityMoveCommandBuilder<'g, true> {
-    const fn with_guard(eid: EntityId, guard: MutexGuard<'g, EntMoveStorage>) -> Self {
-        Self { eid, guard, len: 0 }
+impl<'a> EntityMoveCommandBuilder<'a> {
+    pub(crate) const fn new(
+        tx_cmd: &'a CommandSender,
+        guard: MutexGuard<'a, EntMoveStorage>,
+        eid: EntityId,
+    ) -> Self {
+        Self {
+            tx_cmd,
+            guard,
+            eid,
+            len: 0,
+        }
     }
 
     /// Finishes to build an entity move command.
-    ///
-    /// # Examples
-    ///
-    /// See [`Commander::entity`].
     pub fn finish(mut self) -> impl Command + 'static {
         assert!(self.len > 0);
 
@@ -302,17 +239,11 @@ impl<'g> EntityMoveCommandBuilder<'g, true> {
 
         cmd
     }
-}
 
-impl<const MAIN: bool> EntityMoveCommandBuilder<'_, MAIN> {
     /// Adds component attachment instruction to a command builder.
     ///
     /// The command builder will generate a command with the instruction when
     /// [`EntityMoveCommandBuilder::finish`] is called.
-    ///
-    /// # Examples
-    ///
-    /// See [`Commander::entity`].
     pub fn attach<C: Component>(mut self, component: C) -> Self {
         self.guard.insert_addition(self.eid, component);
         self.len += 1;
@@ -323,10 +254,6 @@ impl<const MAIN: bool> EntityMoveCommandBuilder<'_, MAIN> {
     ///
     /// The command builder will generate a command with the instruction when
     /// [`EntityMoveCommandBuilder::finish`] is called.
-    ///
-    /// # Examples
-    ///
-    /// See [`Commander::entity`].
     pub fn detach<C: Component>(mut self) -> Self {
         self.guard.insert_removal(self.eid, C::key());
         self.len += 1;
@@ -339,12 +266,13 @@ impl<const MAIN: bool> EntityMoveCommandBuilder<'_, MAIN> {
     }
 }
 
-impl<const OBJ: bool> Drop for EntityMoveCommandBuilder<'_, OBJ> {
+impl Drop for EntityMoveCommandBuilder<'_> {
     fn drop(&mut self) {
         if self.len > 0 {
             let cmd = self._finish();
             // Boxing a ZST command doesn't allocate memory for it.
-            schedule_command_object(CommandObject::Boxed(Box::new(cmd)));
+            self.tx_cmd
+                .send_or_cancel(CommandObject::Boxed(Box::new(cmd)));
         }
     }
 }
@@ -353,9 +281,8 @@ struct EntityMoveCommand;
 
 impl Command for EntityMoveCommand {
     fn command(&mut self, ecs: Ecs<'_>) -> DynResult<()> {
-        let shared = ecs.get_shared_ptr();
-        let shared = unsafe { shared.as_ref() };
-        let mut guard = shared.lock_entity_move_storage();
+        let post = unsafe { ecs.post_ptr().as_ref() };
+        let mut guard = post.lock_entity_move_storage();
         guard.consume(ecs);
         Ok(())
     }

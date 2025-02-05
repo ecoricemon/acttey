@@ -18,11 +18,12 @@ pub mod prelude {
     pub use rayon::prelude::*;
 }
 
+pub mod test_util {
+    pub use super::util::call_timeout;
+}
+
 /// Global functions.
 pub mod global {
-    pub use super::ecs::cmd::{entity, schedule_command};
-    pub use super::ecs::lock::request_lock;
-    pub use super::ecs::sched::ctrl::schedule_future;
     pub use super::ecs::stat;
     #[cfg(target_arch = "wasm32")]
     pub use super::ecs::web::{set_panic_hook_once, web_panic_hook};

@@ -236,6 +236,10 @@ mod non_web {
             res.is_ok()
         }
 
+        fn park(&mut self) -> bool {
+            true
+        }
+
         fn name(&self) -> &str {
             &self.name
         }
@@ -978,6 +982,10 @@ mod web {
 
             let res = self.handle.post_message(&JsValue::from(ptr));
             res.is_ok()
+        }
+
+        fn park(&mut self) -> bool {
+            true
         }
 
         fn name(&self) -> &str {

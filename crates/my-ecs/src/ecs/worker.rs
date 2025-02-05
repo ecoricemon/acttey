@@ -35,9 +35,7 @@ pub trait Work {
     ///
     /// It's highly recommended not to use long-term spin-lock because it may
     /// last undefinitely.
-    fn park(&mut self) -> bool {
-        true
-    }
+    fn park(&mut self) -> bool;
 
     /// Returns worker name.
     fn name(&self) -> &str;

@@ -1,63 +1,255 @@
 use crate::{
-    ds::AnyVec,
+    ds::{AnyVec, UnsafeFuture},
     ecs::{
+        cmd::{Command, EntityMoveCommandBuilder},
         ent::{
             component::{Component, ComponentKey},
             entity::{EntityId, EntityKeyRef},
             storage::{EntityContainer, EntityReg},
         },
         entry::{Ecs, EcsEntry},
-        sched::ctrl::SUB_CONTEXT,
+        lock::RequestLockFuture,
+        resource::Resource,
+        sched::{
+            comm::{CommandSender, ParkingSender},
+            ctrl::{MainWaker, SubContext, UnsafeWaker, SUB_CONTEXT},
+            task::{AsyncTask, Task},
+        },
+        sys::request::Request,
+        worker::Message,
+        DynResult,
     },
     util::macros::debug_format,
 };
 use std::{
     cmp,
     collections::{hash_map::Entry, HashMap},
+    future::Future,
     ptr::NonNull,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc, Mutex, MutexGuard,
+    },
 };
 
-/// Returns shared reference to [`Shared`] struct.
-///
-/// This function can be called on sub worker context only. If you're on main
-/// worker context, then get the reference through [`Ecs`].
-pub(crate) fn get_shared<'a>() -> &'a Shared {
-    let ptr = SUB_CONTEXT.get();
-    assert!(!ptr.is_dangling());
-
-    // Safety: Current worker has valid sub context pointer.
-    unsafe { ptr.as_ref().get_shared() }
+pub mod prelude {
+    pub use super::{Commander, Post};
 }
 
-/// Globally shared data.
+/// A [`Resource`] to send command or future.
 ///
-/// To be shared across workers, this struct is intended to be wrapped in
-/// [`Arc`].
-///
-/// This struct contains data that can be accessed from main or sub workers.
-/// Main worker can access this through [`Ecs`] while sub workers can do it
-/// through [`get_shared`].
-#[derive(Debug)]
-pub(crate) struct Shared {
+/// This resource provides clients funtionalities to send commands or futures
+/// in their systems. This resource also provides interior mutability, so that
+/// clients can request the resource with [`ResRead`](crate::prelude::ResRead).
+//
+// By registering this resource in each ECS instance, it is possible to have
+// multiple ECS instances in one worker. Global function & static variable
+// approach, on the other hand, is not good option for that because it cannot
+// determine which ECS instance is the destination of sending easily.
+pub struct Post {
+    tx_cmd: CommandSender,
+    tx_msg: ParkingSender<Message>,
+    tx_dedi: ParkingSender<Task>,
+    fut_cnt: Arc<AtomicU32>,
     ent_move: Mutex<EntMoveStorage>,
 }
 
-impl Shared {
-    pub(crate) fn new() -> Self {
+impl Post {
+    pub(super) fn new(
+        tx_cmd: CommandSender,
+        tx_msg: ParkingSender<Message>,
+        tx_dedi: ParkingSender<Task>,
+        fut_cnt: Arc<AtomicU32>,
+    ) -> Self {
         Self {
+            tx_cmd,
+            tx_msg,
+            tx_dedi,
+            fut_cnt,
             ent_move: Mutex::new(EntMoveStorage::new()),
         }
     }
 
-    /// Locks mutex of the [`EntMoveStorage`] and returns mutex guard of it.
+    /// Sends the given command to ECS scheduler.
+    ///
+    /// Commands are executed on the main worker, but the command is not
+    /// executed at the time of sending. ECS scheduler runs all buffered
+    /// commands at the end of current cycle and before the next cycle.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::prelude::*;
+    /// use std::sync::mpsc;
+    ///
+    /// let (tx, rx) = mpsc::channel();
+    ///
+    /// // A system sending a command.
+    /// let tx_a = tx.clone();
+    /// let sys_a = move |rr: ResRead<Post>| {
+    ///     tx_a.send("sys_a").unwrap();
+    ///     let tx_aa = tx_a.clone();
+    ///     rr.send_command(move |ecs| {
+    ///         tx_aa.send("cmd_a").unwrap();
+    ///         Ok(())
+    ///     });
+    /// };
+    ///
+    /// // A system sending a command.
+    /// let tx_b = tx.clone();
+    /// let sys_b = move |rr: ResRead<Post>| {
+    ///     tx_b.send("sys_b").unwrap();
+    ///     let tx_bb = tx_b.clone();
+    ///     rr.send_command(move |ecs| {
+    ///         tx_bb.send("cmd_b").unwrap();
+    ///         Ok(())
+    ///     });
+    /// };
+    ///
+    /// Ecs::default(WorkerPool::with_len(2), [2])
+    ///     .add_systems((sys_a, sys_b))
+    ///     .step();
+    ///
+    /// // No data dependency between `sys_a` and `sys_b`, so they can be run
+    /// // simultaneously.
+    /// assert!(matches!(rx.try_recv(), Ok("sys_a") | Ok("sys_b")));
+    /// assert!(matches!(rx.try_recv(), Ok("sys_a") | Ok("sys_b")));
+    /// assert!(matches!(rx.try_recv(), Ok("cmd_a") | Ok("cmd_b")));
+    /// assert!(matches!(rx.try_recv(), Ok("cmd_a") | Ok("cmd_b")));
+    /// ```
+    pub fn send_command<F>(&self, f: F)
+    where
+        F: FnOnce(Ecs) -> DynResult<()> + Send + 'static,
+    {
+        let wrapped = Some(f);
+        let boxed: Box<dyn Command> = Box::new(wrapped);
+        self.tx_cmd.send_or_cancel(boxed.into());
+    }
+
+    /// Sends the given future to ECS scheduler.
+    ///
+    /// The future is guaranteed to be polled more than or just once in the
+    /// current cycle.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use my_ecs::prelude::*;
+    /// use std::{time::Duration, sync::{Arc, Mutex}};
+    ///
+    /// let state = Arc::new(Mutex::new(0));
+    ///
+    /// let c_state = Arc::clone(&state);
+    /// let foo = async move {
+    ///     *c_state.lock().unwrap() = 1;
+    ///     async_io::Timer::after(Duration::from_millis(10)).await;
+    ///     *c_state.lock().unwrap() = 2;
+    /// };
+    ///
+    /// Ecs::default(WorkerPool::new(), [])
+    ///     .add_once_system(move |rr: ResRead<Post>| {
+    ///         rr.send_future(foo);
+    ///     })
+    ///     .run(|_| {});
+    ///
+    /// assert_eq!(*state.lock().unwrap(), 2);
+    /// ```
+    pub fn send_future<F, R>(&self, future: F)
+    where
+        F: Future<Output = R> + Send + 'static,
+        R: Command,
+    {
+        let ptr = SUB_CONTEXT.get();
+
+        if ptr.is_dangling() {
+            on_main(self, future);
+        } else {
+            on_sub(future, *ptr);
+        }
+
+        // === Internal helper functions ===
+
+        fn on_main<F, R>(this: &Post, future: F)
+        where
+            F: Future<Output = R> + Send + 'static,
+            R: Command,
+        {
+            // Allocates memory for the future.
+            let waker = MainWaker::new(this.tx_dedi.clone());
+            let handle = UnsafeFuture::new(future, waker, consume_ready_future::<R>);
+
+            // Increases future count.
+            this.fut_cnt.fetch_add(1, Ordering::Relaxed);
+
+            // Pushes the future handle onto dedicated queue.
+            let task = Task::Async(AsyncTask(handle));
+            this.tx_dedi.send(task).unwrap();
+        }
+
+        fn on_sub<F, R>(future: F, cx: NonNull<SubContext>)
+        where
+            F: Future<Output = R> + Send + 'static,
+            R: Command,
+        {
+            // Allocates memory for the future.
+            let waker = UnsafeWaker::new(cx.as_ptr());
+            let handle = UnsafeFuture::new(future, waker, consume_ready_future::<R>);
+
+            // Pushes the future handle onto local future queue.
+            // Safety: Current worker has valid sub context pointer.
+            let comm = unsafe { cx.as_ref().get_comm() };
+            comm.push_future_task(handle);
+
+            // Increases future count.
+            // Main worker will check this whenever it needs.
+            comm.signal().add_future_count(1);
+
+            // If current worker's local queue is not empty, current worker cannot
+            // do the future task promptly, so wakes another worker to steal it.
+            if !comm.is_local_empty() {
+                comm.signal().sub().notify_one();
+            }
+        }
+    }
+
+    pub fn request_lock<'buf, Req>(&self) -> RequestLockFuture<'buf, Req>
+    where
+        Req: Request,
+    {
+        RequestLockFuture::new(self.tx_cmd.clone(), self.tx_msg.clone())
+    }
+
+    pub fn change_entity(&self, eid: EntityId) -> EntityMoveCommandBuilder<'_> {
+        let guard = self.lock_entity_move_storage();
+        EntityMoveCommandBuilder::new(&self.tx_cmd, guard, eid)
+    }
+
+    pub(crate) fn as_commander(&self) -> Commander<'_> {
+        Commander(self)
+    }
+
     pub(crate) fn lock_entity_move_storage(&self) -> MutexGuard<'_, EntMoveStorage> {
         self.ent_move.lock().unwrap()
     }
 
     pub(crate) fn shrink_to_fit(&self) {
-        self.ent_move.lock().unwrap().shrink_to_fit();
+        let mut guard = self.ent_move.lock().unwrap();
+        guard.shrink_to_fit();
     }
+}
+
+impl Resource for Post {}
+
+pub struct Commander<'a>(&'a Post);
+
+impl Commander<'_> {
+    pub fn change_entity(&self, eid: EntityId) -> EntityMoveCommandBuilder<'_> {
+        self.0.change_entity(eid)
+    }
+}
+
+pub(crate) fn consume_ready_future<T: Command>(mut res: T, ecs: Ecs<'_>) -> DynResult<()> {
+    res.command(ecs)
 }
 
 /// A temporary storage containing entity move commands caused by attaching or
@@ -395,10 +587,10 @@ mod tests {
 
         Ecs::default(WorkerPool::with_len(1), [1])
             .register_entity_of::<Ea>()
-            .add_system(SystemDesc::new().with_once(|ew: EntWrite<Ea>| {
+            .add_system(SystemDesc::new().with_once(|rr: ResRead<Post>, ew: EntWrite<Ea>| {
                 let eid = ew.take_recur().add(Ea { ca: Ca });
                 // `Ea` contains `Ca`, so clients cannot add `Ca` again.
-                global::entity(eid).attach(Ca);
+                rr.change_entity(eid).attach(Ca);
             }))
             .step();
     }
@@ -417,10 +609,10 @@ mod tests {
 
         Ecs::default(WorkerPool::with_len(1), [1])
             .register_entity_of::<Ea>()
-            .add_system(SystemDesc::new().with_once(|ew: EntWrite<Ea>| {
+            .add_system(SystemDesc::new().with_once(|rr: ResRead<Post>, ew: EntWrite<Ea>| {
                 let eid = ew.take_recur().add(Ea { ca: Ca });
                 // Duplicated components are not allowed.
-                global::entity(eid).attach(Cb).attach(Cb);
+                rr.change_entity(eid).attach(Cb).attach(Cb);
             }))
             .step();
     }
@@ -439,10 +631,10 @@ mod tests {
 
         Ecs::default(WorkerPool::with_len(1), [1])
             .register_entity_of::<Ea>()
-            .add_system(SystemDesc::new().with_once(|ew: EntWrite<Ea>| {
+            .add_system(SystemDesc::new().with_once(|rr: ResRead<Post>, ew: EntWrite<Ea>| {
                 let eid = ew.take_recur().add(Ea { ca: Ca });
                 // `Ea` doesn't contain `Cb`, so clients cannot remove `Cb`.
-                global::entity(eid).detach::<Cb>();
+                rr.change_entity(eid).detach::<Cb>();
             }))
             .step();
     }
@@ -461,10 +653,10 @@ mod tests {
 
         Ecs::default(WorkerPool::with_len(1), [1])
             .register_entity_of::<Ea>()
-            .add_system(SystemDesc::new().with_once(|ew: EntWrite<Ea>| {
+            .add_system(SystemDesc::new().with_once(|rr: ResRead<Post>, ew: EntWrite<Ea>| {
                 let eid = ew.take_recur().add(Ea { ca: Ca, cb: Cb });
                 // Removing the same component multiple times is not allowed.
-                global::entity(eid).detach::<Cb>().detach::<Cb>();
+                rr.change_entity(eid).detach::<Cb>().detach::<Cb>();
             }))
             .step();
     }

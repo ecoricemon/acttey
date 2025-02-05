@@ -27,17 +27,21 @@ mod non_web {
         // - Compute tasks in group 1.
 
         ecs.add_once_systems((
-            move || global::schedule_future(async_io_server(exit_rx)),
-            move || global::schedule_future(async_io_client(exit_tx)),
+            move |rr: ResRead<Post>| rr.send_future(async_io_server(exit_rx)),
+            move |rr: ResRead<Post>| rr.send_future(async_io_client(exit_tx)),
         ))
-        .add_system(SystemDesc::new().with_group_index(1).with_once(|| {
-            global::schedule_future(async_compute());
-            global::schedule_future(async_compute());
-        }))
+        .add_system(
+            SystemDesc::new()
+                .with_group_index(1)
+                .with_once(|rr: ResRead<Post>| {
+                    rr.send_future(async_compute());
+                    rr.send_future(async_compute());
+                }),
+        )
         .unwrap();
 
         print!("[GOOD example] ");
-        ecs.run();
+        ecs.run(|_| {});
     }
 
     pub(super) fn bad_example() {
@@ -51,19 +55,19 @@ mod non_web {
         // - Compute tasks in group 0.
 
         ecs.add_once_systems((
-            move || global::schedule_future(async_io_server(exit_rx)),
-            || {
-                global::schedule_future(async_compute());
-                global::schedule_future(async_compute());
+            move |rr: ResRead<Post>| rr.send_future(async_io_server(exit_rx)),
+            |rr: ResRead<Post>| {
+                rr.send_future(async_compute());
+                rr.send_future(async_compute());
             },
-            move || {
-                global::schedule_future(async_io_client(exit_tx));
+            move |rr: ResRead<Post>| {
+                rr.send_future(async_io_client(exit_tx));
             },
         ))
         .unwrap();
 
         print!("[BAD example] ");
-        ecs.run();
+        ecs.run(|_| {});
     }
 
     // Function that needs to respond quickly.

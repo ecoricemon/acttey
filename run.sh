@@ -59,7 +59,7 @@ run_crates() {
     done
 }
 
-test() {
+test_debug() {
     local ret=0
 
     if [ $is_debug -eq 1 ]; then
@@ -70,6 +70,11 @@ test() {
             exit $ret
         fi
     fi
+}
+
+test_release() {
+    local ret=0
+
     if [ $is_release -eq 1 ]; then
         print_title "Test on Release build"
         cargo test --tests -r --target $(get_host_triple)
@@ -77,6 +82,21 @@ test() {
         if [ $ret -ne 0 ]; then
             exit $ret
         fi
+    fi
+}
+
+test_tsan() {
+    local ret=0
+}
+
+test_repeat() {
+    local ret=0
+
+    print_title "Repeat test"
+    REPEAT=1 cargo test --tests -r --target $(get_host_triple)
+    ret=$?
+    if [ $ret -ne 0 ]; then
+        exit $ret
     fi
 }
 
@@ -136,7 +156,7 @@ clean() {
 
 is_debug=1
 is_release=0
-is_tsan=0
+test_kind=""
 is_recursive=0
 all_args=("$@")
 opt_args=${all_args[@]:1}
@@ -155,7 +175,12 @@ do
         -tsan)
             is_debug=0
             is_release=0
-            is_tsan=1
+            test_kind="tsan"
+            ;;
+        -rep)
+            is_debug=0
+            is_release=0
+            test_kind="rep"
             ;;
         -R)
             is_recursive=1
@@ -171,10 +196,13 @@ cmd=${all_args[0]}
 
 case $cmd in
     test)
-        if [ $is_tsan -ne 1 ]; then
-            test $is_debug $is_release
-        else
+        if [ "$test_kind" == "tsan" ]; then
             test_tsan
+        elif [ "$test_kind" == "rep" ]; then
+            test_repeat
+        else
+            test_debug
+            test_release
         fi
         ;;
     doc)
@@ -184,7 +212,9 @@ case $cmd in
         run_examples
         ;;
     all)
-        test
+        test_doc
+        test_debug
+        test_repeat
         run_examples
         ;;
     clean)

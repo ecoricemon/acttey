@@ -1,12 +1,15 @@
 use super::{
-    cmd::{self, Command, CommandObject, RawCommand},
+    cmd::{Command, CommandObject, RawCommand},
     entry::{Ecs, EcsEntry},
-    sched::ctrl::{SUB_CONTEXT, WORKER_ID},
+    sched::{
+        comm::{CommandSender, ParkingSender},
+        ctrl::WORKER_ID,
+    },
     sys::{
         request::{Request, Response, SystemBuffer},
         system::{InsertPos, Invoke, System, SystemData, SystemDesc, SystemId, SystemState},
     },
-    worker::Message,
+    worker::{Message, WorkerId},
     DynResult,
 };
 use crate::ds::ManagedMutPtr;
@@ -24,15 +27,11 @@ use std::{
 };
 use thiserror::Error;
 
-pub const fn request_lock<'buf, Req>() -> RequestLockFuture<'buf, Req>
-where
-    Req: Request,
-{
-    RequestLockFuture::new()
-}
-
-// NOTE: This struct references internal fields so that it must not be moved.
+// TODO: (Low) Fields for main worker and sub worker are combined. Split the
+// struct.
 pub struct RequestLockFuture<'buf, Req> {
+    tx_cmd: CommandSender,
+    tx_msg: ParkingSender<Message>,
     cmd: Option<RequestLockCommand<Req>>,
     lock: Mutex<RequestLock>,
     _marker: PhantomData<&'buf Req>,
@@ -42,8 +41,10 @@ impl<Req> RequestLockFuture<'_, Req>
 where
     Req: Request,
 {
-    const fn new() -> Self {
+    pub(crate) const fn new(tx_cmd: CommandSender, tx_msg: ParkingSender<Message>) -> Self {
         Self {
+            tx_cmd,
+            tx_msg,
             cmd: None,
             lock: Mutex::new(RequestLock::new()),
             _marker: PhantomData,
@@ -64,10 +65,11 @@ impl<'buf, Req: Request> Future for RequestLockFuture<'buf, Req> {
             let mut lock = this.lock.lock().unwrap();
             if lock.state() == RequestLockState::INIT {
                 // Creates command with system.
+                let tx_msg = this.tx_msg.clone();
                 let waker = cx.waker().clone();
                 let lock_ptr = NonNull::new_unchecked(&this.lock as *const _ as *mut _);
                 let group_index = WORKER_ID.get().group_index();
-                let cmd = RequestLockCommand::new(waker, lock_ptr, group_index);
+                let cmd = RequestLockCommand::new(tx_msg, waker, lock_ptr, group_index);
 
                 // Sets the command to this struct.
                 this.cmd = Some(cmd);
@@ -90,17 +92,18 @@ impl<'buf, Req: Request> Future for RequestLockFuture<'buf, Req> {
                 // Creates command object using the command in this struct,
                 // then sends it.
                 let cmd_obj = CommandObject::Raw(RawCommand::new(this_cmd));
-                cmd::schedule_command_object(cmd_obj);
+                this.tx_cmd.send_or_cancel(cmd_obj);
 
                 Poll::Pending
             } else if lock.state().intersects(RequestLockState::COMPLETED) {
+                let tx_msg = this.tx_msg.clone();
                 let sid = lock.take_system_id().unwrap();
                 let buf = lock.take_system_buffer().unwrap();
                 // Safety: Scheduler guarantees that we're the only one who
                 // references to the memory at `buf`.
                 let resp = Response::new(&mut *buf.as_ptr());
 
-                Poll::Ready(Ok(RequestLockGuard::new(sid, resp)))
+                Poll::Ready(Ok(RequestLockGuard::new(tx_msg, sid, resp)))
             } else if lock.state().intersects(RequestLockState::CANCELLED) {
                 Poll::Ready(Err(RequestLockError::Cancelled))
             } else {
@@ -157,8 +160,14 @@ struct RequestLockCommand<Req> {
 unsafe impl<Req> Send for RequestLockCommand<Req> {}
 
 impl<Req> RequestLockCommand<Req> {
-    const fn new(waker: Waker, lock_ptr: NonNull<Mutex<RequestLock>>, group_index: u16) -> Self {
+    fn new(
+        tx_msg: ParkingSender<Message>,
+        waker: Waker,
+        lock_ptr: NonNull<Mutex<RequestLock>>,
+        group_index: u16,
+    ) -> Self {
         let sys = RequestLockSystem {
+            tx_msg: Some(tx_msg),
             waker,
             lock_ptr: Some(lock_ptr),
             _marker: PhantomData,
@@ -194,10 +203,18 @@ impl<Req: Request> Command for RequestLockCommand<Req> {
         lock.set_state_bits(RequestLockState::SCHED_SYS);
         drop(lock);
 
+        // Dummy group index! Then just put the system in the first group.
+        // When will the group index be dummy? - Locked by a dedicated system.
+        let gi = if self.group_index != WorkerId::dummy().group_index() {
+            self.group_index
+        } else {
+            0
+        };
+
         let desc = SystemDesc::new()
             .with_private(true)
             .with_activation(1, InsertPos::Front)
-            .with_group_index(self.group_index)
+            .with_group_index(gi)
             .with_data(sdata);
         ecs.add_system(desc).take()?;
         Ok(())
@@ -218,6 +235,7 @@ impl<Req: Request> Command for RequestLockCommand<Req> {
 }
 
 struct RequestLockSystem<Req> {
+    tx_msg: Option<ParkingSender<Message>>,
     waker: Waker,
     lock_ptr: Option<NonNull<Mutex<RequestLock>>>,
     _marker: PhantomData<Req>,
@@ -263,7 +281,8 @@ impl<Req: Request> System for RequestLockSystem<Req> {
             // Safety: Scheduler guarantees that we're the only one who
             // references to the `buf` memory.
             let resp = unsafe { Response::<Req>::new(&mut *buf.as_ptr()) };
-            drop(RequestLockGuard::new(sid, resp));
+            let tx_msg = self.tx_msg.take().unwrap();
+            drop(RequestLockGuard::new(tx_msg, sid, resp));
         } else {
             // Sets `sid` and `buf` to `RequestLockFuture`.
             lock.set_output(sid, buf);
@@ -283,13 +302,15 @@ impl<Req: Request> System for RequestLockSystem<Req> {
 }
 
 pub struct RequestLockGuard<'buf, Req: Request> {
+    tx_msg: ParkingSender<Message>,
     sid: SystemId,
     resp: Option<Response<'buf, Req>>,
 }
 
 impl<'buf, Req: Request> RequestLockGuard<'buf, Req> {
-    const fn new(sid: SystemId, resp: Response<'buf, Req>) -> Self {
+    const fn new(tx_msg: ParkingSender<Message>, sid: SystemId, resp: Response<'buf, Req>) -> Self {
         Self {
+            tx_msg,
             sid,
             resp: Some(resp),
         }
@@ -322,17 +343,16 @@ impl<Req: Request> DerefMut for RequestLockGuard<'_, Req> {
 
 impl<Req: Request> Drop for RequestLockGuard<'_, Req> {
     fn drop(&mut self) {
+        // The struct is a kind of hidden system. It needs to send Fin message
+        // to main worker like other systems.
+
         // Drops `self.resp` first for the next borrow.
         self.resp.take();
 
         // Sends `Fin` message to main worker in order to release resources.
-        let cx = SUB_CONTEXT.get();
-        assert!(!cx.is_dangling());
-        // Safety: Valid pointer.
-        let cx = unsafe { cx.as_ref() };
-        let wid = cx.get_comm().worker_id();
+        let wid = WORKER_ID.get();
         let msg = Message::Fin(wid, self.sid);
-        cx.get_comm().send_message(msg);
+        self.tx_msg.send(msg).unwrap();
     }
 }
 

@@ -1,17 +1,17 @@
 use super::{
     cache::{CacheStorage, RefreshCacheStorage},
-    cmd::{Command, Commander},
+    cmd::Command,
     ent::{
         component::Components,
         entity::{ContainEntity, Entity, EntityId, EntityIndex, EntityKeyRef},
         storage::{AsEntityReg, EntityContainer, EntityReg, EntityStorage},
     },
+    post::{Commander, Post},
     resource::{Resource, ResourceDesc, ResourceIndex, ResourceKey, ResourceStorage},
     sched::{
         comm::{command_channel, CommandReceiver, CommandSender},
         ctrl::Scheduler,
     },
-    share::Shared,
     sys::{
         storage::SystemStorage,
         system::{
@@ -22,7 +22,7 @@ use super::{
     worker::Work,
     DynResult, EcsError,
 };
-use crate::util::{macros::debug_format, Or, WithResult};
+use crate::util::{macros::debug_format, Or, With, WithResult};
 use my_ecs_macros::repeat_macro;
 use std::{
     any::Any,
@@ -505,7 +505,7 @@ pub trait EcsEntry {
     /// let eid = ecs.add_entity(ei, E { a: Ca }).unwrap();
     ///
     /// // Attaches `Cb` to `E` so that it's now (Ca, Cb);
-    /// ecs.execute_command(move |cmdr| cmdr.entity(eid).attach(Cb).finish())
+    /// ecs.execute_command(move |cmdr| cmdr.change_entity(eid).attach(Cb).finish())
     ///     .unwrap();
     ///
     /// // We can unregister (Ca, Cb).
@@ -519,6 +519,12 @@ pub trait EcsEntry {
     where
         F: FnOnce(Commander) -> R,
         R: Command;
+
+    /// Returns errors generated from commands or futures.
+    ///
+    /// Commands and futures don't cause panic. Instead, errors are collected
+    /// in a vector. Clients can retrieve the vector using this method.
+    fn errors(&mut self) -> Vec<Box<dyn Error + Send + Sync + 'static>>;
 }
 
 /// A helper trait for [`EcsEntry::add_systems`].
@@ -746,11 +752,14 @@ struct EcsVTable {
 
     // === Etc. ===
 
-    get_shared:
-        unsafe fn(NonNull<u8>) -> NonNull<Shared>,
+    post_ptr:
+        unsafe fn(NonNull<u8>) -> NonNull<Post>,
 
     step:
         unsafe fn(NonNull<u8>),
+    
+    errors:
+        unsafe fn(NonNull<u8>) -> Vec<Box<dyn Error + Send + Sync + 'static>>,
 }
 
 impl EcsVTable {
@@ -908,15 +917,14 @@ impl EcsVTable {
             this.get_resource_index_inner(rkey)
         }
 
-        unsafe fn get_shared<W, S>(this: NonNull<u8>) -> NonNull<Shared>
+        unsafe fn post_ptr<W, S>(this: NonNull<u8>) -> NonNull<Post>
         where
             W: Work + 'static,
             S: BuildHasher + Default + 'static,
         {
             let this: &mut EcsApp<W, S> = unsafe { this.cast().as_mut() };
-            let shared = this.shared.as_ref();
-            let ptr = (shared as *const Shared).cast_mut();
-            unsafe { NonNull::new_unchecked(ptr) }
+            let post = this.get_resource::<Post>().unwrap();
+            unsafe { NonNull::new_unchecked((post as *const Post).cast_mut()) }
         }
 
         unsafe fn step<W, S>(this: NonNull<u8>)
@@ -926,6 +934,15 @@ impl EcsVTable {
         {
             let this: &mut EcsApp<W, S> = unsafe { this.cast().as_mut() };
             this.step();
+        }
+
+        unsafe fn errors<W, S>(this: NonNull<u8>) -> Vec<Box<dyn Error + Send + Sync + 'static>>
+        where
+            W: Work + 'static,
+            S: BuildHasher + Default + 'static,
+        {
+            let this: &mut EcsApp<W, S> = unsafe { this.cast().as_mut() };
+            this.errors()
         }
 
         Self {
@@ -941,8 +958,9 @@ impl EcsVTable {
             get_resource_inner: get_resource_inner::<W, S>,
             get_resource_mut_inner: get_resource_mut_inner::<W, S>,
             get_resource_index_inner: get_resource_index_inner::<W, S>,
-            get_shared: get_shared::<W, S>,
+            post_ptr: post_ptr::<W, S>,
             step: step::<W, S>,
+            errors: errors::<W, S>,
         }
     }
 }
@@ -1076,10 +1094,10 @@ impl<'ecs> Ecs<'ecs> {
         }
     }
 
-    pub(crate) fn get_shared_ptr(&self) -> NonNull<Shared> {
+    pub(crate) fn post_ptr(&self) -> NonNull<Post> {
         unsafe {
             let vtable = self.vtable.as_ref();
-            (vtable.get_shared)(self.this)
+            (vtable.post_ptr)(self.this)
         }
     }
 }
@@ -1112,7 +1130,7 @@ impl EcsEntry for Ecs<'_> {
             (vtable.register_system_inner)(self.this, sdata, group_index, volatile, private)
         };
 
-        // @@@ TODO: If we failed to activate it, we have to unregister it.
+        // TODO: If we failed to activate it, we have to unregister it.
         //
         // Activates the system.
         if let Ok(sid) = res.as_ref() {
@@ -1124,10 +1142,15 @@ impl EcsEntry for Ecs<'_> {
 
         let res = res.map_err(|err| {
             err.map_data(|sdata| {
-                let any = sdata.try_into_any().unwrap();
-                let sys = *any.downcast::<Sys>().unwrap();
+                let sys = match sdata.try_into_any() {
+                    Ok(any) => {
+                        let sys = *any.downcast::<Sys>().unwrap();
+                        Or::A(sys)
+                    }
+                    Err(sdata) => Or::B(sdata),
+                };
                 SystemDesc {
-                    sys: Or::A(sys),
+                    sys,
                     private,
                     group_index,
                     volatile,
@@ -1326,11 +1349,18 @@ impl EcsEntry for Ecs<'_> {
         F: FnOnce(Commander) -> R,
         R: Command,
     {
-        let shared = unsafe { self.get_shared_ptr().as_ref() };
-        let cmdr = Commander::new(shared);
+        let post = self.get_resource::<Post>().unwrap();
+        let cmdr = post.as_commander();
         let mut cmd = f(cmdr);
         let res = cmd.command(unsafe { self.copy() });
         WithResult::new(self, res)
+    }
+
+    fn errors(&mut self) -> Vec<Box<dyn Error + Send + Sync + 'static>> {
+        unsafe {
+            let vtable = self.vtable.as_ref();
+            (vtable.errors)(self.this)
+        }
     }
 }
 
@@ -1364,9 +1394,10 @@ where
 
     sched: Scheduler<W, S>,
 
+    cmd_errs: Vec<Box<dyn Error + Send + Sync + 'static>>,
+
     vtable: EcsVTable,
 
-    shared: Arc<Shared>,
     tx_cmd: CommandSender,
     rx_cmd: Rc<CommandReceiver>,
 }
@@ -1407,22 +1438,30 @@ where
         // We need a group even if it's empty for now.
         let groups = if groups.is_empty() { &[0][..] } else { groups };
 
-        let shared = Arc::new(Shared::new());
         let (tx_cmd, rx_cmd) = command_channel(thread::current());
         let rx_cmd = Rc::new(rx_cmd);
-        let sched = Scheduler::new(workers, groups, &shared, &tx_cmd, Rc::clone(&rx_cmd));
+        let sched = Scheduler::new(workers, groups, tx_cmd.clone(), Rc::clone(&rx_cmd));
 
-        Self {
+        let mut this = Self {
             sys_stor: SystemStorage::new(groups.len()),
             ent_stor: EntityStorage::new(),
             res_stor: ResourceStorage::new(),
             cache_stor: CacheStorage::new(),
             sched,
-            shared,
-            tx_cmd,
-            rx_cmd,
+            cmd_errs: Vec::new(),
             vtable: EcsVTable::new::<W, S>(),
-        }
+            tx_cmd: tx_cmd.clone(),
+            rx_cmd,
+        };
+
+        // Registers a `Post` resource.
+        let tx_msg = this.sched.get_send_message_queue().clone();
+        let fut_cnt = Arc::clone(this.sched.get_future_count());
+        let tx_dedi = this.sched.get_tx_dedi_queue().clone();
+        let post = Post::new(tx_cmd, tx_msg, tx_dedi, fut_cnt);
+        this.add_resource(post).unwrap();
+
+        this
     }
 
     /// Destroys the ecs instance and returns workers.
@@ -1432,15 +1471,11 @@ where
         self.clear_system();
 
         // Takes workers out from the scheduler.
+        let tx_cmd = self.tx_cmd.clone();
+        let rx_cmd = Rc::clone(&self.rx_cmd);
         let old = mem::replace(
             &mut self.sched,
-            Scheduler::new(
-                Vec::new(),
-                &[],
-                &self.shared,
-                &self.tx_cmd,
-                Rc::clone(&self.rx_cmd),
-            ),
+            Scheduler::new(Vec::new(), &[], tx_cmd, rx_cmd),
         );
         old.take_workers()
     }
@@ -1466,7 +1501,8 @@ where
 
     /// Shrinks the capacity of internal data structures as much as possible.
     pub fn shrink_to_fit(&mut self) {
-        self.shared.shrink_to_fit();
+        let post = self.get_resource::<Post>().unwrap();
+        post.shrink_to_fit();
         // TODO: need more shrink methods.
     }
 
@@ -1492,24 +1528,25 @@ where
     /// assert_eq!(*cnt.lock().unwrap(), 1);
     /// ```
     pub fn step(&mut self) -> &mut Self {
+        self._step();
+        self
+    }
+
+    /// Returns whether commands were executed at this cycle.
+    fn _step(&mut self) -> bool {
         // Executes.
-        if self.has_active_system() {
-            let sgroups = &mut self.sys_stor.sgroups;
-            let mut cache = RefreshCacheStorage::new(
-                &mut self.cache_stor,
-                &mut self.ent_stor,
-                &mut self.res_stor,
-            );
-            self.sched.execute_all(sgroups, &mut cache);
-        }
+        let sgroups = &mut self.sys_stor.sgroups;
+        let mut cache =
+            RefreshCacheStorage::new(&mut self.cache_stor, &mut self.ent_stor, &mut self.res_stor);
+        self.sched.execute_all(sgroups, &mut cache);
 
         // Consumes buffered commands.
-        self.process_buffered_commands();
+        let run_cmd = self.process_buffered_commands();
 
         // Clears dead systems caused by the execution above.
         self.clear_dead_system();
 
-        self
+        run_cmd
     }
 
     /// Executes active systems of all groups until their lifetime goes to zero.
@@ -1529,16 +1566,41 @@ where
     ///             .with_activation(2, InsertPos::Back)
     ///             .with_system(move || {
     ///                 *c_cnt.lock().unwrap() += 1;
-    ///             }),
+    ///             })
     ///     )
-    ///     .run();
+    ///     .run(|_| {});
     /// assert_eq!(*cnt.lock().unwrap(), 2);
     /// ```
-    pub fn run(&mut self) -> &mut Self {
+    pub fn run<F, R>(&mut self, mut handle_error: F) -> With<&mut Self, Vec<R>>
+    where
+        F: FnMut(Box<dyn Error + Send + Sync + 'static>) -> R,
+    {
         debug_assert_eq!(self.sched.num_groups(), self.sys_stor.num_groups());
 
-        while !self.step().wait_for_idle().is_completed() {}
-        self
+        let mut ret = Vec::new();
+
+        loop {
+            let run_cmd = self._step();
+            let is_completed = self.wait_for_idle().is_completed();
+
+            for err in self.errors() {
+                ret.push(handle_error(err));
+            }
+
+            if is_completed {
+                break;
+            }
+
+            // * We've run commands: new active systems could be inserted. We
+            //   need to go to the next cycle.
+            // * No commands & remaining dedicated futures: Waits for the
+            //   remaining futures to send tasks in order to avoid busy-waiting.
+            if !run_cmd && self.sched.has_dedicated_future() {
+                self.sched.wait_receiving_dedicated_task();
+            }
+        }
+
+        With::new(self, ret)
     }
 
     /// Waits for ecs to be idle.
@@ -1567,17 +1629,13 @@ where
         // For main worker, no uncompleted commands?
         let no_cmd = !self.sched.has_command();
 
+        // For main worker, no remaining async tasks?
+        let no_fut = !self.sched.has_dedicated_future();
+
         // For sub workers, they are closed?
         let is_sub_exhausted = self.sched.is_work_groups_exhausted();
 
-        is_sub_exhausted && no_active && no_cmd
-    }
-
-    fn has_active_system(&self) -> bool {
-        self.sys_stor
-            .sgroups
-            .iter()
-            .any(|sgroup| sgroup.len_active() > 0)
+        is_sub_exhausted && no_active && no_cmd && no_fut
     }
 
     // TODO: doc example to test downcast error
@@ -1817,11 +1875,20 @@ where
         self.res_stor.index(rkey)
     }
 
-    fn process_buffered_commands(&mut self) {
+    fn process_buffered_commands(&mut self) -> bool {
+        let mut run_cmd = false;
+
         while let Ok(cmd) = self.rx_cmd.try_recv() {
             let ecs = Ecs::new(self);
-            let _ = cmd.command(ecs);
+            match cmd.command(ecs) {
+                Ok(()) => {}
+                Err(err) => self.cmd_errs.push(err),
+            }
+
+            run_cmd = true;
         }
+
+        run_cmd
     }
 
     /// Cancels out remaining commands.
@@ -2010,6 +2077,10 @@ where
     {
         let res = Ecs::new(self).execute_command(f).take();
         WithResult::new(self, res)
+    }
+
+    fn errors(&mut self) -> Vec<Box<dyn Error + Send + Sync + 'static>> {
+        mem::take(&mut self.cmd_errs)
     }
 }
 
@@ -2267,6 +2338,10 @@ impl EcsEntry for EcsExt<'_> {
     {
         let res = self.ecs.execute_command(f).take();
         WithResult::new(self, res)
+    }
+
+    fn errors(&mut self) -> Vec<Box<dyn Error + Send + Sync + 'static>> {
+        self.ecs.errors()
     }
 }
 

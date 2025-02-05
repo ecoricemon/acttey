@@ -4,24 +4,20 @@ use super::{
         SubComm, WORKER_ID_GEN,
     },
     par::FnContext,
-    task::{ParTask, SysTask, Task},
+    task::{AsyncTask, ParTask, SysTask, Task},
 };
 use crate::{
     ds::{
-        Array, ListPos, ManagedConstPtr, ManagedMutPtr, NonNullExt, ReadyFuture, SetValueList,
-        UnsafeFuture, WakeSend,
+        Array, ListPos, ManagedConstPtr, ManagedMutPtr, NonNullExt, SetValueList, UnsafeFuture,
+        WakeSend,
     },
     ecs::{
         cache::{CacheItem, RefreshCacheStorage},
-        cmd::{Command, CommandObject},
-        entry::Ecs,
-        share::Shared,
+        cmd::CommandObject,
         sys::system::{RawSystemCycleIter, SystemCycleIter, SystemData, SystemGroup, SystemId},
         wait::WaitQueues,
         worker::{Message, PanicMessage, Work, WorkerId},
-        DynResult,
     },
-    global,
     util::prelude::*,
     MAX_GROUP,
 };
@@ -29,8 +25,7 @@ use crossbeam_deque as cb;
 use std::{
     any::Any,
     cell::{Cell, UnsafeCell},
-    collections::{HashMap, VecDeque},
-    future::Future,
+    collections::HashMap,
     hash::BuildHasher,
     marker::PhantomPinned,
     mem,
@@ -38,14 +33,16 @@ use std::{
     pin::Pin,
     ptr::NonNull,
     rc::Rc,
-    sync::Arc,
-    task::Poll,
-    thread::{self, Thread},
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    },
+    thread::{self, Thread, ThreadId},
     time::Duration,
 };
 
 #[derive(Debug)]
-pub(crate) struct Scheduler<W, S> {
+pub(crate) struct Scheduler<W: Work + 'static, S> {
     wgroups: Array<WorkGroup<W>, MAX_GROUP>,
 
     waits: WaitQueues<S>,
@@ -60,7 +57,8 @@ pub(crate) struct Scheduler<W, S> {
     dedi_pendings: Array<Pending<S>, MAX_GROUP>,
 
     /// Ready dedicated tasks.
-    dedi: VecDeque<Task>,
+    tx_dedi: ParkingSender<Task>,
+    rx_dedi: ParkingReceiver<Task>,
 
     /// Channel sending messages to main worker.
     tx_msg: ParkingSender<Message>,
@@ -68,14 +66,25 @@ pub(crate) struct Scheduler<W, S> {
     /// Channel receiving messages from sub workers.
     rx_msg: ParkingReceiver<Message>,
 
+    /// Channel sending commands to main worker.
+    tx_cmd: CommandSender,
+
     /// Channel receiving commands from sub workers.
     rx_cmd: Rc<CommandReceiver>,
 
     /// Main worker id.
     wid: WorkerId,
+
+    /// To avoid frequent creation.
+    waker: MainWaker,
+
+    fut_cnt: Arc<AtomicU32>,
 }
 
-impl<W, S> Scheduler<W, S> {
+impl<W, S> Scheduler<W, S>
+where
+    W: Work + 'static,
+{
     pub(crate) fn num_groups(&self) -> usize {
         self.wgroups.len()
     }
@@ -91,13 +100,21 @@ impl<W, S> Scheduler<W, S> {
 
     /// Determines whether scheduler doesn't have any uncompleted commands.
     pub(crate) fn has_command(&self) -> bool {
-        self.rx_cmd.has()
+        !self.rx_cmd.is_empty()
+    }
+
+    pub(crate) fn has_dedicated_future(&self) -> bool {
+        self.fut_cnt.load(Ordering::Relaxed) > 0
     }
 
     pub(crate) fn wait_exhausted(&self) {
         for wg in self.wgroups.iter() {
             wg.wait_exhausted();
         }
+    }
+
+    pub(crate) fn wait_receiving_dedicated_task(&self) {
+        self.rx_dedi.wait_timeout(Duration::MAX);
     }
 
     /// Destroys this scheduler and then returns internal worker array.
@@ -114,35 +131,70 @@ impl<W, S> Scheduler<W, S> {
         &mut self.waits
     }
 
+    pub(crate) fn get_tx_dedi_queue(&self) -> &ParkingSender<Task> {
+        &self.tx_dedi
+    }
+
+    pub(crate) fn get_send_message_queue(&self) -> &ParkingSender<Message> {
+        &self.tx_msg
+    }
+
+    pub(crate) fn get_future_count(&self) -> &Arc<AtomicU32> {
+        &self.fut_cnt
+    }
+
     fn work_one(&mut self) {
-        if let Some(task) = self.dedi.pop_front() {
+        if let Ok(task) = self.rx_dedi.try_recv() {
             // NOTE: Panics can occur here.
             // TODO: Handle panic?
             match task {
-                Task::System(task) => {
-                    let sid = task.sid();
-                    let resp = match task.execute() {
-                        Ok(_) => Message::Fin(self.wid, sid),
-                        Err(payload) => Message::Panic(PanicMessage {
-                            wid: self.wid,
-                            sid,
-                            payload,
-                            unrecoverable: false,
-                        }),
-                    };
-
-                    // Even if main worker, it needs to send Fin message to
-                    // release data dependency.
-                    self.tx_msg.send(resp).unwrap();
-                }
-                _ => {
-                    debug_assert!(
-                        false,
-                        "parallel or async task is not allowed on main worker"
-                    );
-                }
+                Task::System(task) => self.work_for_system_task(task),
+                Task::Parallel(task) => self.work_for_parallel_task(task),
+                Task::Async(task) => self.work_for_async_task(task),
             }
         }
+    }
+
+    fn work_for_system_task(&self, task: SysTask) {
+        let sid = task.sid();
+
+        let resp = match task.execute(self.wid) {
+            Ok(_) => Message::Fin(self.wid, sid),
+            Err(payload) => Message::Panic(PanicMessage {
+                wid: self.wid,
+                sid,
+                payload,
+                unrecoverable: false,
+            }),
+        };
+
+        // Even if the main worker, it needs to send Fin message to
+        // release data dependency.
+        self.tx_msg.send(resp).unwrap();
+    }
+
+    fn work_for_parallel_task(&self, task: ParTask) {
+        task.execute(self.wid, FnContext::NOT_MIGRATED);
+    }
+
+    fn work_for_async_task(&self, task: AsyncTask) {
+        // Sets waker if needed.
+        unsafe {
+            if !task.will_wake(&self.waker) {
+                task.set_waker(self.waker.clone());
+            }
+        }
+
+        // Executes.
+        let on_ready = |ready| {
+            // Decreases future count.
+            self.fut_cnt.fetch_sub(1, Ordering::Relaxed);
+
+            // Sends the ready future as a command.
+            let cmd = CommandObject::Future(ready);
+            self.tx_cmd.send_or_cancel(cmd);
+        };
+        task.execute(self.wid, on_ready);
     }
 }
 
@@ -154,8 +206,7 @@ where
     pub(crate) fn new(
         mut workers: Vec<W>,
         groups: &[usize],
-        shared: &Arc<Shared>,
-        tx_cmd: &CommandSender,
+        tx_cmd: CommandSender,
         rx_cmd: Rc<CommandReceiver>,
     ) -> Self {
         assert_eq!(workers.len(), groups.iter().sum::<usize>());
@@ -178,16 +229,27 @@ where
             mem::swap(&mut workers, &mut left); // right -> left
 
             // Creates sub context group and initializes it.
-            let mut group = WorkGroup::new(i as u16, left, &tx_msg, tx_cmd, shared);
+            let mut group = WorkGroup::new(i as u16, left, &tx_msg, &tx_cmd);
             group.initialize(&rx_msg);
             acc.push(group);
 
             acc
         });
 
+        let (tx_dedi, rx_dedi) = comm::parking_channel(thread::current());
+        let waker = MainWaker::new(tx_dedi.clone());
+
         let id = WORKER_ID_GEN.get();
         WORKER_ID_GEN.set(id + 1);
-        let wid = WorkerId::new(id, u16::MAX, u16::MAX);
+        let wid = WorkerId::new(
+            id,
+            WorkerId::dummy().group_index(),
+            WorkerId::dummy().worker_index(),
+        );
+
+        // Main worker may have multiple ECS instances, so that setting thread
+        // local variable is not possible.
+        // WORKER_ID.set(wid);
 
         Self {
             wgroups,
@@ -195,11 +257,15 @@ where
             record: ScheduleRecord::new(),
             nor_pendings,
             dedi_pendings,
-            dedi: VecDeque::new(),
+            tx_dedi,
+            rx_dedi,
             tx_msg,
             rx_msg,
+            tx_cmd,
             rx_cmd,
             wid,
+            waker,
+            fut_cnt: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -233,9 +299,9 @@ where
 
         // 2. Runs schedule units. This procedure follows the order below.
         // (1) Tries to pull system tasks as many as possible.
-        // (2) If there are dedicated system tasks, handles just one. Because
-        //     we want to make sub workers busy rather than doing something.
-        // (3) If all system tasks are pulled or handled, escapes the loop.
+        // (2) If there are dedicated tasks, performs just one task. Because we
+        //     want to make sub workers busy rather than doing something.
+        // (3) Waits for messages from work groups.
         loop {
             // (1) Pulls system tasks from cycles and inject them into work
             // groups.
@@ -248,14 +314,13 @@ where
                 }
             }
 
-            // (2) If we have dedicated system task, handles it.
+            // (2) If we have dedicated task, performs just one task.
             self.work_one();
-            if !self.dedi.is_empty() {
+            if !self.rx_dedi.is_empty() {
                 continue;
             }
 
-            // (3) If any cycle is not empty, waits for messages. Otherwise,
-            // breaks the loop.
+            // (3) If any cycle is not empty, waits for messages.
             if lives.iter().any(|&live| live) {
                 self.wait(&mut units, cache, &mut panicked);
             } else {
@@ -348,7 +413,7 @@ where
         #[allow(clippy::needless_range_loop)] // indexing more than one.
         let num_groups = self.wgroups.len();
         for i in 0..num_groups {
-            // @@@ Safety:
+            // Safety: TODO
             unsafe {
                 // For normal tasks.
                 let target = NonNull::new_unchecked(&mut self.wgroups[i] as *mut _);
@@ -361,7 +426,8 @@ where
                 );
 
                 // For dedi tasks.
-                let target = NonNull::new_unchecked(&mut self.dedi as &mut _);
+                let target = &mut self.tx_dedi as *mut _;
+                let target = NonNull::new_unchecked(target);
                 Helper::pending_to_ready::<W, S>(
                     Or::B(target),
                     &mut self.dedi_pendings[i],
@@ -435,8 +501,15 @@ where
             assert!(!self.has_pending(i));
         }
 
-        // Validates if there's no uncompleted dedicated system.
-        assert!(self.dedi.is_empty());
+        // Validates if there's no uncompleted dedicated tasks. System tasks and
+        // parallel tasks on the main worker must have been completed, while
+        // async runners are free to send async tasks to the dedicated queue at
+        // any time even when the scheduler is not running.
+        for task in self.rx_dedi.buffer().iter() {
+            if matches!(task, Task::System(_) | Task::Parallel(_)) {
+                panic!("expected empty dedicated queue, but found: {task:?}");
+            }
+        }
 
         // Validates if message channel is empty.
         match self.rx_msg.try_recv() {
@@ -448,7 +521,7 @@ where
 }
 
 #[derive(Debug)]
-struct ScheduleUnit<'s, W, S> {
+struct ScheduleUnit<'s, W: Work + 'static, S> {
     // Own data.
     cycle: RawSystemCycleIter<S>,
 
@@ -458,7 +531,7 @@ struct ScheduleUnit<'s, W, S> {
     record: NonNull<ScheduleRecord<S>>,
     nor_pendings: NonNull<[Pending<S>]>,
     dedi_pendings: NonNull<[Pending<S>]>,
-    dedi: NonNull<VecDeque<Task>>,
+    tx_dedi: NonNull<ParkingSender<Task>>,
 
     // From others.
     cache: NonNull<RefreshCacheStorage<'s, S>>,
@@ -489,8 +562,8 @@ where
             let nor_pendings = NonNull::new_unchecked(ptr);
             let ptr = sched.dedi_pendings.as_mut_slice() as *mut _;
             let dedi_pendings = NonNull::new_unchecked(ptr);
-            let ptr = &mut sched.dedi as *mut _;
-            let dedi = NonNull::new_unchecked(ptr);
+            let ptr = &mut sched.tx_dedi as *mut _;
+            let tx_dedi = NonNull::new_unchecked(ptr);
             // From others.
             let ptr = cache as *mut _;
             let cache = NonNull::new_unchecked(ptr);
@@ -502,7 +575,7 @@ where
                 record,
                 nor_pendings,
                 dedi_pendings,
-                dedi,
+                tx_dedi,
                 cache,
             }
         }
@@ -536,7 +609,7 @@ where
         let sid = sdata.id();
         let gi = sid.group_index() as usize;
         let (pending, target) = if sdata.flags().is_dedi() {
-            (&mut self.dedi_pendings()[gi], Or::B(self.dedi))
+            (&mut self.dedi_pendings()[gi], Or::B(self.tx_dedi))
         } else {
             (&mut self.nor_pendings()[gi], Or::A(self.wgroup))
         };
@@ -599,7 +672,10 @@ where
     }
 }
 
-impl<W, S> Drop for ScheduleUnit<'_, W, S> {
+impl<W, S> Drop for ScheduleUnit<'_, W, S>
+where
+    W: Work + 'static,
+{
     fn drop(&mut self) {
         // We've consumed cycle completely?
         debug_assert!(self.cycle.position().is_end());
@@ -633,7 +709,7 @@ impl Helper {
     }
 
     fn pending_to_ready<W, S>(
-        target: Or<NonNull<WorkGroup<W>>, NonNull<VecDeque<Task>>>,
+        target: Or<NonNull<WorkGroup<W>>, NonNull<ParkingSender<Task>>>,
         pending: &mut Pending<S>,
         waits: &mut WaitQueues<S>,
         cycle: &mut SystemCycleIter<'_, S>,
@@ -655,7 +731,7 @@ impl Helper {
     }
 
     fn move_ready_system<W>(
-        target: Or<NonNull<WorkGroup<W>>, NonNull<VecDeque<Task>>>,
+        target: Or<NonNull<WorkGroup<W>>, NonNull<ParkingSender<Task>>>,
         sdata: &mut SystemData,
         cache: &mut CacheItem,
     ) where
@@ -683,7 +759,7 @@ impl Helper {
                 let task = Task::System(SysTask::new(invoker, buf, sid));
                 match target {
                     Or::A(wgroup) => wgroup.as_ref().inject_task(task),
-                    Or::B(mut dedi) => dedi.as_mut().push_back(task),
+                    Or::B(dedi) => dedi.as_ref().send(task).unwrap(),
                 }
             }
         }
@@ -813,7 +889,7 @@ impl<S> Deref for Pending<S> {
 }
 
 #[derive(Debug)]
-struct WorkGroup<W> {
+struct WorkGroup<W: Work + 'static> {
     /// Sub workers belonging to the group.
     workers: Vec<W>,
 
@@ -827,67 +903,6 @@ struct WorkGroup<W> {
     injector: Arc<cb::Injector<Task>>,
 }
 
-impl<W> WorkGroup<W> {
-    fn len(&self) -> usize {
-        debug_assert_eq!(self.workers.len(), self.sub_cxs.len());
-
-        self.sub_cxs.len()
-    }
-
-    fn take_workers(&mut self) -> Vec<W> {
-        mem::take(&mut self.workers)
-    }
-
-    /// Waits until the work group gets closed.
-    fn wait_exhausted(&self) {
-        while !self.is_exhausted() {
-            self.signal.wait_open_count(0);
-        }
-    }
-
-    /// Determines whether the work group is exhausted or not.
-    ///
-    /// `exhausted` here means that the work group has closed and cannot be
-    /// woken up without intervention from outside.
-    fn is_exhausted(&self) -> bool {
-        // If guidance queue is empty, it means that sub workers cannot open
-        // themselves again.
-        self.sub_cxs
-            .iter()
-            .all(|cx| cx.guide.is_empty())
-        &&
-        // Queue is empty, Also there's no open sub workers, they are completely
-        // in closed states.
-        self.signal.open_count() == 0
-    }
-
-    fn inject_task(&self, task: Task) {
-        debug_assert!(
-            !self.workers.is_empty(),
-            "no workers for a non-dedicated task"
-        );
-
-        self.injector.push(task);
-        self.signal.sub().notify_one();
-    }
-
-    #[cfg(debug_assertions)]
-    fn validate_clean(&self) {
-        // Validates sub contexts.
-        for cx in self.sub_cxs.iter() {
-            cx.validate_clean();
-        }
-
-        // Validates signal.
-        assert_eq!(self.signal.open_count(), 0);
-        assert_eq!(self.signal.work_count(), 0);
-        assert_eq!(self.signal.future_count(), 0);
-
-        // Validates if injector is empty.
-        assert!(self.injector.is_empty());
-    }
-}
-
 impl<W> WorkGroup<W>
 where
     W: Work + 'static,
@@ -897,7 +912,6 @@ where
         workers: Vec<W>,
         tx_msg: &ParkingSender<Message>,
         tx_cmd: &CommandSender,
-        shared: &Arc<Shared>,
     ) -> Self {
         // Creates global queue.
         let injector = Arc::new(cb::Injector::new());
@@ -926,7 +940,6 @@ where
                     handle: UnsafeCell::new(thread::current()),
                     comm,
                     need_close: Cell::new(false),
-                    shared: Arc::clone(shared),
                     _pin: PhantomPinned,
                 })
             })
@@ -985,6 +998,72 @@ where
         self.signal.sub().notify_all();
     }
 
+    fn len(&self) -> usize {
+        debug_assert_eq!(self.workers.len(), self.sub_cxs.len());
+
+        self.sub_cxs.len()
+    }
+
+    fn take_workers(&mut self) -> Vec<W> {
+        self.destroy();
+        self.sub_cxs.clear();
+        mem::take(&mut self.workers)
+    }
+
+    /// Waits until the work group gets closed.
+    fn wait_exhausted(&self) {
+        while !self.is_exhausted() {
+            self.signal.wait_open_count(0);
+        }
+    }
+
+    /// Determines whether the work group is exhausted or not.
+    ///
+    /// `exhausted` here means that the work group has closed and cannot be
+    /// woken up without intervention from outside.
+    fn is_exhausted(&self) -> bool {
+        // If guidance queue is empty, it means that sub workers cannot open
+        // themselves again.
+        let is_guide_empty = self.sub_cxs.iter().all(|cx| cx.guide.is_empty());
+
+        // Queue is empty, Also there's no open sub workers, they are completely
+        // in closed states.
+        let is_all_closed = self.signal.open_count() == 0;
+
+        is_guide_empty && is_all_closed
+    }
+
+    fn inject_task(&self, task: Task) {
+        debug_assert!(
+            !self.workers.is_empty(),
+            "no workers for a non-dedicated task"
+        );
+
+        self.injector.push(task);
+        self.signal.sub().notify_one();
+    }
+
+    #[cfg(debug_assertions)]
+    fn validate_clean(&self) {
+        // Validates sub contexts.
+        for cx in self.sub_cxs.iter() {
+            cx.validate_clean();
+        }
+
+        // Validates signal.
+        assert_eq!(self.signal.open_count(), 0);
+        assert_eq!(self.signal.work_count(), 0);
+        assert_eq!(self.signal.future_count(), 0);
+
+        // Validates if injector is empty.
+        assert!(self.injector.is_empty());
+    }
+
+    fn insert_reset(&mut self, index: usize) {
+        self.sub_cxs[index].guide.push_reset();
+        self.unpark_one(index);
+    }
+
     /// Do not call this method unless panic is detected.
     //
     // Allow dead_code?
@@ -1012,10 +1091,10 @@ where
         let must_true = self.workers[index].unpark(ptr);
         assert!(must_true);
     }
-}
 
-impl<W> Drop for WorkGroup<W> {
-    fn drop(&mut self) {
+    fn destroy(&mut self) {
+        // Aborts remaining tasks and waits for sub workers to be completely
+        // closed.
         self.signal.set_abort(true);
         while !self.is_exhausted() {
             self.signal.sub().notify_all();
@@ -1023,15 +1102,37 @@ impl<W> Drop for WorkGroup<W> {
         }
         self.signal.set_abort(false);
 
+        // Resets thread local variables on sub worker contexts.
+        for i in 0..self.len() {
+            self.insert_reset(i);
+        }
+        self.signal.wait_open_count(self.len() as u32);
+
+        // Closes again.
+        self.close();
+        self.signal.wait_open_count(0);
+
         #[cfg(debug_assertions)]
         self.validate_clean();
     }
 }
 
+impl<W> Drop for WorkGroup<W>
+where
+    W: Work + 'static,
+{
+    fn drop(&mut self) {
+        self.destroy();
+    }
+}
+
 thread_local! {
+    /// Thread local pointer to [`SubContext`].
     pub(crate) static SUB_CONTEXT: Cell<NonNullExt<SubContext>> = const {
         Cell::new(NonNullExt::dangling())
     };
+
+    /// Thread local worker id.
     pub(crate) static WORKER_ID: Cell<WorkerId> = const {
         Cell::new(WorkerId::dummy())
     };
@@ -1049,8 +1150,6 @@ pub struct SubContext {
 
     need_close: Cell<bool>,
 
-    shared: Arc<Shared>,
-
     _pin: PhantomPinned,
 }
 
@@ -1060,7 +1159,8 @@ impl SubContext {
     /// [`Worker::unpark`]: crate::prelude::Worker::unpark
     #[rustfmt::skip]
     pub fn execute(ptr: ManagedConstPtr<Self>) {
-        if ptr.comm.worker_id() != WORKER_ID.get() {
+        // Hand-shake for the first time.
+        if ptr.comm.maybe_uninit_worker_id() != WORKER_ID.get() {
             Self::set_handle(ptr);
             return;
         }
@@ -1100,15 +1200,11 @@ impl SubContext {
         &self.comm
     }
 
-    pub(crate) fn get_shared(&self) -> &Shared {
-        &self.shared
-    }
-
     fn set_handle(ptr: ManagedConstPtr<Self>) {
         let handle = unsafe { &mut *ptr.handle.get() };
         *handle = thread::current();
         SUB_CONTEXT.set(ptr.as_nonnullext());
-        WORKER_ID.set(ptr.comm.worker_id());
+        WORKER_ID.set(ptr.comm.maybe_uninit_worker_id());
         ptr.comm.send_message(Message::Handle(ptr.comm.worker_id()));
     }
 
@@ -1150,6 +1246,11 @@ impl SubContext {
                 self.comm.signal().sub().notify_all();
                 None
             }
+            SubState::Reset => {
+                SUB_CONTEXT.set(NonNullExt::dangling());
+                WORKER_ID.set(WorkerId::dummy());
+                Some(SubState::Search)
+            }
         }
     }
 
@@ -1184,18 +1285,9 @@ impl SubContext {
         loop {
             match mem::replace(steal, cb::Steal::Empty) {
                 cb::Steal::Success(cur) => match cur {
-                    Task::System(task) => {
-                        global::stat::increase_system_task_count();
-                        self.work_for_system_task(task);
-                    }
-                    Task::Parallel(task) => {
-                        // Statistic counter is increased in bridge().
-                        self.work_for_parallel_task(task);
-                    }
-                    Task::Future(task) => {
-                        global::stat::increase_future_task_count();
-                        self.work_for_future_task(task);
-                    }
+                    Task::System(task) => self.work_for_system_task(task),
+                    Task::Parallel(task) => self.work_for_parallel_task(task),
+                    Task::Async(task) => self.work_for_async_task(task),
                 },
                 cb::Steal::Empty => break,
                 cb::Steal::Retry => {}
@@ -1210,24 +1302,10 @@ impl SubContext {
     }
 
     fn work_for_system_task(&self, task: SysTask) {
+        let wid = self.comm.worker_id();
         let sid = task.sid();
 
-        // In web, panic is normally aborted, but we can detect whether panic
-        // has been happened through panic hook. We write `WorkId` on a thread
-        // local variable to be used in panic hook in order to identify where
-        // the panic occurred.
-        #[cfg(target_arch = "wasm32")]
-        {
-            use super::comm::{TaskKind, WorkId, WORK_ID};
-
-            WORK_ID.set(WorkId {
-                wid: self.comm.worker_id(),
-                sid,
-                kind: TaskKind::System,
-            });
-        }
-
-        let resp = match task.execute() {
+        let resp = match task.execute(wid) {
             Ok(_) => Message::Fin(self.comm.worker_id(), sid),
             Err(payload) => Message::Panic(PanicMessage {
                 wid: self.comm.worker_id(),
@@ -1241,68 +1319,31 @@ impl SubContext {
     }
 
     fn work_for_parallel_task(&self, task: ParTask) {
-        // Like in `work_for_systask()`, sets `WorkId`.
-        // But note that panics in parallel tasks cannot be recovered.
-        // It will result in panic in main thread.
-        #[cfg(target_arch = "wasm32")]
-        {
-            use super::comm::{TaskKind, WorkId, WORK_ID};
+        let wid = self.comm.worker_id();
 
-            WORK_ID.set(WorkId {
-                wid: self.comm.worker_id(),
-                sid: SystemId::dummy(),
-                kind: TaskKind::Parallel,
-            });
-        }
-
-        task.execute(FnContext::MIGRATED);
+        task.execute(wid, FnContext::MIGRATED);
     }
 
-    fn work_for_future_task(&self, task: UnsafeFuture) {
-        // Like in `work_for_systask()`, sets `WorkId`.
-        #[cfg(target_arch = "wasm32")]
-        {
-            use super::comm::{TaskKind, WorkId, WORK_ID};
-
-            WORK_ID.set(WorkId {
-                wid: self.comm.worker_id(),
-                sid: SystemId::dummy(),
-                kind: TaskKind::Future,
-            });
-        }
-
-        // Future task may be one that this worker stole from another worker.
-        // In that case, we'd better replace waker with this context pointer.
-        // So that the future will wake this worker up at first.
-        //
-        // Safety: Waker type is the same as the thing we used, which is
-        // `UnsafeWaker`.
+    fn work_for_async_task(&self, task: AsyncTask) {
+        // Sets waker if needed.
+        let waker = UnsafeWaker::new(self as *const SubContext); // Cheap
         unsafe {
-            let waker = UnsafeWaker {
-                ptr: self as *const _,
-            };
             if !task.will_wake(&waker) {
                 task.set_waker(waker);
             }
         }
 
-        // Calls poll on the future.
-        //
-        // Safety: We're constraining future output type to be
-        // `Box<dyn Command>`.
-        match unsafe { task.poll() } {
-            Poll::Ready(()) => {
-                // Safety: The future is just ready and destroying it only
-                // occurs in `ReadyFuture::drop`.
-                let ready = unsafe { ReadyFuture::new(task) };
-                let cmd = CommandObject::Future(ready);
+        // Executes.
+        let wid = self.comm.worker_id();
+        let on_ready = |ready| {
+            // Decreases running future count.
+            self.comm.signal().sub_future_count(1);
 
-                // Decreases *running* future count and sends the command.
-                self.comm.signal().sub_future_count(1);
-                self.comm.send_command(cmd);
-            }
-            Poll::Pending => {}
-        }
+            // Sends the ready future as a command.
+            let cmd = CommandObject::Future(ready);
+            self.comm.send_command_or_cancel(cmd);
+        };
+        task.execute(wid, on_ready);
     }
 
     /// Cancels out remaining tasks.
@@ -1343,9 +1384,9 @@ impl SubContext {
             Task::Parallel(task) => {
                 self.work_for_parallel_task(task);
             }
-            // To abort future task, destroys it and reduces running future
+            // To abort async task, destroys it and reduces running future
             // count.
-            Task::Future(task) => {
+            Task::Async(task) => {
                 // Safety: Uncompleted future task is aborted and deallocated
                 // in here only.
                 unsafe { task.destroy() };
@@ -1365,21 +1406,19 @@ impl SubContext {
     #[cfg(debug_assertions)]
     fn validate_clean(&self) {
         // Validates if guide is empty.
-        assert!(self.guide.is_empty());
+        let mut v = Vec::new();
+        while !self.guide.is_empty() {
+            v.push(self.guide.pop());
+        }
+        if !v.is_empty() {
+            panic!("guide is not empry: {v:?}");
+        }
 
         // Validates comm.
         match self.get_comm().search() {
             cb::Steal::Empty => {}
             _ => panic!("validation failed due to remaining task"),
         }
-    }
-}
-
-impl Drop for SubContext {
-    fn drop(&mut self) {
-        // Resets static variables.
-        SUB_CONTEXT.set(NonNullExt::dangling());
-        WORKER_ID.set(WorkerId::dummy());
     }
 }
 
@@ -1398,6 +1437,7 @@ mod sub {
     ///
     /// - [`SubState::Wait`]   : Normal open request.
     /// - [`SubState::Close`]  : Request for closing.
+    /// - [`SubState::Reset`]  : Request for resetting thread local variables.
     /// - [`SubState::Search`] : It has panicked, start with search state.
     ///
     /// States can be buffered at most a fixed size(4 for now).
@@ -1420,14 +1460,14 @@ mod sub {
         /// - Consumer: A sub worker.
         ///
         /// [`SubContext`]: super::SubContext
-        queue: Mutex<ArrayDeque<SubState, 4>>,
+        queue: Mutex<ArrayDeque<SubState, 8>>,
 
         /// Close request counter.
         //
         // Helps us not to lock `queue` too frequently.
         close: AtomicU32,
 
-        /// Whether open request has been pushed.
+        /// Whether open or reset request has been pushed.
         //
         // Prevents from appending 'not paired close' onto the queue.
         #[cfg(debug_assertions)]
@@ -1462,7 +1502,7 @@ mod sub {
         pub(super) fn push_open(&self) -> bool {
             #[cfg(debug_assertions)]
             {
-                // Open cannot follow another open.
+                // Open or reset cannot follow another open or reset.
                 assert!(!self.open.get());
                 self.open.set(true);
             }
@@ -1490,7 +1530,7 @@ mod sub {
         pub(super) fn push_close(&self) {
             #[cfg(debug_assertions)]
             {
-                // Close must follow open request.
+                // Close must follow open or reset request.
                 assert!(self.open.get());
                 self.open.set(false);
             }
@@ -1499,6 +1539,19 @@ mod sub {
             let must_true = queue.push_back(SubState::Close);
             debug_assert!(must_true);
             self.close.fetch_add(1, Ordering::Relaxed);
+        }
+
+        pub(super) fn push_reset(&self) {
+            #[cfg(debug_assertions)]
+            {
+                // Open or reset cannot follow another open or reset.
+                assert!(!self.open.get());
+                self.open.set(true);
+            }
+
+            let mut queue = self.queue.lock().unwrap();
+            let must_true = queue.push_back(SubState::Reset);
+            debug_assert!(must_true);
         }
 
         /// Push operation is allowed for main worker only.
@@ -1543,11 +1596,56 @@ enum SubState {
     Work,
     Abort,
     Close,
+    Reset,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct UnsafeWaker {
-    ptr: *const SubContext,
+#[derive(Debug, Clone)]
+pub(crate) struct MainWaker {
+    tx_dedi: ParkingSender<Task>,
+    tid: ThreadId,
+}
+
+impl MainWaker {
+    pub(crate) fn new(tx_dedi: ParkingSender<Task>) -> Self {
+        Self {
+            tx_dedi,
+            tid: thread::current().id(),
+        }
+    }
+}
+
+impl WakeSend for MainWaker {
+    fn wake_send(&self, handle: UnsafeFuture) {
+        let task = Task::Async(AsyncTask(handle));
+
+        // The scheduler, who is owner of the opposite reciver, may be destroyed
+        // without waiting for remaining futures. Ignores transmission failure
+        // in that case. Anyway, clients destroyed it for some reason, then we
+        // cannot make progress any longer.
+        if self.tx_dedi.send(task).is_err() {
+            // Safety: We're not copying the handle somewhere else. Therefore,
+            // it's safe to destroy the handle.
+            unsafe { handle.destroy() };
+        }
+    }
+}
+
+impl PartialEq for MainWaker {
+    fn eq(&self, other: &Self) -> bool {
+        self.tid == other.tid
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(transparent)]
+pub(crate) struct UnsafeWaker {
+    cx: *const SubContext,
+}
+
+impl UnsafeWaker {
+    pub(crate) const fn new(cx: *const SubContext) -> Self {
+        Self { cx }
+    }
 }
 
 unsafe impl Send for UnsafeWaker {}
@@ -1556,7 +1654,7 @@ unsafe impl Sync for UnsafeWaker {}
 impl WakeSend for UnsafeWaker {
     fn wake_send(&self, handle: UnsafeFuture) {
         // Safety: Scheduler holds sub contexts while it is executing.
-        let comm = unsafe { self.ptr.as_ref().unwrap_unchecked().get_comm() };
+        let comm = unsafe { self.cx.as_ref().unwrap_unchecked().get_comm() };
 
         // Pushes the future handle onto local future queue.
         comm.push_future_task(handle);
@@ -1565,38 +1663,4 @@ impl WakeSend for UnsafeWaker {
         // If it is already awaken, wakes another worker.
         comm.wake_self();
     }
-}
-
-/// Schedules the given future.
-pub fn schedule_future<F, R>(future: F)
-where
-    F: Future<Output = R> + Send + 'static,
-    R: Command,
-{
-    // This function must be called on sub worker context.
-    let ptr = SUB_CONTEXT.get();
-    assert!(!ptr.is_dangling(), "expected sub worker context");
-
-    // Allocates memory for the future.
-    let waker = UnsafeWaker { ptr: ptr.as_ptr() };
-    let handle = UnsafeFuture::new(future, waker, consume_ready_future::<R>);
-
-    // Pushes the future handle onto local future queue.
-    // Safety: Current worker has valid sub context pointer.
-    let comm = unsafe { ptr.as_ref().get_comm() };
-    comm.push_future_task(handle);
-
-    // Increases future count.
-    // Main worker will check this out whenever it needs.
-    comm.signal().add_future_count(1);
-
-    // If current worker's local queue is not empty, current worker cannot
-    // do the future task promptly, so wakes another worker to steal it.
-    if !comm.is_local_empty() {
-        comm.signal().sub().notify_one();
-    }
-}
-
-pub(crate) fn consume_ready_future<T: Command>(mut res: T, ecs: Ecs<'_>) -> DynResult<()> {
-    res.command(ecs)
 }

@@ -99,6 +99,7 @@ where
     C: Consumer<I::Item>,
 {
     global::stat::increase_parallel_task_count();
+
     let len = par_iter.len();
     return par_iter.with_producer(Callback { len, consumer });
 
@@ -271,8 +272,7 @@ where
         }
     };
 
-    // In web, we don't have a way to hold `Right task` when
-    // `Left task` panics.
+    // In web, we don't have a way to hold `Right task` when `Left task` panics.
     #[cfg(target_arch = "wasm32")]
     let l_res = l_f(FnContext::NOT_MIGRATED);
 
@@ -280,7 +280,8 @@ where
     // because the queue is LIFO fashion.
     if let Some(task) = cx.get_comm().pop_local() {
         debug_assert_eq!(task.id(), r_task_id);
-        r_task.execute(FnContext::NOT_MIGRATED);
+        let wid = cx.get_comm().worker_id();
+        r_task.execute(wid, FnContext::NOT_MIGRATED);
     } else {
         // We couldn't find a task from local queue.
         // That means that another worker has stolen 'Right task'.

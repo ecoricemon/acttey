@@ -227,7 +227,7 @@ fn try_open_close(pool: WorkerPool) -> WorkerPool {
 
     // Opens and closes workers without doing something.
     for _ in 0..REPEAT {
-        let _ = ecs.run();
+        let _ = ecs.run(|err| panic!("{err:?}"));
     }
 
     ecs.destroy().into()
@@ -341,112 +341,132 @@ fn try_schedule(pool: WorkerPool) -> WorkerPool {
 fn try_command(pool: WorkerPool) -> WorkerPool {
     use std::sync::{Arc, Mutex};
 
-    const REPEAT: usize = 5;
+    // Without sub workers
+    inner(WorkerPool::new());
 
-    // Creates instance.
-    let num_workers = pool.len();
-    let mut ecs = Ecs::default(pool, [num_workers]);
+    // With sub workers
+    debug_assert!(!pool.is_empty());
+    return inner(pool);
 
-    // Counts number of system execution.
-    let count = Arc::new(Mutex::new(0));
-    let c_count = Arc::clone(&count);
+    // === Internal helper functions ===
 
-    // In system, we're appending another system to increase the count.
-    ecs.add_system(SystemDesc::new().with_once(move || {
-        // Command will append a system at the end of cycle.
-        let cmd = move |mut ecs: Ecs| {
-            ecs.add_system(SystemDesc::new().with_system(move || {
-                let mut c = c_count.lock().unwrap();
-                *c += 1;
-            }))
-            .take()?;
-            Ok(())
-        };
-        global::schedule_command(cmd);
-    }))
-    .unwrap();
+    fn inner(pool: WorkerPool) -> WorkerPool {
+        const REPEAT: usize = 5;
 
-    // Repeats running.
-    for _ in 0..REPEAT {
-        ecs.step();
+        // Creates instance.
+        let num_workers = pool.len();
+        let mut ecs = Ecs::default(pool, [num_workers]);
+
+        // Counts number of system execution.
+        let count = Arc::new(Mutex::new(0));
+        let c_count = Arc::clone(&count);
+
+        // In system, we're appending another system to increase the count.
+        ecs.add_system(SystemDesc::new().with_once(move |rr: ResRead<Post>| {
+            // Command will append a system at the end of cycle.
+            let cmd = move |mut ecs: Ecs| {
+                ecs.add_system(SystemDesc::new().with_system(move || {
+                    let mut c = c_count.lock().unwrap();
+                    *c += 1;
+                }))
+                .take()?;
+                Ok(())
+            };
+            rr.send_command(cmd);
+        }))
+        .unwrap();
+
+        // Repeats running.
+        for _ in 0..REPEAT {
+            ecs.step();
+        }
+
+        // Why REPEAT - 1?
+        //
+        // In the first run, the system was not registered yet.
+        assert_eq!(*count.lock().unwrap(), REPEAT - 1);
+
+        ecs.destroy().into()
     }
-
-    // Why REPEAT - 1?
-    //
-    // In the first run, the system was not registered yet.
-    assert_eq!(*count.lock().unwrap(), REPEAT - 1);
-
-    ecs.destroy().into()
 }
 
 fn try_parallel_task(pool: WorkerPool) -> WorkerPool {
-    const START: i64 = 0;
-    const END: i64 = 10_000;
-    const NUM: i64 = END - START + 1;
-    const SUM: i64 = (START + END) * NUM / 2;
+    // Without sub workers.
+    inner(WorkerPool::new());
 
-    // Creates instance.
-    let num_workers = pool.len();
-    let mut ecs = Ecs::default(pool, [num_workers]);
-
-    // Registers and inserts entities.
-    ecs.register_entity_of::<Ea>().unwrap();
-    ecs.add_system(SystemDesc::new().with_once(|ew: EntWrite<Ea>| {
-        let mut ew = ew.take_recur();
-        ew.resize(NUM as usize, Ea { a: Ca(0) });
-        let mut col = ew.get_column_mut_of::<Ca>().unwrap();
-        for (ca, val) in col.iter_mut().zip(START..=END) {
-            ca.0 = val;
-        }
-    }))
-    .unwrap();
-
-    // Adds a resource.
-    #[derive(Resource)]
-    struct R(Vec<i64>);
-    let r = R((START..=END).into_iter().collect());
-    ecs.add_resource(r).unwrap();
-
-    // Tests pure rayon iterator wrapped in into_ecs_par.
-    ecs.add_system(SystemDesc::new().with_once(|rr: ResRead<R>| {
-        let sum: i64 = rr.0.par_iter().into_ecs_par().sum();
-        assert_eq!(sum, SUM);
-    }))
-    .unwrap();
-    run_with_validation(&mut ecs);
-
-    // Tests immutable parallel iterator.
-    ecs.add_system(SystemDesc::new().with_once(|r: Read<Fa>| {
-        let mut sum = 0_i64;
-        for getter in r.iter() {
-            sum += getter.par_iter().into_ecs_par().map(|ca| ca.0).sum::<i64>();
-        }
-        assert_eq!(sum, SUM);
-    }))
-    .unwrap();
-    run_with_validation(&mut ecs);
-
-    // Tests mutable parallel iterator.
-    ecs.add_system(SystemDesc::new().with_once(|mut w: Write<Fa>| {
-        for mut getter in w.iter_mut() {
-            getter
-                .par_iter_mut()
-                .into_ecs_par()
-                .for_each(|ca| ca.0 *= 2);
-        }
-
-        let mut sum = 0_i64;
-        for getter in w.iter_mut() {
-            sum += getter.par_iter().into_ecs_par().map(|ca| ca.0).sum::<i64>();
-        }
-        assert_eq!(sum, SUM * 2);
-    }))
-    .unwrap();
-    run_with_validation(&mut ecs);
-
-    return ecs.destroy().into();
+    // With sub workers.
+    debug_assert!(!pool.is_empty());
+    return inner(pool);
 
     // === Internal helper functions ===
+
+    fn inner(pool: WorkerPool) -> WorkerPool {
+        const START: i64 = 0;
+        const END: i64 = 10_000;
+        const NUM: i64 = END - START + 1;
+        const SUM: i64 = (START + END) * NUM / 2;
+
+        // Creates instance.
+        let num_workers = pool.len();
+        let mut ecs = Ecs::default(pool, [num_workers]);
+
+        // Registers and inserts entities.
+        ecs.register_entity_of::<Ea>().unwrap();
+        ecs.add_system(SystemDesc::new().with_once(|ew: EntWrite<Ea>| {
+            let mut ew = ew.take_recur();
+            ew.resize(NUM as usize, Ea { a: Ca(0) });
+            let mut col = ew.get_column_mut_of::<Ca>().unwrap();
+            for (ca, val) in col.iter_mut().zip(START..=END) {
+                ca.0 = val;
+            }
+        }))
+        .unwrap();
+
+        // Adds a resource.
+        #[derive(Resource)]
+        struct R(Vec<i64>);
+        let r = R((START..=END).into_iter().collect());
+        ecs.add_resource(r).unwrap();
+
+        // Tests pure rayon iterator wrapped in into_ecs_par.
+        ecs.add_system(SystemDesc::new().with_once(|rr: ResRead<R>| {
+            let sum: i64 = rr.0.par_iter().into_ecs_par().sum();
+            assert_eq!(sum, SUM);
+        }))
+        .unwrap();
+        run_with_validation(&mut ecs);
+
+        // Tests immutable parallel iterator.
+        ecs.add_system(SystemDesc::new().with_once(|r: Read<Fa>| {
+            let mut sum = 0_i64;
+            for getter in r.iter() {
+                sum += getter.par_iter().into_ecs_par().map(|ca| ca.0).sum::<i64>();
+            }
+            assert_eq!(sum, SUM);
+        }))
+        .unwrap();
+        run_with_validation(&mut ecs);
+
+        // Tests mutable parallel iterator.
+        ecs.add_system(SystemDesc::new().with_once(|mut w: Write<Fa>| {
+            for mut getter in w.iter_mut() {
+                getter
+                    .par_iter_mut()
+                    .into_ecs_par()
+                    .for_each(|ca| ca.0 *= 2);
+            }
+
+            let mut sum = 0_i64;
+            for getter in w.iter_mut() {
+                sum += getter.par_iter().into_ecs_par().map(|ca| ca.0).sum::<i64>();
+            }
+            assert_eq!(sum, SUM * 2);
+        }))
+        .unwrap();
+        run_with_validation(&mut ecs);
+
+        return ecs.destroy().into();
+    }
 
     fn run_with_validation<W, S>(ecs: &mut EcsApp<W, S>)
     where
@@ -467,10 +487,21 @@ fn try_parallel_task(pool: WorkerPool) -> WorkerPool {
 }
 
 fn try_request_lock(pool: WorkerPool) -> WorkerPool {
-    let workers: Vec<Worker> = pool.into();
-    let workers = try_request_lock_ok(workers);
-    let workers = try_request_lock_cancelled(workers);
-    workers.into()
+    // Without sub workers.
+    inner(WorkerPool::new());
+
+    // With sub workers.
+    debug_assert!(!pool.is_empty());
+    return inner(pool);
+
+    // === Internal helper functions ===
+
+    fn inner(pool: WorkerPool) -> WorkerPool {
+        let workers: Vec<Worker> = pool.into();
+        let workers = try_request_lock_ok(workers);
+        let workers = try_request_lock_cancelled(workers);
+        workers.into()
+    }
 }
 
 fn try_request_lock_ok(workers: Vec<Worker>) -> Vec<Worker> {
@@ -505,10 +536,12 @@ fn try_request_lock_ok(workers: Vec<Worker>) -> Vec<Worker> {
     .unwrap();
 
     // An asynchronous system locking the resource.
-    ecs.add_system(SystemDesc::new().with_once(|| {
-        global::schedule_future(async move {
-            request!(Req, ResWrite = Counter);
-            let mut guard = global::request_lock::<Req>().await?;
+    ecs.add_system(SystemDesc::new().with_once(|rr: ResRead<Post>| {
+        request!(Req, ResWrite = Counter);
+        let future = rr.request_lock::<Req>();
+
+        rr.send_future(async move {
+            let mut guard = future.await?;
 
             // We lock the resource for a little long. During the locking, the
             // sync task cannot get access to the resource.
@@ -557,10 +590,12 @@ fn try_request_lock_cancelled(workers: Vec<Worker>) -> Vec<Worker> {
     .unwrap();
 
     // An asynchronous system locking the resource.
-    ecs.add_system(SystemDesc::new().with_once(|| {
-        global::schedule_future(async move {
-            request!(Req, ResWrite = Counter);
-            let mut guard = global::request_lock::<Req>().await?;
+    ecs.add_system(SystemDesc::new().with_once(|rr: ResRead<Post>| {
+        request!(Req, ResWrite = Counter);
+        let future = rr.request_lock::<Req>();
+
+        rr.send_future(async move {
+            let mut guard = future.await?;
             guard.res_write.0 += 1;
             Ok(())
         });
@@ -728,6 +763,8 @@ fn try_recover_from_panic_in_parallel_task(pool: WorkerPool) -> (WorkerPool, i32
 #[cfg(not(target_arch = "wasm32"))]
 mod non_web_test {
     use super::*;
+    use my_ecs::{test_util, type_name};
+    use std::env;
 
     #[test]
     fn test_register_system() {
@@ -740,8 +777,30 @@ mod non_web_test {
     }
 
     #[test]
+    fn repeat_test_open_close() {
+        if let Ok(_) = env::var("REPEAT") {
+            let f = || test_open_close();
+            let name = type_name!(repeat_test_open_close);
+            let repeat = 1000;
+            let timeout = Duration::from_secs(60);
+            test_util::call_timeout(f, name, repeat, timeout);
+        }
+    }
+
+    #[test]
     fn test_schedule() {
         try_schedule(worker_pool());
+    }
+
+    #[test]
+    fn repeat_test_schedule() {
+        if let Ok(_) = env::var("REPEAT") {
+            let f = || test_schedule();
+            let name = type_name!(repeat_test_schedule);
+            let repeat = 1000;
+            let timeout = Duration::from_secs(60);
+            test_util::call_timeout(f, name, repeat, timeout);
+        }
     }
 
     #[test]
@@ -750,8 +809,30 @@ mod non_web_test {
     }
 
     #[test]
+    fn repeat_test_parallel_task() {
+        if let Ok(_) = env::var("REPEAT") {
+            let f = || test_parallel_task();
+            let name = type_name!(repeat_test_parallel_task);
+            let repeat = 1000;
+            let timeout = Duration::from_secs(60);
+            test_util::call_timeout(f, name, repeat, timeout);
+        }
+    }
+
+    #[test]
     fn test_request_lock() {
         try_request_lock(worker_pool());
+    }
+
+    #[test]
+    fn repeat_test_request_lock() {
+        if let Ok(_) = env::var("REPEAT") {
+            let f = || test_request_lock();
+            let name = type_name!(repeat_test_request_lock);
+            let repeat = 50;
+            let timeout = Duration::from_secs(60);
+            test_util::call_timeout(f, name, repeat, timeout);
+        }
     }
 
     #[test]
@@ -761,8 +842,30 @@ mod non_web_test {
     }
 
     #[test]
+    fn repeat_test_recover_from_panic() {
+        if let Ok(_) = env::var("REPEAT") {
+            let f = || test_recover_from_panic();
+            let name = type_name!(repeat_test_recover_from_panic);
+            let repeat = 1000;
+            let timeout = Duration::from_secs(60);
+            test_util::call_timeout(f, name, repeat, timeout);
+        }
+    }
+
+    #[test]
     fn test_command() {
         try_command(worker_pool());
+    }
+
+    #[test]
+    fn repeat_test_command() {
+        if let Ok(_) = env::var("REPEAT") {
+            let f = || test_command();
+            let name = type_name!(repeat_test_command);
+            let repeat = 1000;
+            let timeout = Duration::from_secs(60);
+            test_util::call_timeout(f, name, repeat, timeout);
+        }
     }
 
     fn worker_pool() -> WorkerPool {

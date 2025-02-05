@@ -1,36 +1,42 @@
 use super::par::FnContext;
 use crate::{
-    ds::{ManagedMutPtr, UnsafeFuture},
-    ecs::sys::{
-        request::SystemBuffer,
-        system::{Invoke, SystemId},
+    ds::{ManagedMutPtr, ReadyFuture, UnsafeFuture},
+    ecs::{
+        sys::{
+            request::SystemBuffer,
+            system::{Invoke, SystemId},
+        },
+        worker::WorkerId,
     },
+    global,
     util::macros::impl_from_for_enum,
 };
 use std::{
     any::Any,
     cell::UnsafeCell,
+    ops::Deref,
     ptr::NonNull,
     sync::atomic::{self, AtomicI32, Ordering},
+    task::Poll,
 };
 
 #[derive(Debug)]
-pub(super) enum Task {
+pub(crate) enum Task {
     System(SysTask),
     Parallel(ParTask),
-    Future(UnsafeFuture),
+    Async(AsyncTask),
 }
 
 impl_from_for_enum!("outer" = Task; "var" = System; "inner" = SysTask);
 impl_from_for_enum!("outer" = Task; "var" = Parallel; "inner" = ParTask);
-impl_from_for_enum!("outer" = Task; "var" = Future; "inner" = UnsafeFuture);
+impl_from_for_enum!("outer" = Task; "var" = Async; "inner" = AsyncTask);
 
 impl Task {
-    pub(super) const fn id(&self) -> TaskId {
+    pub(super) fn id(&self) -> TaskId {
         match self {
             Self::System(task) => TaskId::System(task.sid),
             Self::Parallel(task) => TaskId::Parallel(*task),
-            Self::Future(task) => TaskId::Future(*task),
+            Self::Async(task) => TaskId::Async(**task),
         }
     }
 }
@@ -39,15 +45,15 @@ impl Task {
 pub(super) enum TaskId {
     System(SystemId),
     Parallel(ParTask),
-    Future(UnsafeFuture),
+    Async(UnsafeFuture),
 }
 
 impl_from_for_enum!("outer" = TaskId; "var" = System; "inner" = SystemId);
 impl_from_for_enum!("outer" = TaskId; "var" = Parallel; "inner" = ParTask);
-impl_from_for_enum!("outer" = TaskId; "var" = Future; "inner" = UnsafeFuture);
+impl_from_for_enum!("outer" = TaskId; "var" = Async; "inner" = UnsafeFuture);
 
 #[derive(Debug)]
-pub(super) struct SysTask {
+pub(crate) struct SysTask {
     invoker: ManagedMutPtr<dyn Invoke + Send>,
     buf: ManagedMutPtr<SystemBuffer>,
     sid: SystemId,
@@ -66,7 +72,21 @@ impl SysTask {
         self.sid
     }
 
-    pub(super) fn execute(self) -> Result<(), Box<dyn Any + Send>> {
+    pub(super) fn execute(self, _wid: WorkerId) -> Result<(), Box<dyn Any + Send>> {
+        global::stat::increase_system_task_count();
+
+        // In web panic hook, we're going to use this info for recovery.
+        #[cfg(target_arch = "wasm32")]
+        {
+            use super::comm::{TaskKind, WorkId, WORK_ID};
+
+            WORK_ID.set(WorkId {
+                wid: _wid,
+                sid: self.sid,
+                kind: TaskKind::System,
+            });
+        }
+
         #[cfg(not(target_arch = "wasm32"))]
         {
             let Self {
@@ -113,7 +133,7 @@ impl SysTask {
 
 // ref: https://github.com/rayon-rs/rayon/blob/7543ed40c9a017dee32b3dc72b3ae819820e8366/rayon-core/src/job.rs#L33
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ParTask {
+pub(crate) struct ParTask {
     data: NonNull<u8>,
     f: unsafe fn(NonNull<u8>, FnContext),
 }
@@ -137,7 +157,23 @@ impl ParTask {
         Self { data, f }
     }
 
-    pub(super) fn execute(self, f_cx: FnContext) {
+    pub(super) fn execute(self, _wid: WorkerId, f_cx: FnContext) {
+        // Statistic count is increased in bridge() to see whether ECS
+        // intercepted the call correctly.
+        // global::stat::increase_parallel_task_count();
+
+        // In web panic hook, we're going to use this info for recovery.
+        #[cfg(target_arch = "wasm32")]
+        {
+            use super::comm::{TaskKind, WorkId, WORK_ID};
+
+            WORK_ID.set(WorkId {
+                wid: _wid,
+                sid: SystemId::dummy(),
+                kind: TaskKind::Parallel,
+            });
+        }
+
         // Safety: Guaranteed by owner who called new().
         unsafe { (self.f)(self.data, f_cx) };
     }
@@ -230,5 +266,52 @@ impl ParTaskFlag {
         } else {
             false
         }
+    }
+}
+
+#[derive(Debug)]
+#[repr(transparent)]
+pub(crate) struct AsyncTask(pub(crate) UnsafeFuture);
+
+impl AsyncTask {
+    pub(super) fn execute<F>(self, _wid: WorkerId, on_ready: F)
+    where
+        F: FnOnce(ReadyFuture),
+    {
+        global::stat::increase_future_task_count();
+
+        // In web panic hook, we're going to use this info for recovery.
+        #[cfg(target_arch = "wasm32")]
+        {
+            use super::comm::{TaskKind, WorkId, WORK_ID};
+
+            WORK_ID.set(WorkId {
+                wid: _wid,
+                sid: SystemId::dummy(),
+                kind: TaskKind::Async,
+            });
+        }
+
+        // Calls poll on the future.
+        //
+        // Safety: We're constraining future output type to be
+        // `Box<dyn Command>`.
+        match unsafe { self.poll() } {
+            Poll::Ready(()) => {
+                // Safety: The future is just ready and destroying it only
+                // occurs in `ReadyFuture::drop`.
+                let ready = unsafe { ReadyFuture::new(*self) };
+                on_ready(ready)
+            }
+            Poll::Pending => {}
+        }
+    }
+}
+
+impl Deref for AsyncTask {
+    type Target = UnsafeFuture;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }

@@ -5,23 +5,26 @@ pub(crate) mod cmd;
 pub(crate) mod ent;
 pub(crate) mod entry;
 pub(crate) mod lock;
+pub(crate) mod post;
 pub(crate) mod resource;
 pub(crate) mod sched;
-pub(crate) mod share;
 pub(crate) mod sys;
 pub(crate) mod wait;
 pub(crate) mod web;
 pub(crate) mod worker;
 
 pub mod prelude {
-    pub use super::cmd::prelude::*;
-    pub use super::ent::prelude::*;
-    pub use super::entry::prelude::*;
-    pub use super::resource::prelude::*;
-    pub use super::sched::prelude::*;
-    pub use super::sys::prelude::*;
-    pub use super::worker::prelude::*;
-    pub use super::{DynResult, EcsError};
+    pub use super::{
+        cmd::prelude::*,
+        ent::prelude::*,
+        entry::prelude::*,
+        post::prelude::*,
+        resource::prelude::*,
+        sched::prelude::*,
+        sys::prelude::*,
+        worker::prelude::*,
+        {DynResult, EcsError},
+    };
 }
 
 use std::{error::Error, fmt};

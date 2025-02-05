@@ -264,8 +264,8 @@ fn test_mixed_reg_unreg_entity_resource() {
     // Expected behavior:
     // - ew_sys(Eac, Fbd): Put expected (sum, num).
 
-    ecs.execute_command(|cmdr| cmdr.entity(eid_a).attach(Cc(3)).finish()).unwrap();
-    ecs.execute_command(|cmdr| cmdr.entity(eid_b).attach(Cd(4)).finish()).unwrap();
+    ecs.execute_command(|cmdr| cmdr.change_entity(eid_a).attach(Cc(3)).finish()).unwrap();
+    ecs.execute_command(|cmdr| cmdr.change_entity(eid_b).attach(Cd(4)).finish()).unwrap();
 
     reset_vals(&r_val, &w_val, &rr_val, &rw_val, &ew_val_ac, &ew_val_bd);
     ecs.step();
@@ -322,71 +322,119 @@ fn test_mixed_reg_unreg_entity_resource() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_async_wait() {
-    // Creates instance.
-    let mut ecs = Ecs::default(WorkerPool::with_len(3), [3]);
+    // Without sub workers.
+    let ecs = Ecs::default(WorkerPool::new(), []);
+    inner(ecs);
 
-    let state = Arc::new(Mutex::new(0));
-    let c_state = state.clone();
+    // With sub workers.
+    let ecs = Ecs::default(WorkerPool::with_len(3), [3]);
+    inner(ecs);
 
-    ecs.add_system(SystemDesc::new().with_once(move || {
-        global::schedule_future(async move {
-            // state 1: A bit of awaiting.
-            *c_state.lock().unwrap() = 1;
-            for millis in 1..10 {
-                async_io::Timer::after(Duration::from_millis(millis)).await;
-            }
+    // === Internal helper functions ===
 
-            // state 2: All awaiting has done.
-            *c_state.lock().unwrap() = 2;
+    fn inner(mut ecs: EcsApp<Worker>) {
+        let state = Arc::new(Mutex::new(0));
+        let c_state = state.clone();
 
-            let c2_state = c_state.clone();
-            let cmd = move |_: Ecs| {
-                // state 3: Executing command that the future generated.
-                *c2_state.lock().unwrap() = 3;
-                Ok(())
-            };
-            Ok(cmd)
-        });
-    }))
-    .unwrap();
+        ecs.add_system(SystemDesc::new().with_once(move |rr: ResRead<Post>| {
+            rr.send_future(async move {
+                // state 1: A bit of awaiting.
+                *c_state.lock().unwrap() = 1;
+                for millis in 1..10 {
+                    async_io::Timer::after(Duration::from_millis(millis)).await;
+                }
 
-    // Waits until all tasks are executed completely.
-    ecs.run();
-    drop(ecs);
+                // state 2: All awaiting has done.
+                *c_state.lock().unwrap() = 2;
 
-    // `state` must have reached state 3.
-    assert_eq!(*state.lock().unwrap(), 3);
+                let c2_state = c_state.clone();
+                let cmd = move |_: Ecs| {
+                    // state 3: Executing command that the future generated.
+                    *c2_state.lock().unwrap() = 3;
+                    Ok(())
+                };
+                Ok(cmd)
+            });
+        }))
+        .unwrap();
+
+        // Waits until all tasks are executed completely.
+        ecs.run(|err| panic!("{err:?}"));
+        drop(ecs);
+
+        // `state` must have reached state 3.
+        assert_eq!(*state.lock().unwrap(), 3);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn repeat_test_async_wait() {
+    use my_ecs::{test_util, type_name};
+    use std::env;
+
+    if let Ok(_) = env::var("REPEAT") {
+        let f = || test_async_wait();
+        let name = type_name!(repeat_test_async_wait);
+        let repeat = 50;
+        let timeout = Duration::from_secs(60);
+        test_util::call_timeout(f, name, repeat, timeout);
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn test_async_abort() {
-    // Creates instance.
-    let mut ecs = Ecs::default(WorkerPool::with_len(3), [3]);
+    // Without sub workers.
+    let ecs = Ecs::default(WorkerPool::new(), []);
+    inner(ecs);
 
-    let state = Arc::new(Mutex::new(0));
-    let c_state = state.clone();
+    // With sub workers.
+    let ecs = Ecs::default(WorkerPool::with_len(3), [3]);
+    inner(ecs);
 
-    ecs.add_system(SystemDesc::new().with_once(move || {
-        global::schedule_future(async move {
-            // state 1: reachable.
-            *c_state.lock().unwrap() = 1;
-            for millis in 1..10_000 {
-                async_io::Timer::after(Duration::from_millis(millis)).await;
-            }
+    // === Internal helper functions ===
 
-            // state 2: unreachable due to aborting.
-            *c_state.lock().unwrap() = 2;
-        });
-    }))
-    .unwrap();
+    fn inner(mut ecs: EcsApp<Worker>) {
+        let state = Arc::new(Mutex::new(0));
+        let c_state = state.clone();
 
-    // Future task may be executed a few times.
-    ecs.step();
+        ecs.add_system(SystemDesc::new().with_once(move |rr: ResRead<Post>| {
+            rr.send_future(async move {
+                // state 1: reachable.
+                *c_state.lock().unwrap() = 1;
+                for millis in 1..10_000 {
+                    async_io::Timer::after(Duration::from_millis(millis)).await;
+                }
 
-    // Aborts remaining tasks.
-    drop(ecs);
+                // state 2: unreachable due to aborting.
+                *c_state.lock().unwrap() = 2;
+            });
+        }))
+        .unwrap();
 
-    // `state` must be 1 due to aborting.
-    assert_eq!(*state.lock().unwrap(), 1);
+        // Future task may be executed a few times.
+        ecs.step();
+
+        // Aborts remaining tasks.
+        drop(ecs);
+
+        // `state` must be 1 due to aborting.
+        assert_eq!(*state.lock().unwrap(), 1);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn repeat_test_async_abort() {
+    use my_ecs::{test_util, type_name};
+    use std::env;
+
+    if let Ok(_) = env::var("REPEAT") {
+        let f = || test_async_abort();
+        let name = type_name!(repeat_test_async_abort);
+        let repeat = 1000;
+        let timeout = Duration::from_secs(60);
+        test_util::call_timeout(f, name, repeat, timeout);
+    }
 }

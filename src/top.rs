@@ -38,9 +38,12 @@ impl Acttey {
         self
     }
 
-    pub fn run(&mut self) -> &mut Self {
-        self.ecs.run();
-        self
+    pub fn run<F, R>(&mut self, handle_error: F) -> With<&mut Self, Vec<R>>
+    where
+        F: FnMut(Box<dyn Error + Send + Sync + 'static>) -> R,
+    {
+        let res = self.ecs.run(handle_error).with;
+        With::new(self, res)
     }
 }
 
@@ -180,6 +183,10 @@ impl EcsEntry for Acttey {
     {
         let res = self.ecs.execute_command(f).take();
         WithResult::new(self, res)
+    }
+
+    fn errors(&mut self) -> Vec<Box<dyn Error + Send + Sync + 'static>> {
+        self.ecs.errors()
     }
 }
 

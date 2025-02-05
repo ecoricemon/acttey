@@ -7,7 +7,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-my-ecs = { path = "..", features = ["stat"] }
+my-ecs = { path = "../..", features = ["stat"] }
 paste = { version = "1.0.14" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

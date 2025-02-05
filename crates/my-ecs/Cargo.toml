@@ -30,6 +30,7 @@ crossbeam-deque = { version = "0.8.5" }
 rayon = { version = "1.10.0" }
 bitflags = { version = "2.6.0" }
 dashmap = { version = "6.1.0" }
+libc = { version = "0.2.169" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { version = "0.2.97" }
@@ -77,8 +78,8 @@ console_error_panic_hook = { version = "0.1.7" }
 # =============
 
 [[test]]
-name = "test-web-on-host"
-path = "test-web/src/lib.rs"
+name = "tests-other-web"
+path = "tests-other/web/src/lib.rs"
 
 # ===========================
 # === Test with sanitizer ===
@@ -87,7 +88,7 @@ path = "test-web/src/lib.rs"
 # On linux, there may be false-positive warning in rust test harness.
 [[example]]
 name = "tsan"
-path = "test-san/thread.rs"
+path = "tests-other/san/thread.rs"
 crate-type = ["bin"]
 
 # ================

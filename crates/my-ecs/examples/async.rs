@@ -14,11 +14,11 @@ mod non_web {
         let mut ecs = Ecs::default(WorkerPool::with_len(3), [3]);
 
         // Schedules a future using once system.
-        ecs.add_once_system(|| global::schedule_future(register_map()))
+        ecs.add_once_system(|rr: ResRead<Post>| rr.send_future(register_map()))
             .unwrap();
 
         // Waits until all tasks are executed completely.
-        ecs.run();
+        ecs.run(|_| {});
     }
 
     async fn register_map() -> impl Command {

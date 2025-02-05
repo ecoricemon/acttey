@@ -831,7 +831,11 @@ impl SystemId {
     }
 
     pub(crate) fn add_system_index(&mut self, by: u16) {
-        assert!(self.system_index < Self::max_system_index());
+        assert!(
+            self.system_index < Self::max_system_index(),
+            "number of systems exceeded its limit {}",
+            Self::max_system_index() - 1
+        );
         self.system_index += by;
     }
 }
@@ -881,7 +885,7 @@ unsafe impl Send for SystemData {}
 unsafe impl Sync for SystemData {}
 
 impl SystemData {
-    pub(crate) fn try_into_any(self) -> Option<Box<dyn Any + Send>> {
+    pub(crate) fn try_into_any(self) -> Result<Box<dyn Any + Send>, Self> {
         if self.flags.is_owned() {
             // Safety: Checked.
             let boxed = unsafe { Box::from_raw(self.invoker.as_ptr()) };
@@ -889,9 +893,9 @@ impl SystemData {
             // We don't call drop.
             mem::forget(self);
 
-            Some(boxed.into_any())
+            Ok(boxed.into_any())
         } else {
-            None
+            Err(self)
         }
     }
 }
@@ -1004,7 +1008,7 @@ impl PoisonedSystem {
     fn from_system_data(sdata: SystemData, err_payload: Box<dyn Any + Send>) -> Self {
         let id = sdata.id;
         let name = sdata.info().name;
-        let data = sdata.try_into_any();
+        let data = sdata.try_into_any().ok();
         Self::new(id, name, data, err_payload)
     }
 
@@ -1025,7 +1029,7 @@ impl PoisonedSystem {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub(crate) struct SystemFlags(u32);
 
 bitflags::bitflags! {
@@ -1070,6 +1074,44 @@ impl SystemFlags {
 
     pub(crate) const fn is_owned_empty(&self) -> bool {
         !self.intersects(Self::OWNED_SET.union(Self::OWNED_RESET))
+    }
+}
+
+impl fmt::Debug for SystemFlags {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let dedi = if !self.is_dedi_empty() {
+            if self.is_dedi() {
+                "DEDI"
+            } else {
+                "NON-DEDI"
+            }
+        } else {
+            "DEDI?"
+        };
+
+        let private = if !self.is_private_empty() {
+            if self.is_private() {
+                "PRIVATE"
+            } else {
+                "NON-PRIVATE"
+            }
+        } else {
+            "PRIVATE?"
+        };
+
+        let owned = if !self.is_owned_empty() {
+            if self.is_owned() {
+                "OWNED"
+            } else {
+                "NON-OWNED"
+            }
+        } else {
+            "OWNED?"
+        };
+
+        f.debug_tuple("SystemFlags")
+            .field(&[dedi, private, owned].join(" | "))
+            .finish()
     }
 }
 

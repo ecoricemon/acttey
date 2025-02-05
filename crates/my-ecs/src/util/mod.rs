@@ -15,6 +15,8 @@ use my_ecs_macros::repeat_macro;
 use std::{
     fmt, hash,
     ops::{Deref, DerefMut},
+    sync::{Arc, Condvar, Mutex},
+    thread,
 };
 
 /// A trait for taking inner value out.
@@ -376,6 +378,52 @@ where
             panic!("{e:?}");
         }
         &mut self.value
+    }
+}
+
+pub fn call_timeout<F>(mut f: F, name: &str, repeat: usize, mut timeout: std::time::Duration)
+where
+    F: FnMut() + Send + 'static,
+{
+    let pair = Arc::new((Mutex::new(false), Condvar::new()));
+    let pair2 = Arc::clone(&pair);
+
+    let _handle = thread::spawn(move || {
+        for _ in 0..repeat {
+            f();
+        }
+
+        let (lock, cvar) = &*pair2;
+        let mut fin = lock.lock().unwrap();
+        *fin = true;
+        cvar.notify_one();
+    });
+
+    let (lock, cvar) = &*pair;
+    let mut fin = lock.lock().unwrap();
+    while !*fin {
+        let start = std::time::Instant::now();
+
+        let res = cvar.wait_timeout(fin, timeout).unwrap();
+        fin = res.0;
+
+        let elapsed = start.elapsed();
+        if let Some(remain) = timeout.checked_sub(elapsed) {
+            timeout = remain;
+        } else {
+            #[cfg(unix)]
+            {
+                use std::os::unix::thread::JoinHandleExt;
+                unsafe { libc::pthread_cancel(_handle.into_pthread_t()) };
+                panic!("timed out: {name}");
+            }
+
+            #[cfg(not(unix))]
+            {
+                eprintln!("timed out: {name}");
+                std::process::exit(101); // Panic result.
+            }
+        }
     }
 }
 

@@ -193,7 +193,7 @@ impl UnsafeFuture {
     /// [`UnsafeFuture::new`].
     pub unsafe fn will_wake<W>(self, other: &W) -> bool
     where
-        W: WakeSend + Eq,
+        W: WakeSend + PartialEq,
     {
         unsafe {
             let waker_ptr = FutureData::<(), (), W, (), ()>::waker_ptr(self.data);

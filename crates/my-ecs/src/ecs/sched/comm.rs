@@ -1,4 +1,4 @@
-use super::task::{ParTask, Task};
+use super::task::{AsyncTask, ParTask, Task};
 use crate::{
     ds::{Signal, UnsafeFuture},
     ecs::{
@@ -9,14 +9,12 @@ use crate::{
 use crossbeam_deque as cb;
 use std::{
     cell::Cell,
-    fmt,
     sync::{
         atomic::{AtomicBool, AtomicU32, Ordering},
-        mpsc::{self, Receiver, RecvTimeoutError, SendError, Sender, TryRecvError},
+        mpsc::{self, SendError, Sender, TryRecvError},
         Arc, Mutex,
     },
     thread::{self, Thread},
-    time::Duration,
 };
 
 thread_local! {
@@ -113,7 +111,22 @@ impl SubComm {
         &self.signal
     }
 
-    pub(crate) const fn worker_id(&self) -> WorkerId {
+    /// We can also get the worker id from
+    /// [`WORKER_ID`](crate::ecs::sched::ctrl::WORKER_ID).
+    pub(crate) fn worker_id(&self) -> WorkerId {
+        let wid = self.maybe_uninit_worker_id();
+
+        #[cfg(debug_assertions)]
+        {
+            use crate::ecs::sched::ctrl::WORKER_ID;
+
+            assert_eq!(wid, WORKER_ID.get());
+        }
+
+        wid
+    }
+
+    pub(super) fn maybe_uninit_worker_id(&self) -> WorkerId {
         self.wid
     }
 
@@ -137,10 +150,8 @@ impl SubComm {
         self.tx_msg.send(msg).unwrap();
     }
 
-    pub(crate) fn send_command(&self, cmd: CommandObject) {
-        if let Err(SendError(cmd)) = self.tx_cmd.send(cmd) {
-            cmd.cancel();
-        }
+    pub(crate) fn send_command_or_cancel(&self, cmd: CommandObject) {
+        self.tx_cmd.send_or_cancel(cmd);
     }
 
     pub(super) fn pop(&self) -> cb::Steal<Task> {
@@ -169,11 +180,12 @@ impl SubComm {
         self.local.push(Task::Parallel(task));
     }
 
-    pub(super) fn push_future_task(&self, handle: UnsafeFuture) {
-        self.futures[self.wid.worker_index() as usize].push(Task::Future(handle));
+    pub(crate) fn push_future_task(&self, handle: UnsafeFuture) {
+        let task = Task::Async(AsyncTask(handle));
+        self.futures[self.wid.worker_index() as usize].push(task);
     }
 
-    pub(super) fn is_local_empty(&self) -> bool {
+    pub(crate) fn is_local_empty(&self) -> bool {
         self.local.is_empty()
     }
 
@@ -449,7 +461,13 @@ pub(crate) struct CommandSender {
 }
 
 impl CommandSender {
-    pub(super) fn send(&self, cmd: CommandObject) -> Result<(), SendError<CommandObject>> {
+    pub(crate) fn send_or_cancel(&self, cmd: CommandObject) {
+        if let Err(SendError(cmd)) = self.send(cmd) {
+            cmd.cancel();
+        }
+    }
+
+    fn send(&self, cmd: CommandObject) -> Result<(), SendError<CommandObject>> {
         let guard = self.open.lock().unwrap();
         if *guard {
             self.inner.send(cmd)
@@ -466,8 +484,8 @@ pub(crate) struct CommandReceiver {
 }
 
 impl CommandReceiver {
-    pub(crate) fn has(&self) -> bool {
-        self.inner.has()
+    pub(crate) fn is_empty(&self) -> bool {
+        self.inner.is_empty()
     }
 
     pub(crate) fn try_recv(&self) -> Result<CommandObject, TryRecvError> {
@@ -525,69 +543,169 @@ impl<T> Clone for ParkingSender<T> {
     }
 }
 
-pub(crate) struct ParkingReceiver<T> {
-    rx: Receiver<T>,
+#[cfg(not(debug_assertions))]
+pub(crate) use parking_receiver_release::*;
 
-    /// Takes the next value out of the channel and holds it.
-    /// to cooperate with `thread::park_timeout`.
-    next: Cell<Option<T>>,
-}
+#[cfg(debug_assertions)]
+pub(crate) use parking_receiver_debug::*;
 
-impl<T> fmt::Debug for ParkingReceiver<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ParkingReceiver")
-            .field("rx", &self.rx)
-            .finish_non_exhaustive()
+#[cfg(not(debug_assertions))]
+mod parking_receiver_release {
+    use std::{
+        cell::Cell,
+        fmt,
+        sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError},
+        thread,
+        time::Duration,
+    };
+
+    pub(crate) struct ParkingReceiver<T> {
+        rx: Receiver<T>,
+
+        /// Takes the next value out of the channel and holds it.
+        /// to cooperate with `thread::park_timeout`.
+        next: Cell<Option<T>>,
     }
-}
 
-impl<T> ParkingReceiver<T> {
-    pub(crate) const fn new(rx: Receiver<T>) -> Self {
-        Self {
-            rx,
-            next: Cell::new(None),
+    impl<T> std::fmt::Debug for ParkingReceiver<T> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("ParkingReceiver")
+                .field("rx", &self.rx)
+                .finish_non_exhaustive()
         }
     }
 
-    pub(crate) fn has(&self) -> bool {
-        if let Ok(value) = self.try_recv() {
-            self.next.set(Some(value));
-            true
-        } else {
-            false
+    impl<T> ParkingReceiver<T> {
+        pub(crate) const fn new(rx: Receiver<T>) -> Self {
+            Self {
+                rx,
+                next: Cell::new(None),
+            }
+        }
+
+        pub(crate) fn is_empty(&self) -> bool {
+            if let Ok(value) = self.try_recv() {
+                self.next.set(Some(value));
+                false
+            } else {
+                true
+            }
+        }
+
+        pub(crate) fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
+            if let Ok(value) = self.try_recv() {
+                Ok(value)
+            } else {
+                thread::park_timeout(timeout);
+                self.rx.try_recv().map_err(|err| match err {
+                    TryRecvError::Empty => RecvTimeoutError::Timeout,
+                    TryRecvError::Disconnected => RecvTimeoutError::Disconnected,
+                })
+            }
+        }
+
+        pub(crate) fn wait_timeout(&self, timeout: Duration) {
+            if let Ok(value) = self.try_recv() {
+                self.next.set(Some(value));
+            } else {
+                thread::park_timeout(timeout);
+            }
+        }
+
+        pub(crate) fn try_recv(&self) -> Result<T, TryRecvError> {
+            if let Some(value) = self.next.take() {
+                Ok(value)
+            } else {
+                self.rx.try_recv()
+            }
         }
     }
+}
 
-    /// May return timeout error spuriously.
-    //
-    // Why `thread::park_timeout()` instead of `Receiver::recv_timeout()`?
-    //
-    // In web, we cannot get time, but `Receiver::recv_timeout()` tries
-    // to get current time, so it fails to compile.
-    // Fortunately, in nightly-2024-06-20, `thread::park_timeout()` is
-    // implemented via wasm32::memory_atomic_wait32(), so it works.
-    // See "nightly-2024-06-20-.../lib/rustlib/src/rust/library/std/src/sys/pal/wasm/atomics/futex.rs"
-    pub(crate) fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
-        let cur = if let Some(value) = self.next.take() {
-            Ok(value)
-        } else {
-            thread::park_timeout(timeout);
-            self.rx.try_recv().map_err(|err| match err {
-                TryRecvError::Empty => RecvTimeoutError::Timeout,
-                TryRecvError::Disconnected => RecvTimeoutError::Disconnected,
-            })
-        };
+#[cfg(debug_assertions)]
+mod parking_receiver_debug {
+    use std::{
+        cell::{RefCell, RefMut},
+        collections::VecDeque,
+        sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError},
+        thread,
+        time::Duration,
+    };
 
-        self.next.set(self.rx.try_recv().ok());
-
-        cur
+    #[derive(Debug)]
+    pub(crate) struct ParkingReceiver<T> {
+        rx: Receiver<T>,
+        buf: RefCell<VecDeque<T>>,
     }
 
-    pub(crate) fn try_recv(&self) -> Result<T, TryRecvError> {
-        if let Some(value) = self.next.take() {
-            Ok(value)
-        } else {
-            self.rx.try_recv()
+    impl<T> ParkingReceiver<T> {
+        pub(crate) const fn new(rx: Receiver<T>) -> Self {
+            Self {
+                rx,
+                buf: RefCell::new(VecDeque::new()),
+            }
+        }
+
+        pub(crate) fn is_empty(&self) -> bool {
+            if let Ok(value) = self.try_recv() {
+                self.buf.borrow_mut().push_front(value);
+                false
+            } else {
+                true
+            }
+        }
+
+        /// May return timeout error spuriously.
+        //
+        // Why `thread::park_timeout()` instead of `Receiver::recv_timeout()`?
+        //
+        // In web, we cannot get time, but `Receiver::recv_timeout()` tries
+        // to get current time, so it fails to compile.
+        // Fortunately, in nightly-2024-06-20, `thread::park_timeout()` is
+        // implemented via wasm32::memory_atomic_wait32(), so it works.
+        // See "nightly-2024-06-20-.../lib/rustlib/src/rust/library/std/src/sys/pal/wasm/atomics/futex.rs"
+        pub(crate) fn recv_timeout(&self, timeout: Duration) -> Result<T, RecvTimeoutError> {
+            if let Ok(value) = self.try_recv() {
+                Ok(value)
+            } else {
+                thread::park_timeout(timeout);
+                self.rx.try_recv().map_err(|err| match err {
+                    TryRecvError::Empty => RecvTimeoutError::Timeout,
+                    TryRecvError::Disconnected => RecvTimeoutError::Disconnected,
+                })
+            }
+        }
+
+        /// Blocks until a message arrives through the channel.
+        ///
+        /// If there is arleady a received message, returns immediately.
+        /// Otherwise, blocks for the given duration, but it may return
+        /// spuriously.
+        ///
+        /// Also note that this method doesn't consume any messages. You will
+        /// get the message through other receving methods.
+        pub(crate) fn wait_timeout(&self, timeout: Duration) {
+            if let Ok(value) = self.try_recv() {
+                self.buf.borrow_mut().push_front(value);
+            } else {
+                thread::park_timeout(timeout);
+            }
+        }
+
+        pub(crate) fn try_recv(&self) -> Result<T, TryRecvError> {
+            if let Some(value) = self.buf.borrow_mut().pop_front() {
+                Ok(value)
+            } else {
+                self.rx.try_recv()
+            }
+        }
+
+        pub(crate) fn buffer(&self) -> RefMut<'_, VecDeque<T>> {
+            let mut buf = self.buf.borrow_mut();
+            while let Ok(value) = self.rx.try_recv() {
+                buf.push_back(value);
+            }
+            buf
         }
     }
 }
@@ -622,6 +740,6 @@ mod web {
     pub(crate) enum TaskKind {
         System,
         Parallel,
-        Future,
+        Async,
     }
 }
