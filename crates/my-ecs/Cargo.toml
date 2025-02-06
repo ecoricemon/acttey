@@ -1,11 +1,14 @@
 [package]
 name = "my-ecs"
-description = "Entity Component System implementation"
-repository = "https://github.com/ecoricemon/acttey"
-license = "Apache-2.0 OR MIT"
-version = "0.0.3"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.80" # std::sync::LazyLock is stable since 1.80.0.
+description = "An Entity Component System (ECS) library"
+documentation = "https://docs.rs/my-ecs"
+readme = "README.md" 
+repository = "https://github.com/ecoricemon/acttey"
+license = "Apache-2.0 OR MIT"
+keywords = ["ecs", "parallel", "wasm", "web"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -23,7 +26,7 @@ stat = []
 # ====================
 
 [dependencies]
-my-ecs-macros = { version = "0.0.2", path = "src/macros" }
+my-ecs-macros = { version = "0.1.0", path = "src/macros" }
 paste = { version = "1.0.14" }
 thiserror = { version = "2.0.3" }
 crossbeam-deque = { version = "0.8.5" }

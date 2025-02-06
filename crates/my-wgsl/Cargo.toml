@@ -1,17 +1,20 @@
 [package]
 name = "my-wgsl"
-description = "Generating WGSL code from rust"
+version = "0.1.0"
+edition = "2021"
+description = "A WGSL generation library from Rust"
+documentation = "https://docs.rs/my-wgsl"
+readme = "README.md" 
 repository = "https://github.com/ecoricemon/acttey"
 license = "Apache-2.0 OR MIT"
-version = "0.0.2"
-edition = "2021"
+keywords = ["wgsl"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+my-wgsl-macros = { version = "0.1.0", path = "src/macros" }
 paste = { version = "1.0.14" }
-my-wgsl-macros = { version = "0.0.1", path = "src/macros" }
 
 [dev-dependencies] 
 pretty_assertions = { version = "1.4.0" }
