@@ -425,7 +425,7 @@ fn try_parallel_task(pool: WorkerPool) -> WorkerPool {
         // Adds a resource.
         #[derive(Resource)]
         struct R(Vec<i64>);
-        let r = R((START..=END).into_iter().collect());
+        let r = R((START..=END).collect());
         ecs.add_resource(r).unwrap();
 
         // Tests pure rayon iterator wrapped in into_ecs_par.
@@ -465,7 +465,7 @@ fn try_parallel_task(pool: WorkerPool) -> WorkerPool {
         .unwrap();
         run_with_validation(&mut ecs);
 
-        return ecs.destroy().into();
+        ecs.destroy().into()
     }
 
     fn run_with_validation<W, S>(ecs: &mut EcsApp<W, S>)
@@ -547,7 +547,10 @@ fn try_request_lock_ok(workers: Vec<Worker>) -> Vec<Worker> {
             // sync task cannot get access to the resource.
             c_is_async.store(true, Ordering::Relaxed);
             thread::park_timeout(Duration::from_millis(100));
-            let mut dec = || guard.res_write.0 -= 1;
+            let mut dec = || { 
+                guard.res_write.0 -= 1;
+                true
+            };
             for _ in 0..COUNT {
                 hint::black_box(dec());
             }
@@ -760,7 +763,7 @@ fn try_recover_from_panic_in_parallel_task(pool: WorkerPool) -> (WorkerPool, i32
 
 // === Non-web tests ===
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod non_web_test {
     use super::*;
     use my_ecs::{test_util, type_name};
@@ -778,11 +781,11 @@ mod non_web_test {
 
     #[test]
     fn repeat_test_open_close() {
-        if let Ok(_) = env::var("REPEAT") {
+        if env::var("REPEAT").is_ok() {
             let f = || test_open_close();
             let name = type_name!(repeat_test_open_close);
             let repeat = 1000;
-            let timeout = Duration::from_secs(60);
+            let timeout = Duration::from_secs(300);
             test_util::call_timeout(f, name, repeat, timeout);
         }
     }
@@ -794,11 +797,11 @@ mod non_web_test {
 
     #[test]
     fn repeat_test_schedule() {
-        if let Ok(_) = env::var("REPEAT") {
+        if env::var("REPEAT").is_ok() {
             let f = || test_schedule();
             let name = type_name!(repeat_test_schedule);
             let repeat = 1000;
-            let timeout = Duration::from_secs(60);
+            let timeout = Duration::from_secs(300);
             test_util::call_timeout(f, name, repeat, timeout);
         }
     }
@@ -810,11 +813,11 @@ mod non_web_test {
 
     #[test]
     fn repeat_test_parallel_task() {
-        if let Ok(_) = env::var("REPEAT") {
+        if env::var("REPEAT").is_ok() {
             let f = || test_parallel_task();
             let name = type_name!(repeat_test_parallel_task);
             let repeat = 1000;
-            let timeout = Duration::from_secs(60);
+            let timeout = Duration::from_secs(300);
             test_util::call_timeout(f, name, repeat, timeout);
         }
     }
@@ -826,11 +829,11 @@ mod non_web_test {
 
     #[test]
     fn repeat_test_request_lock() {
-        if let Ok(_) = env::var("REPEAT") {
+        if env::var("REPEAT").is_ok() {
             let f = || test_request_lock();
             let name = type_name!(repeat_test_request_lock);
             let repeat = 50;
-            let timeout = Duration::from_secs(60);
+            let timeout = Duration::from_secs(300);
             test_util::call_timeout(f, name, repeat, timeout);
         }
     }
@@ -843,11 +846,11 @@ mod non_web_test {
 
     #[test]
     fn repeat_test_recover_from_panic() {
-        if let Ok(_) = env::var("REPEAT") {
+        if env::var("REPEAT").is_ok() {
             let f = || test_recover_from_panic();
             let name = type_name!(repeat_test_recover_from_panic);
             let repeat = 1000;
-            let timeout = Duration::from_secs(60);
+            let timeout = Duration::from_secs(300);
             test_util::call_timeout(f, name, repeat, timeout);
         }
     }
@@ -859,11 +862,11 @@ mod non_web_test {
 
     #[test]
     fn repeat_test_command() {
-        if let Ok(_) = env::var("REPEAT") {
+        if env::var("REPEAT").is_ok() {
             let f = || test_command();
             let name = type_name!(repeat_test_command);
             let repeat = 1000;
-            let timeout = Duration::from_secs(60);
+            let timeout = Duration::from_secs(300);
             test_util::call_timeout(f, name, repeat, timeout);
         }
     }

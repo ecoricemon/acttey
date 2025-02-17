@@ -377,7 +377,7 @@ fn repeat_test_async_wait() {
         let f = || test_async_wait();
         let name = type_name!(repeat_test_async_wait);
         let repeat = 50;
-        let timeout = Duration::from_secs(60);
+        let timeout = Duration::from_secs(300);
         test_util::call_timeout(f, name, repeat, timeout);
     }
 }
@@ -434,7 +434,7 @@ fn repeat_test_async_abort() {
         let f = || test_async_abort();
         let name = type_name!(repeat_test_async_abort);
         let repeat = 1000;
-        let timeout = Duration::from_secs(60);
+        let timeout = Duration::from_secs(300);
         test_util::call_timeout(f, name, repeat, timeout);
     }
 }

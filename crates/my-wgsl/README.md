@@ -2,76 +2,112 @@
 
 my-wgsl is a WGSL code generation library.
 
-## When to use
+## Features
 
-- When you want to compose multiple WGSL pieces into one WGSL text. You can
-  generate shader module from it later.
-- When you want to modify WGSL piece such as insertion or deletion dynamically.
+- Provides macros making your structs WGSL compatible at compile time.
 
-## Example
+## Examples
+
+Defines structs for storage buffer.
 
 ```rust
-// ref: https://www.w3.org/TR/WGSL/
-use my_wgsl::*;
+use my_wgsl::{*, builtin::*};
 
-#[wgsl_struct]
-struct PointLight {
-    position: vec3f,
-    color: vec3f,
-}
+#[wgsl_mod]
+mod m {
+    use my_wgsl::{*, builtin::*};
 
-#[wgsl_struct]
-struct LightStorage {
-    pointCount: u32,
-    point: array<PointLight>,
-}
-
-let mut builder = WgslBuilder::new();
-
-builder.push_struct_of::<PointLight>();
-builder.push_struct_of::<LightStorage>();
-
-builder.push_global_variable(
-    wgsl_global_var!(group(0) binding(0) var<storage> lights : LightStorage)
-);
-builder.push_global_variable(
-    wgsl_global_var!(group(1) binding(0) var baseColorSampler : sampler)
-);
-builder.push_global_variable(
-    wgsl_global_var!(group(1) binding(1) var baseColorTexture : texture_2d<f32>)
-);
-
-let f = wgsl_fn!(
-    #[fragment]
-    fn fragmentMain(#[location(0)] worldPos : vec3f,
-                    #[location(1)] normal : vec3f,
-                    #[location(2)] uv : vec2f) -> #[location(0)] vec4f {
-        // Sample the base color of the surface from a texture.
-        let baseColor = textureSample(baseColorTexture, baseColorSampler, uv);
-
-        let N = normalize(normal);
-        var surfaceColor = vec3f(0);
-
-        // Loop over the scene point lights.
-        for (var i = 0u; i < lights.pointCount; ++i) {
-            let worldToLight = lights.point[i].position - worldPos;
-            let dist = length(worldToLight);
-            let dir = normalize(worldToLight);
-
-            // Determine the contribution of this light to the surface color.
-            let radiance = lights.point[i].color * (1 / pow(dist, 2));
-            let nDotL = max(dot(N, dir), 0);
-
-            // Accumulate light contribution to the surface color.
-            surfaceColor += baseColor.rgb * radiance * nDotL;
-        }
-
-        // Return the accumulated surface color.
-        return vec4(surfaceColor, baseColor.a);
-        
+    pub struct Object {
+        pos: Position,
+        tf: Mat2x2f,
+        color: Vec3f,
     }
-);
-builder.push_function(f);
 
-let wgsl: String = builder.build();
+    pub struct Position {
+        v: Vec2f,
+    }
+}
+
+let obj = m::Object::new(
+    m::Position::new(Vec2f::ZERO),
+    Mat2x2f::IDENTITY,
+    Vec3f::splat(1.),
+);
+
+// Write to GPU buffer.
+let bytes: &[u8] = obj.as_bytes();
+
+// To WGSL code.
+let code: String = WgslModule::of::<m::Module>().build();
+println!("{code}"); // struct Object { ... } struct Position { ... }
+```
+
+You can also define structs for uniform buffer like this.
+
+```rust
+use my_wgsl::{*, builtin::*};
+
+#[wgsl_mod]
+mod m {
+    use my_wgsl::{*, builtin::*};
+
+    #[uniform]
+    pub struct Object {
+        pos: Position,
+        tf: Mat2x2f,
+        color: Vec3f,
+    }
+
+    // Becomes uniform compatible automatically.
+    pub struct Position {
+        v: Vec2f,
+    }
+}
+```
+
+WGLS `array<T, N>` and `array<T>` are represented by `[T; N]` and `[T]`
+respectively.
+
+```rust
+use my_wgsl::{builtin::*, *};
+
+#[wgsl_mod]
+mod m {
+    use my_wgsl::{builtin::*, *};
+
+    // Array.
+    pub struct Sa {
+        data: [WideVec3f; 2],
+    }
+
+    // Runtime-sized array.
+    pub struct Rsa {
+        v: Vec2f,
+        last: [Element],
+    }
+
+    #[derive(PartialEq, Debug)]
+    pub struct Element {
+        x: Vec3f,
+    }
+}
+
+let mut rsa = m::Rsa::new(Vec2f::ZERO);
+
+// Set & Get fields except the last one.
+rsa.set_v(Vec2f::splat(1.));
+assert_eq!(rsa.get_v(), &Vec2f::splat(1.));
+
+// Extends the last runtime-sized array.
+rsa.extend_with(2, |index| m::Element::new(Default::default()));
+
+// Set & Get the last runtime-sized array.
+let slice: &mut [m::Element] = rsa.get_mut_last();
+slice[0] = m::Element::new(Vec3f::splat(1.));
+slice[1] = m::Element::new(Vec3f::splat(2.));
+assert_eq!(
+    rsa.get_last(),
+    &[ m::Element::new(Vec3f::splat(1.)),
+       m::Element::new(Vec3f::splat(2.)) ]
+);
 ```

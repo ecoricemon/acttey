@@ -124,7 +124,7 @@ test_tsan() {
 
     print_title "Test with thread sanitizer"
     RUSTFLAGS='-Zsanitizer=thread' \
-        cargo +nightly-2024-06-20 run --example tsan --target $(get_host_triple)
+        cargo +nightly run --example tsan --target $(get_host_triple)
     ret=$?
     if [ $ret -ne 0 ]; then
         exit $ret
