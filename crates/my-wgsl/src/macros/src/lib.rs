@@ -1,10 +1,12 @@
 mod module;
 mod structs;
+mod traits;
 mod util;
 
-use module::*;
+use module::WgslMod;
 use proc_macro::TokenStream;
 use quote::{quote, ToTokens};
+use structs::ExternLayout;
 use syn::{parse_macro_input, ItemMod};
 
 #[proc_macro_attribute]
@@ -15,6 +17,12 @@ pub fn wgsl_mod(_attr: TokenStream, item: TokenStream) -> TokenStream {
         Err(e) => return e.into_compile_error().into(),
     };
     wgsl_module.into_token_stream().into()
+}
+
+#[proc_macro]
+pub fn layout(item: TokenStream) -> TokenStream {
+    let layout = parse_macro_input!(item as ExternLayout);
+    layout.into_token_stream().into()
 }
 
 // === Share the same plain types with outer crate ===

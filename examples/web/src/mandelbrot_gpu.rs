@@ -69,6 +69,9 @@ pub(super) fn read(rw: ResWrite<GpuBufferStorage>) {
     read_buf
         .slice(..)
         .map_async(wgpu::MapMode::Read, move |res| {
+            // On web, this closure will be called as a microtask. Therefore, 
+            // ECS must stop execution for a while so that JS runtime schedule
+            // this closure.
             assert!(res.is_ok());
 
             let mut data = gpu_slot();

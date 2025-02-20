@@ -1,13 +1,18 @@
 use super::{
-    util::*, Vec2f, Vec2i, Vec2u, Vec3f, Vec3i, Vec3u, Vec4f, Vec4i, Vec4u, WideVec2f, WideVec2i,
-    WideVec2u, WideVec3f, WideVec3i, WideVec3u, WideVec4f, WideVec4i, WideVec4u,
+    traits::{ComptimeWgslCode, RuntimeWgslToken},
+    util::*,
+    Vec2f, Vec2i, Vec2u, Vec3f, Vec3i, Vec3u, Vec4f, Vec4i, Vec4u, WideVec2f, WideVec2i, WideVec2u,
+    WideVec3f, WideVec3i, WideVec3u, WideVec4f, WideVec4i, WideVec4u,
 };
-use proc_macro2::{Span, TokenStream as TokenStream2};
+use proc_macro2::{Punct, Spacing, Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote, ToTokens, TokenStreamExt};
 use std::alloc::{Layout, LayoutError};
 use syn::{
-    parse_quote, spanned::Spanned, Attribute, Error, Field, Fields, Ident, Index, ItemStruct,
-    Result, Type, Visibility,
+    parse::{Parse, ParseStream},
+    parse_quote,
+    spanned::Spanned,
+    Attribute, Error, Field, Fields, Ident, Index, ItemStruct, LitInt, Meta, Result, Token, Type,
+    Visibility,
 };
 
 /// Attribute to be compatible with uniform address space.
@@ -18,7 +23,7 @@ pub(crate) const PAD_PREFIX: &str = "__pad";
 
 #[derive(Debug)]
 pub(crate) struct WgslStruct {
-    pub(crate) attrs: Vec<Attribute>,
+    pub(crate) attrs: Vec<WgslAttribute>,
     pub(crate) vis: Visibility,
     pub(crate) ident: Ident,
 
@@ -26,7 +31,7 @@ pub(crate) struct WgslStruct {
     ///
     /// Padding fields start with `PAD_PREFIX`, so that you can easily filter
     /// them out.
-    pub(crate) fields: Vec<FieldExt>,
+    pub(crate) fields: Vec<WgslField>,
     pub(crate) struct_layout: LayoutExt,
 }
 
@@ -59,22 +64,53 @@ impl WgslStruct {
                 ));
             }
 
-            // Adds a pad field if needed.
-            let (pad, need) = Self::required_pad(offset, rust_layout, wgsl_layout);
+            // Adds a preceding pad field if needed.
+            let (pad, need) = Self::preceding_pad(offset, rust_layout, wgsl_layout);
             if need {
-                let (field, field_layout) = Self::create_pad_field(fields.len(), pad);
-                fields.push(FieldExt::new(field, field_layout, field_layout, offset, 0));
+                let (f, layout) = Self::create_pad_field(fields.len(), pad);
+                fields.push(WgslField {
+                    attrs: Vec::new(),
+                    vis: f.vis,
+                    ident: f.ident.unwrap(),
+                    ty: f.ty,
+                    rust_layout: layout,
+                    wgsl_layout: layout,
+                    offset,
+                });
             }
             offset += pad;
 
             // Adds the current field.
-            fields.push(FieldExt::new(
-                cur.clone(),
+            let mut attrs = WgslAttribute::vec_from(cur.attrs.clone());
+            if wgsl_field_align > 0 {
+                let width = Index::from(wgsl_field_align);
+                let attr: Attribute = parse_quote!(#[align(#width)]);
+                attrs.push(attr.into());
+            }
+            fields.push(WgslField {
+                attrs,
+                vis: cur.vis.clone(),
+                ident: cur.ident.clone().unwrap(),
+                ty: cur.ty.clone(),
                 rust_layout,
                 wgsl_layout,
                 offset,
-                wgsl_field_align,
-            ));
+            });
+
+            // Adds a following pad field if needed.
+            let pad = Self::following_pad(rust_layout, wgsl_layout);
+            if pad > 0 {
+                let (f, layout) = Self::create_pad_field(fields.len(), pad);
+                fields.push(WgslField {
+                    attrs: Vec::new(),
+                    vis: f.vis,
+                    ident: f.ident.unwrap(),
+                    ty: f.ty,
+                    rust_layout: layout,
+                    wgsl_layout: layout,
+                    offset,
+                });
+            }
 
             // Adjusts the current offset and maximum alignment.
             offset += rust_layout.size();
@@ -90,7 +126,7 @@ impl WgslStruct {
         );
 
         Ok(Self {
-            attrs: Self::filter_attributes(&st.attrs),
+            attrs: WgslAttribute::vec_from(Self::filter_attributes(&st.attrs)),
             vis: st.vis.clone(),
             ident: st.ident.clone(),
             fields,
@@ -112,6 +148,30 @@ impl WgslStruct {
         let (rust_layout, wgsl_layout) = Self::type_to_layout(&field.ty, search, IN_ARRAY)?;
         debug_assert!(rust_layout.size() <= wgsl_layout.size());
         debug_assert!(rust_layout.align() <= wgsl_layout.align());
+
+        // `align` attribute affects WGSL layout.
+        let wgsl_layout = if let Some(value) = field.get_attribute_value("align") {
+            let value = value
+                .parse::<usize>()
+                .map_err(|e| Error::new(field.span(), e))?;
+            wgsl_layout
+                .align_to(value)
+                .map_err(|e| Error::new(field.span(), e))?
+        } else {
+            wgsl_layout
+        };
+
+        // `size` attribute affects WGSL layout.
+        let wgsl_layout = if let Some(value) = field.get_attribute_value("size") {
+            let value = value
+                .parse::<usize>()
+                .map_err(|e| Error::new(field.span(), e))?;
+            let layout = Layout::from_size_align(value, wgsl_layout.align())
+                .map_err(|e| Error::new(field.span(), e))?;
+            LayoutExt::new(layout, wgsl_layout.sized)
+        } else {
+            wgsl_layout
+        };
 
         // Uniform? then adjusts the WGSL layout. It may need extra attribute
         // in WGSL code.
@@ -155,13 +215,8 @@ impl WgslStruct {
     {
         let (rust_layout, wgsl_layout) = match ty {
             // T: Returns (size: size of T, align of T)
-            Type::Path(ty) => {
-                let ty_ident = ty
-                    .path
-                    .segments
-                    .last()
-                    .map(|seg| &seg.ident)
-                    .ok_or(Error::new(ty.span(), "invalid type path"))?;
+            Type::Path(_) => {
+                let ty_ident = last_type_path_ident(ty)?;
                 let (rust_layout, wgsl_layout) = search(ty_ident)?;
 
                 Self::check_type_availability(
@@ -219,11 +274,24 @@ impl WgslStruct {
         ))
     }
 
-    /// Returns pair of padding bytes and whether it is required explicitly.
+    /// Returns pair of required padding bytes and whether it is required
+    /// explicitly.
     ///
-    /// If true, we need to add a pad field, otherwise Rust will add a WGSL
-    /// compatible padding silently.
-    const fn required_pad(
+    /// Preceding padding is required when Rust need an extra pad field due to
+    /// alignment difference between Rust and WGSL. See an example below.
+    ///
+    /// ```text
+    /// * Explicit required padding
+    /// ----[Rust]
+    /// --------[WGSL]
+    /// -------- : We need explicit padding as much as this amount.
+    ///
+    /// * Implicit required padding
+    /// ----[Rust]
+    /// ----[WGSL]
+    /// ---- : Rust will put this hidden pad automatically.
+    /// ```
+    const fn preceding_pad(
         offset: usize,
         rust_layout: LayoutExt,
         wgsl_layout: LayoutExt,
@@ -234,6 +302,22 @@ impl WgslStruct {
         let need_explicit = rust_layout.align() != wgsl_layout.align() && pad > 0;
 
         (pad, need_explicit)
+    }
+
+    /// Returns pair of required following padding bytes.
+    ///
+    /// Following padding is required when Rust need an extra pad field due to
+    /// size difference between Rust and WGSL. See an example below.
+    ///
+    /// ```text
+    /// ----[Rust]
+    /// ----[--WGSL--]
+    ///           ---- : We need padding as much as this amount.
+    /// ```
+    const fn following_pad(rust_layout: LayoutExt, wgsl_layout: LayoutExt) -> usize {
+        debug_assert!(rust_layout.size() <= wgsl_layout.size());
+
+        wgsl_layout.size() - rust_layout.size()
     }
 
     fn create_pad_field(i: usize, size: usize) -> (Field, LayoutExt) {
@@ -269,6 +353,7 @@ impl WgslStruct {
         self.struct_layout.is_sized()
     }
 
+    #[rustfmt::skip]
     fn check_type_availability(
         span: Span,
         ident: &str,
@@ -277,26 +362,14 @@ impl WgslStruct {
     ) -> Result<()> {
         if in_arr {
             const DISALLOWED: [&str; 9] = [
-                Vec2i::ident(),
-                Vec3i::ident(),
-                Vec4i::ident(),
-                Vec2u::ident(),
-                Vec3u::ident(),
-                Vec4u::ident(),
-                Vec2f::ident(),
-                Vec3f::ident(),
-                Vec4f::ident(),
+                Vec2i::ident(), Vec3i::ident(), Vec4i::ident(),
+                Vec2u::ident(), Vec3u::ident(), Vec4u::ident(),
+                Vec2f::ident(), Vec3f::ident(), Vec4f::ident(),
             ];
             const ALTERNATIVES: [&str; 9] = [
-                WideVec2i::ident(),
-                WideVec3i::ident(),
-                WideVec4i::ident(),
-                WideVec2u::ident(),
-                WideVec3u::ident(),
-                WideVec4u::ident(),
-                WideVec2f::ident(),
-                WideVec3f::ident(),
-                WideVec4f::ident(),
+                WideVec2i::ident(), WideVec3i::ident(), WideVec4i::ident(),
+                WideVec2u::ident(), WideVec3u::ident(), WideVec4u::ident(),
+                WideVec2f::ident(), WideVec3f::ident(), WideVec4f::ident(),
             ];
             if let Some((i, _)) = DISALLOWED.iter().enumerate().find(|(_, &v)| v == ident) {
                 return Err(Error::new(
@@ -354,18 +427,17 @@ impl WgslStruct {
 
     fn decl_unsized_outer_new<'a, I>(inner_ident: &Ident, fields: I) -> TokenStream2
     where
-        I: Iterator<Item = &'a FieldExt> + Clone,
+        I: Iterator<Item = &'a WgslField> + Clone,
     {
         let cnt = fields.clone().count() - 1; // Except the last member
 
         let params = fields.clone().take(cnt).map(|f| {
-            let ident = f.get_ident();
-            let ty = f.get_type();
+            let (ident, ty) = (&f.ident, &f.ty);
             quote! { #ident: #ty }
         });
 
         let writes = fields.take(cnt).map(|f| {
-            let ident = f.get_ident();
+            let ident = &f.ident;
             let offset = format_ident!("OFFSET_{}", ident.to_uppercase());
             quote! {
                 inner.__write(#inner_ident::#offset, #ident);
@@ -383,13 +455,13 @@ impl WgslStruct {
 
     fn decl_unsized_inner<'a, I>(vis: &Visibility, ident: &Ident, fields: I) -> TokenStream2
     where
-        I: Iterator<Item = &'a FieldExt> + Clone,
+        I: Iterator<Item = &'a WgslField> + Clone,
     {
         let decl_const = Self::decl_unsized_inner_const(fields.clone());
         let decl_drop = Self::decl_unsized_inner_drop(ident, fields.clone());
 
         let last_field = Self::last_field(fields.clone());
-        let last_elem_type = elem_type(last_field.get_type()).unwrap();
+        let last_elem_type = elem_type(&last_field.ty).unwrap();
 
         let get_set = Self::decl_unsized_inner_get_set(vis, fields.clone());
 
@@ -499,12 +571,12 @@ impl WgslStruct {
 
     fn decl_unsized_inner_const<'a, I>(fields: I) -> TokenStream2
     where
-        I: Iterator<Item = &'a FieldExt> + Clone,
+        I: Iterator<Item = &'a WgslField> + Clone,
     {
         let cnt = fields.clone().count() - 1; // Except the last member
 
         let decl_const_offsets = fields.clone().take(cnt).map(|f| {
-            let const_name = format_ident!("OFFSET_{}", f.get_ident().to_uppercase());
+            let const_name = format_ident!("OFFSET_{}", f.ident.to_uppercase());
             let offset = Index::from(f.offset);
             quote! {
                 const #const_name: usize = #offset;
@@ -527,15 +599,15 @@ impl WgslStruct {
 
     fn decl_unsized_inner_get_set<'a, I>(vis: &Visibility, fields: I) -> TokenStream2
     where
-        I: Iterator<Item = &'a FieldExt> + Clone,
+        I: Iterator<Item = &'a WgslField> + Clone,
     {
         let cnt = fields.clone().count() - 1; // Except the last member
 
         let get_set_methods_except_last = fields.clone().take(cnt).map(|f| {
-            let fn_get_name = format_ident!("get_{}", f.get_ident());
-            let fn_set_name = format_ident!("set_{}", f.get_ident());
-            let offset = format_ident!("OFFSET_{}", f.get_ident().to_uppercase());
-            let ty = f.get_type();
+            let fn_get_name = format_ident!("get_{}", f.ident);
+            let fn_set_name = format_ident!("set_{}", f.ident);
+            let offset = format_ident!("OFFSET_{}", f.ident.to_uppercase());
+            let ty = &f.ty;
 
             quote! {
                 #vis fn #fn_get_name(&self) -> &#ty {
@@ -549,9 +621,9 @@ impl WgslStruct {
         });
 
         let last_field = Self::last_field(fields);
-        let last_elem_type = elem_type(last_field.get_type()).unwrap();
-        let fn_get_name = format_ident!("get_{}", last_field.get_ident());
-        let fn_set_name = format_ident!("get_mut_{}", last_field.get_ident());
+        let last_elem_type = elem_type(&last_field.ty).unwrap();
+        let fn_get_name = format_ident!("get_{}", last_field.ident);
+        let fn_set_name = format_ident!("get_mut_{}", last_field.ident);
         let get_set_last = quote! {
             #vis fn #fn_get_name(&self) -> &[#last_elem_type] {
                 unsafe {
@@ -586,13 +658,13 @@ impl WgslStruct {
 
     fn decl_unsized_inner_drop<'a, I>(ident: &Ident, fields: I) -> TokenStream2
     where
-        I: Iterator<Item = &'a FieldExt> + Clone,
+        I: Iterator<Item = &'a WgslField> + Clone,
     {
         let cnt = fields.clone().count() - 1; // Except the last member
 
         let drop_fields = fields.take(cnt).map(|f| {
-            let const_name = format_ident!("OFFSET_{}", f.get_ident().to_uppercase());
-            let ty = f.get_type();
+            let const_name = format_ident!("OFFSET_{}", f.ident.to_uppercase());
+            let ty = &f.ty;
             quote! {
                 std::ptr::drop_in_place(
                     self.0.as_mut_ptr().add(Self::#const_name).cast::<#ty>()
@@ -610,86 +682,17 @@ impl WgslStruct {
         }
     }
 
-    fn last_field<'a, I>(fields: I) -> &'a FieldExt
+    fn last_field<'a, I>(fields: I) -> &'a WgslField
     where
-        I: Iterator<Item = &'a FieldExt>,
+        I: Iterator<Item = &'a WgslField>,
     {
         fields
             .last()
             .expect("internal error: the last member must be runtime sized array")
     }
 
-    fn elem_wgsl_stride(field: &FieldExt) -> usize {
+    fn elem_wgsl_stride(field: &WgslField) -> usize {
         field.wgsl_layout.stride()
-    }
-
-    fn to_wgsl_code_tokens(&self, tokens: &mut TokenStream2) {
-        let Self { ident, fields, .. } = self;
-
-        let fields = fields.iter().filter(|f| !f.is_pad());
-        let insert_field_aligns = fields.clone().map(|f| {
-            if f.wgsl_field_align > 0 {
-                let align = Index::from(f.wgsl_field_align);
-                quote! {
-                    member.insert_attribute("align", Some(stringify!(#align)));
-                }
-            } else {
-                quote! {}
-            }
-        });
-        let field_idents = fields.clone().map(|f| f.get_ident());
-        let field_types = fields.map(|f| f.get_type());
-
-        let as_bytes = if self.is_sized() {
-            quote! {
-                fn as_bytes(&self) -> &[u8] {
-                    let ptr = (self as *const Self).cast::<u8>();
-                    let len = size_of::<Self>();
-                    unsafe { std::slice::from_raw_parts(ptr, len) }
-                }
-                fn as_mut_bytes(&mut self) -> &mut [u8] {
-                    let ptr = (self as *mut Self).cast::<u8>();
-                    let len = size_of::<Self>();
-                    unsafe { std::slice::from_raw_parts_mut(ptr, len) }
-                }
-            }
-        } else {
-            quote! {
-                fn as_bytes(&self) -> &[u8] {
-                    self.__as_bytes()
-                }
-                fn as_mut_bytes(&mut self) -> &mut [u8] {
-                    self.__as_mut_bytes()
-                }
-            }
-        };
-
-        tokens.append_all(quote! {
-            impl my_wgsl::Identify for #ident {
-                fn ident() -> String { stringify!(#ident).to_owned() }
-            }
-            impl my_wgsl::BeWgslStruct for #ident {
-                fn be_struct() -> my_wgsl::WgslStruct {
-                    let mut st = my_wgsl::WgslStruct {
-                        ident: <Self as my_wgsl::Identify>::ident(),
-                        members: Vec::new()
-                    };
-
-                    #(
-                        let mut member = my_wgsl::StructMember::new(
-                            stringify!(#field_idents).to_owned(),
-                            <#field_types as my_wgsl::Identify>::ident()
-                        );
-                        #insert_field_aligns
-                        st.members.push(member);
-                    )*
-
-                    st
-                }
-
-                #as_bytes
-            }
-        });
     }
 
     fn decl_sized_new(&self) -> TokenStream2 {
@@ -698,13 +701,12 @@ impl WgslStruct {
         } = self;
 
         let params = fields.iter().filter(|f| !f.is_pad()).map(|f| {
-            let ident = f.get_ident();
-            let ty = f.get_type();
+            let (ident, ty) = (&f.ident, &f.ty);
             quote! { #ident: #ty }
         });
 
         let assign_fields = fields.iter().map(|f| {
-            let ident = f.get_ident();
+            let ident = &f.ident;
             if !f.is_pad() {
                 quote! { #ident: #ident }
             } else {
@@ -759,67 +761,311 @@ impl ToTokens for WgslStruct {
             });
         }
 
-        self.to_wgsl_code_tokens(tokens);
+        tokens.append_all(self.runtime_tokens());
+    }
+}
+
+impl RuntimeWgslToken for WgslStruct {
+    fn runtime_tokens(&self) -> TokenStream2 {
+        let ident = &self.ident;
+
+        let fields = self
+            .fields
+            .iter()
+            .filter_map(|f| (!f.is_pad()).then_some(f.runtime_tokens()));
+
+        let as_bytes = if self.is_sized() {
+            quote! {
+                fn as_bytes(&self) -> &[u8] {
+                    let ptr = (self as *const Self).cast::<u8>();
+                    let len = size_of::<Self>();
+                    unsafe { std::slice::from_raw_parts(ptr, len) }
+                }
+                fn as_mut_bytes(&mut self) -> &mut [u8] {
+                    let ptr = (self as *mut Self).cast::<u8>();
+                    let len = size_of::<Self>();
+                    unsafe { std::slice::from_raw_parts_mut(ptr, len) }
+                }
+            }
+        } else {
+            quote! {
+                fn as_bytes(&self) -> &[u8] {
+                    self.__as_bytes()
+                }
+                fn as_mut_bytes(&mut self) -> &mut [u8] {
+                    self.__as_mut_bytes()
+                }
+            }
+        };
+
+        let mut wgsl_code = String::new();
+        self.write_wgsl_code(&mut wgsl_code);
+
+        quote! {
+            impl my_wgsl::BeWgslStruct for #ident {
+                fn be_struct() -> my_wgsl::WgslStruct {
+                    let mut wgsl_struct = my_wgsl::WgslStruct {
+                        ident: stringify!(#ident).to_owned(),
+                        members: Vec::new()
+                    };
+                    #(#fields)*
+                    wgsl_struct
+                }
+
+                #as_bytes
+            }
+
+            impl #ident {
+                pub const WGSL: &str = #wgsl_code;
+            }
+        }
+    }
+}
+
+impl ComptimeWgslCode for WgslStruct {
+    fn write_wgsl_code(&self, buf: &mut String) {
+        buf.push_str("struct ");
+        buf.push_str(&self.ident.to_string());
+        buf.push('{');
+        for f in self.fields.iter().filter(|f| !f.is_pad()) {
+            f.write_wgsl_code(buf);
+            buf.push(',');
+        }
+        if let Some(c) = buf.pop() {
+            if c != ',' {
+                buf.push(c);
+            }
+        }
+        buf.push('}');
     }
 }
 
 #[derive(Debug)]
-pub(crate) struct FieldExt {
-    field: Field,
+pub(crate) struct WgslField {
+    pub(crate) attrs: Vec<WgslAttribute>,
+
+    pub(crate) vis: Visibility,
+
+    pub(crate) ident: Ident,
+
+    pub(crate) ty: Type,
 
     /// Rust layout.
-    rust_layout: LayoutExt,
+    pub(crate) rust_layout: LayoutExt,
 
     /// WGSL layout.
     ///
     /// This could me meaningless.
-    wgsl_layout: LayoutExt,
+    pub(crate) wgsl_layout: LayoutExt,
 
     /// Rust & WGSL offset.
     ///
     /// Both offsets are kept to be the same by the crate.
-    offset: usize,
-
-    /// Needs for `@align(K)` in WGSL code generation.
-    ///
-    /// * 0: No need
-    /// * K: Need to attach `@align(K)` to the field.
-    wgsl_field_align: usize,
+    pub(crate) offset: usize,
 }
 
-impl FieldExt {
-    const fn new(
-        field: Field,
-        rust_layout: LayoutExt,
-        wgsl_layout: LayoutExt,
-        offset: usize,
-        wgsl_field_align: usize,
-    ) -> Self {
-        Self {
-            field,
-            rust_layout,
-            wgsl_layout,
-            offset,
-            wgsl_field_align,
+impl WgslField {
+    fn is_pad(&self) -> bool {
+        self.ident.to_string().starts_with(PAD_PREFIX)
+    }
+}
+
+impl ToTokens for WgslField {
+    fn to_tokens(&self, tokens: &mut TokenStream2) {
+        tokens.append_all(&self.attrs);
+        self.vis.to_tokens(tokens);
+        self.ident.to_tokens(tokens);
+        tokens.append(Punct::new(':', Spacing::Alone));
+        self.ty.to_tokens(tokens);
+    }
+}
+
+impl RuntimeWgslToken for WgslField {
+    fn runtime_tokens(&self) -> TokenStream2 {
+        let ident = &self.ident;
+        let ty = wgsl_type_str(&self.ty);
+
+        let mut tokens = quote! {
+            let mut struct_member = my_wgsl::StructMember::new(
+                stringify!(#ident).to_owned(),
+                #ty.to_owned()
+            );
+        };
+
+        for attr in &self.attrs {
+            tokens.append_all(attr.runtime_tokens());
+        }
+
+        tokens.append_all(quote! {
+            wgsl_struct.members.push(struct_member);
+        });
+
+        tokens
+    }
+}
+
+impl ComptimeWgslCode for WgslField {
+    fn write_wgsl_code(&self, buf: &mut String) {
+        for a in &self.attrs {
+            a.write_wgsl_code(buf);
+        }
+        if !self.attrs.is_empty() && !matches!(buf.chars().last(), Some(')')) {
+            buf.push(' ');
+        }
+        buf.push_str(&self.ident.to_string());
+        buf.push(':');
+        buf.push_str(&wgsl_type_str(&self.ty));
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct WgslAttribute {
+    pub(crate) meta: Meta,
+    pub(crate) rust_show: bool,
+    pub(crate) wgsl_show: bool,
+}
+
+impl WgslAttribute {
+    fn vec_from(attrs: Vec<Attribute>) -> Vec<Self> {
+        attrs.into_iter().map(Into::into).collect()
+    }
+}
+
+impl ToTokens for WgslAttribute {
+    fn to_tokens(&self, tokens: &mut TokenStream2) {
+        if !self.rust_show {
+            return;
+        }
+
+        let meta = &self.meta;
+
+        tokens.append_all(quote! {
+            #[#meta]
+        });
+    }
+}
+
+impl RuntimeWgslToken for WgslAttribute {
+    fn runtime_tokens(&self) -> TokenStream2 {
+        if !self.wgsl_show {
+            return TokenStream2::new();
+        }
+
+        let outer = self.meta.path();
+        let inner = match &self.meta {
+            Meta::List(l) => {
+                let inner = &l.tokens;
+                quote! { Some(stringify!(#inner)) }
+            }
+            _ => quote! { None },
+        };
+
+        quote! {
+            struct_member.insert_attribute(stringify!(#outer), #inner);
         }
     }
+}
 
-    fn get_ident(&self) -> &Ident {
-        self.field.ident.as_ref().unwrap()
-    }
+impl ComptimeWgslCode for WgslAttribute {
+    fn write_wgsl_code(&self, buf: &mut String) {
+        if !self.wgsl_show {
+            return;
+        }
 
-    fn get_type(&self) -> &Type {
-        &self.field.ty
-    }
+        buf.push('@');
+        buf.push_str(&self.meta.path().to_token_stream().to_string());
 
-    fn is_pad(&self) -> bool {
-        self.get_ident().to_string().starts_with(PAD_PREFIX)
+        if let Meta::List(l) = &self.meta {
+            buf.push('(');
+            buf.push_str(&l.tokens.to_string());
+            buf.push(')');
+        }
     }
 }
 
-impl ToTokens for FieldExt {
+impl From<Attribute> for WgslAttribute {
+    #[rustfmt::skip]
+    fn from(value: Attribute) -> Self {
+        const WGSL_ONLY: [&str; 16] = [
+            "align", "binding", "blend_src", "builtin", "const", "diagnostic",
+            "group", "id", "interpolate", "invariant", "location", "size",
+            "workgroup_size", "vectex", "fragment", "compute"
+        ];
+        const BOTH: [&str; 1] = ["must_use"];
+
+        let (rust_show, wgsl_show) = if WGSL_ONLY.iter().any(|s| value.path().is_ident(s)) {
+            (false, true)
+        } else if BOTH.iter().any(|s| value.path().is_ident(s)) {
+            (true, true)
+        } else {
+            (true, false)
+        };
+
+        Self {
+            meta: value.meta,
+            rust_show,
+            wgsl_show
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct ExternLayout {
+    pub(crate) ty: Type,
+    _comma_token1: Token![,],
+    pub(crate) size: usize,
+    _comma_token2: Token![,],
+    pub(crate) align: usize,
+}
+
+impl ExternLayout {
+    pub(crate) fn layout(&self) -> LayoutExt {
+        let sized = true;
+        LayoutExt::new(
+            Layout::from_size_align(self.size, self.align).unwrap(),
+            sized,
+        )
+    }
+}
+
+impl Parse for ExternLayout {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let ty: Type = input.parse()?;
+        let _comma_token1: Token![,] = input.parse()?;
+        let size_lit: LitInt = input.parse()?;
+        let _comma_token2: Token![,] = input.parse()?;
+        let align_lit: LitInt = input.parse()?;
+
+        let size = size_lit.base10_parse::<usize>()?;
+        let align = align_lit.base10_parse::<usize>()?;
+
+        let _ = Layout::from_size_align(size, align)
+            .map_err(|_| Error::new(ty.span(), "invalid layout"))?;
+
+        Ok(Self {
+            ty,
+            _comma_token1,
+            size,
+            _comma_token2,
+            align,
+        })
+    }
+}
+
+impl ToTokens for ExternLayout {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
-        self.field.to_tokens(tokens);
+        let Self {
+            ty, size, align, ..
+        } = self;
+
+        let ty_name = ty.to_token_stream().to_string();
+        let size_errmsg = format!("size of `{ty_name}` is not {size}");
+        let align_errmsg = format!("alignment of `{ty_name}` is not {align}");
+
+        tokens.append_all(quote! {
+            const _: () = assert!(size_of::<#ty>() == #size, #size_errmsg);
+            const _: () = assert!(align_of::<#ty>() == #align, #align_errmsg);
+        });
     }
 }
 

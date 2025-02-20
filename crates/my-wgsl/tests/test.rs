@@ -1,4 +1,4 @@
-use my_wgsl::{builtin::*, *};
+use my_wgsl::*;
 
 #[test]
 fn test_struct_size_align() {
@@ -104,6 +104,9 @@ fn test_struct_size_align() {
         pub(super) const S31_SIZE_ALIGN: (usize, usize) = 
             (S30_SIZE_ALIGN.0 * 3, S30_SIZE_ALIGN.1);
 
+        #[uniform] pub(super) struct S32 { a: f32 }
+        pub(super) const S32_SIZE_ALIGN: (usize, usize) = (16, 16);
+
         pub(super) struct S100 { a: crate::Mat4x4f }
     }
     use m::*;
@@ -128,7 +131,7 @@ fn test_struct_size_align() {
     assert_layout_many!(0, 1, 2, 3, 4, 5, 6, 7, 8, 9);
     assert_layout_many!(10, 11, 12, 13, 14, 15, 16, 17, 18, 19);
     assert_layout_many!(20, 21, 22, 23, 24, 25, 26, 27, 28, 29);
-    assert_layout_many!(30, 31);
+    assert_layout_many!(30, 31, 32);
 }
 
 #[test]

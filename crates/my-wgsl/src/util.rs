@@ -1,4 +1,4 @@
-use super::to_code::{PutStr, PutStrPretty};
+use super::to_code::{ConstructPrettyCode, ConstructWgslCode};
 
 pub(crate) fn str_into_xyz(s: &str) -> Result<[u32; 3], String> {
     let mut xyz = [0, 1, 1];
@@ -72,9 +72,16 @@ pub(crate) fn put_str_join<'a, I, II>(
     last_punct: &str,
 ) where
     I: Iterator<Item = &'a II>,
-    II: PutStr + 'a,
+    II: ConstructWgslCode + 'a,
 {
-    _put_str_join(iter, buf, pre, sep, last_punct, PutStr::put_str);
+    _put_str_join(
+        iter,
+        buf,
+        pre,
+        sep,
+        last_punct,
+        ConstructWgslCode::write_wgsl_code,
+    );
 }
 
 pub(crate) fn put_str_pretty_join<'a, I, II>(
@@ -85,7 +92,7 @@ pub(crate) fn put_str_pretty_join<'a, I, II>(
     last_punct: &str,
 ) where
     I: Iterator<Item = &'a II>,
-    II: PutStrPretty + 'a,
+    II: ConstructPrettyCode + 'a,
 {
     _put_str_join(
         iter,
@@ -93,14 +100,14 @@ pub(crate) fn put_str_pretty_join<'a, I, II>(
         pre,
         sep,
         last_punct,
-        PutStrPretty::put_str_pretty,
+        ConstructPrettyCode::write_pretty_code,
     );
 }
 
 pub(crate) fn put_attrs<'a, I, II>(iter: I, buf: &mut String)
 where
     I: Iterator<Item = &'a II>,
-    II: PutStr + 'a,
+    II: ConstructWgslCode + 'a,
 {
     let prev = buf.len();
     put_str_join(iter, buf, "", "", "");
@@ -117,7 +124,7 @@ where
 pub(crate) fn put_attrs_pretty<'a, I, II>(iter: I, buf: &mut String)
 where
     I: Iterator<Item = &'a II>,
-    II: PutStr + 'a,
+    II: ConstructWgslCode + 'a,
 {
     let prev = buf.len();
     put_str_join(iter, buf, "", " ", "");

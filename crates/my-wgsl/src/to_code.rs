@@ -1,39 +1,25 @@
 pub(crate) const TAB_SIZE: usize = 2;
 
-pub trait Identify {
-    fn ident() -> String;
-}
+pub(crate) trait ConstructWgslCode {
+    fn write_wgsl_code(&self, buf: &mut String);
 
-pub(crate) trait PutStr {
-    fn put_ident(&self, buf: &mut String);
-
-    fn put_str(&self, buf: &mut String);
-
-    fn to_str(&self) -> String {
+    fn wgsl_code(&self) -> String {
         let mut buf = String::new();
-        self.put_str(&mut buf);
+        self.write_wgsl_code(&mut buf);
         buf
     }
 }
 
-pub(crate) trait PutStrPretty: PutStr {
-    fn put_ident_pretty(&self, buf: &mut String) {
-        self.put_ident(buf)
-    }
-
-    fn put_str_pretty(&self, buf: &mut String) {
-        self.put_str(buf)
+pub(crate) trait ConstructPrettyCode: ConstructWgslCode {
+    fn write_pretty_code(&self, buf: &mut String) {
+        self.write_wgsl_code(buf)
     }
 }
 
-impl PutStr for String {
-    fn put_ident(&self, buf: &mut String) {
+impl ConstructWgslCode for String {
+    fn write_wgsl_code(&self, buf: &mut String) {
         buf.push_str(self);
     }
-
-    fn put_str(&self, buf: &mut String) {
-        self.put_ident(buf);
-    }
 }
 
-impl PutStrPretty for String {}
+impl ConstructPrettyCode for String {}

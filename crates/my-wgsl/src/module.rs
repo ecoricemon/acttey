@@ -2,7 +2,7 @@ use super::{
     attr::Attribute,
     function::{CompoundStatement, WgslFn},
     structs::{BeWgslStruct, StructMember, WgslStruct},
-    to_code::{PutStr, PutStrPretty},
+    to_code::{ConstructPrettyCode, ConstructWgslCode},
     util,
     var::GlobalVariable,
 };
@@ -28,40 +28,44 @@ impl WgslModule {
         T::be_module()
     }
 
-    /// Generates WGSL text.
-    pub fn build(&self) -> String {
-        let mut res = String::new();
-        for entry in self.entries.iter() {
-            entry.put_str(&mut res);
-        }
-        res
+    pub fn merge(&mut self, other: Self) {
+        self.entries.extend(other.entries)
     }
 
-    /// Generates WGSL text with white space.
+    /// Generates WGSL code.
+    pub fn build(&self) -> String {
+        let mut buf = String::new();
+        for entry in self.entries.iter() {
+            entry.write_wgsl_code(&mut buf);
+        }
+        buf
+    }
+
+    /// Generates WGSL code with white space.
     pub fn build_pretty(&self) -> String {
-        let mut res = String::new();
+        let mut buf = String::new();
         for entry in self
             .entries
             .iter()
             .take(self.entries.len().saturating_sub(1))
         {
-            entry.put_str_pretty(&mut res);
-            res.push('\n');
+            entry.write_pretty_code(&mut buf);
+            buf.push('\n');
         }
         if let Some(last_entry) = self.entries.last() {
-            last_entry.put_str_pretty(&mut res);
+            last_entry.write_pretty_code(&mut buf);
         }
 
         #[cfg(debug_assertions)]
         {
             let mut non_pretty = self.build();
-            let mut pretty = res.clone();
+            let mut pretty = buf.clone();
             non_pretty.retain(|c| !c.is_whitespace());
             pretty.retain(|c| !c.is_whitespace());
             debug_assert_eq!(non_pretty, pretty, "internal bug detected");
         }
 
-        res
+        buf
     }
 
     /// Retrieves the index of the struct that has the given name.
@@ -330,6 +334,32 @@ impl WgslModule {
     }
 }
 
+macro_rules! impl_from_tuple_for_wgsl_module {
+    ($($i:expr),*) => {
+        paste::paste! {
+            #[allow(unused_parens)]
+            impl<$([<A $i>]: BeWgslModule),*> From<( $([<A $i>]),* )> for WgslModule {
+                fn from(_: ( $([<A $i>]),* )) -> Self {
+                    let mut total = WgslModule::new();
+                    $(
+                        total.merge([<A $i>]::be_module());
+                    )*
+                    total
+                }
+            }
+        }
+    };
+}
+
+impl_from_tuple_for_wgsl_module!(0);
+impl_from_tuple_for_wgsl_module!(0, 1);
+impl_from_tuple_for_wgsl_module!(0, 1, 2);
+impl_from_tuple_for_wgsl_module!(0, 1, 2, 3);
+impl_from_tuple_for_wgsl_module!(0, 1, 2, 3, 4);
+impl_from_tuple_for_wgsl_module!(0, 1, 2, 3, 4, 5);
+impl_from_tuple_for_wgsl_module!(0, 1, 2, 3, 4, 5, 6);
+impl_from_tuple_for_wgsl_module!(0, 1, 2, 3, 4, 5, 6, 7);
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum WgslEntry {
     Struct(WgslStruct),
@@ -365,30 +395,22 @@ impl WgslEntry {
     impl_shader_entry_matcher!(as_function, Function, WgslFn);
 }
 
-impl PutStr for WgslEntry {
-    fn put_ident(&self, buf: &mut String) {
+impl ConstructWgslCode for WgslEntry {
+    fn write_wgsl_code(&self, buf: &mut String) {
         match self {
-            Self::Struct(st) => st.put_ident(buf),
-            Self::GlobalVariable(global_variable) => global_variable.put_ident(buf),
-            Self::Function(function) => function.put_ident(buf),
-        }
-    }
-
-    fn put_str(&self, buf: &mut String) {
-        match self {
-            Self::Struct(st) => st.put_str(buf),
-            Self::GlobalVariable(global_variable) => global_variable.put_str(buf),
-            Self::Function(function) => function.put_str(buf),
+            Self::Struct(st) => st.write_wgsl_code(buf),
+            Self::GlobalVariable(global_variable) => global_variable.write_wgsl_code(buf),
+            Self::Function(function) => function.write_wgsl_code(buf),
         }
     }
 }
 
-impl PutStrPretty for WgslEntry {
-    fn put_str_pretty(&self, buf: &mut String) {
+impl ConstructPrettyCode for WgslEntry {
+    fn write_pretty_code(&self, buf: &mut String) {
         match self {
-            Self::Struct(st) => st.put_str_pretty(buf),
-            Self::GlobalVariable(global_variable) => global_variable.put_str_pretty(buf),
-            Self::Function(function) => function.put_str_pretty(buf),
+            Self::Struct(st) => st.write_pretty_code(buf),
+            Self::GlobalVariable(global_variable) => global_variable.write_pretty_code(buf),
+            Self::Function(function) => function.write_pretty_code(buf),
         }
     }
 }

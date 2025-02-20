@@ -1,6 +1,6 @@
 use super::{
     attr::{Attribute, Attributes},
-    to_code::{PutStr, PutStrPretty, TAB_SIZE},
+    to_code::{ConstructPrettyCode, ConstructWgslCode, TAB_SIZE},
     util,
 };
 
@@ -55,28 +55,24 @@ impl WgslFn {
     }
 }
 
-impl PutStr for WgslFn {
-    fn put_ident(&self, buf: &mut String) {
-        buf.push_str(self.ident.as_str());
-    }
-
-    fn put_str(&self, buf: &mut String) {
+impl ConstructWgslCode for WgslFn {
+    fn write_wgsl_code(&self, buf: &mut String) {
         util::put_attrs(self.attrs.iter(), buf);
         buf.push_str("fn ");
-        self.put_ident(buf);
+        buf.push_str(self.ident.as_str());
         buf.push('(');
         util::put_str_join(self.inputs.iter(), buf, "", ",", "");
         buf.push(')');
         if let Some(output) = &self.output {
             buf.push_str("->");
-            output.put_str(buf);
+            output.write_wgsl_code(buf);
         }
-        self.stmt.put_str(buf);
+        self.stmt.write_wgsl_code(buf);
     }
 }
 
-impl PutStrPretty for WgslFn {
-    fn put_str_pretty(&self, buf: &mut String) {
+impl ConstructPrettyCode for WgslFn {
+    fn write_pretty_code(&self, buf: &mut String) {
         // Writes attributes.
         util::put_attrs_pretty(self.attrs.iter(), buf);
         buf.push('\n');
@@ -84,11 +80,11 @@ impl PutStrPretty for WgslFn {
         // Writes from `fn` to the first input.
         let prev = buf.len();
         buf.push_str("fn ");
-        self.put_ident(buf);
+        buf.push_str(self.ident.as_str());
         buf.push('(');
         let input_tab = " ".repeat(buf.len() - prev);
         if let Some(first_input) = self.inputs.first() {
-            first_input.put_str_pretty(buf);
+            first_input.write_pretty_code(buf);
             if self.inputs.len() > 1 {
                 buf.push_str(",\n");
             }
@@ -101,13 +97,13 @@ impl PutStrPretty for WgslFn {
         // Writes output.
         if let Some(output) = &self.output {
             buf.push_str(" -> ");
-            output.put_str_pretty(buf);
+            output.write_pretty_code(buf);
         }
 
         // Writes statement.
         buf.push('\n');
         util::pushn(buf, ' ', TAB_SIZE);
-        self.stmt.put_str_pretty(buf);
+        self.stmt.write_pretty_code(buf);
     }
 }
 
@@ -129,14 +125,8 @@ pub struct FnParam {
     pub ty: String,
 }
 
-impl PutStr for FnParam {
-    fn put_ident(&self, buf: &mut String) {
-        if let Some(ident) = &self.ident {
-            buf.push_str(ident)
-        }
-    }
-
-    fn put_str(&self, buf: &mut String) {
+impl ConstructWgslCode for FnParam {
+    fn write_wgsl_code(&self, buf: &mut String) {
         util::put_attrs(self.attrs.iter(), buf);
         if let Some(ident) = &self.ident {
             buf.push_str(ident);
@@ -146,8 +136,8 @@ impl PutStr for FnParam {
     }
 }
 
-impl PutStrPretty for FnParam {
-    fn put_str_pretty(&self, buf: &mut String) {
+impl ConstructPrettyCode for FnParam {
+    fn write_pretty_code(&self, buf: &mut String) {
         util::put_attrs_pretty(self.attrs.iter(), buf);
         if let Some(ident) = &self.ident {
             buf.push_str(ident);
@@ -298,10 +288,8 @@ impl CompoundStatement {
     }
 }
 
-impl PutStr for CompoundStatement {
-    fn put_ident(&self, _buf: &mut String) {}
-
-    fn put_str(&self, buf: &mut String) {
+impl ConstructWgslCode for CompoundStatement {
+    fn write_wgsl_code(&self, buf: &mut String) {
         util::put_str_join(self.attrs.iter(), buf, "", "", "");
         buf.push('{');
         util::put_str_join(self.stmts.iter(), buf, "", "", "");
@@ -309,8 +297,8 @@ impl PutStr for CompoundStatement {
     }
 }
 
-impl PutStrPretty for CompoundStatement {
-    fn put_str_pretty(&self, buf: &mut String) {
+impl ConstructPrettyCode for CompoundStatement {
+    fn write_pretty_code(&self, buf: &mut String) {
         // Note that caller must have put a tab for this compound.
         let tab = util::get_last_spaces(buf);
         util::popn(buf, tab.min(TAB_SIZE));
@@ -340,12 +328,10 @@ pub enum Statement {
     Other(Vec<String>),
 }
 
-impl PutStr for Statement {
-    fn put_ident(&self, _buf: &mut String) {}
-
-    fn put_str(&self, buf: &mut String) {
+impl ConstructWgslCode for Statement {
+    fn write_wgsl_code(&self, buf: &mut String) {
         match self {
-            Self::Compound(comp_stmt) => comp_stmt.put_str(buf),
+            Self::Compound(comp_stmt) => comp_stmt.write_wgsl_code(buf),
             Self::BareCompound(comp_stmt) => comp_stmt.put_str_inner(buf),
             Self::Other(others) => {
                 let mut prev = &String::from(".");
@@ -379,12 +365,12 @@ impl PutStr for Statement {
     }
 }
 
-impl PutStrPretty for Statement {
-    fn put_str_pretty(&self, buf: &mut String) {
+impl ConstructPrettyCode for Statement {
+    fn write_pretty_code(&self, buf: &mut String) {
         match self {
             Self::Compound(comp_stmt) => {
                 util::pushn(buf, ' ', TAB_SIZE);
-                comp_stmt.put_str_pretty(buf);
+                comp_stmt.write_pretty_code(buf);
             }
             Self::BareCompound(comp_stmt) => comp_stmt.put_str_pretty_inner(buf),
             Self::Other(others) => {

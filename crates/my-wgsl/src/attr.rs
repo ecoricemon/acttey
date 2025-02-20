@@ -1,4 +1,4 @@
-use super::{to_code::PutStr, util};
+use super::{to_code::ConstructWgslCode, util};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Attributes(pub Vec<Attribute>);
@@ -127,7 +127,7 @@ impl Attribute {
         match self {
             Self::Align(v) => Some(v.to_string()),
             Self::Binding(v) => Some(v.to_string()),
-            Self::Builtin(v) => Some(v.to_str()),
+            Self::Builtin(v) => Some(v.wgsl_code()),
             Self::Const => None,
             // Self::Diagnostic => unimplemented!()
             Self::Group(v) => Some(v.to_string()),
@@ -204,14 +204,8 @@ impl Attribute {
     }
 }
 
-impl PutStr for Attribute {
-    fn put_ident(&self, buf: &mut String) {
-        if !self.is_my_attr() {
-            buf.push_str(self.outer());
-        }
-    }
-
-    fn put_str(&self, buf: &mut String) {
+impl ConstructWgslCode for Attribute {
+    fn write_wgsl_code(&self, buf: &mut String) {
         match self {
             Self::Align(v)
             | Self::Binding(v)
@@ -220,16 +214,20 @@ impl PutStr for Attribute {
             | Self::Location(v)
             | Self::Size(v) => {
                 buf.push('@');
-                self.put_ident(buf);
+                if !self.is_my_attr() {
+                    buf.push_str(self.outer());
+                }
                 buf.push('(');
                 buf.push_str(&v.to_string());
                 buf.push(')');
             }
             Self::Builtin(v) => {
                 buf.push('@');
-                self.put_ident(buf);
+                if !self.is_my_attr() {
+                    buf.push_str(self.outer());
+                }
                 buf.push('(');
-                v.put_str(buf);
+                v.write_wgsl_code(buf);
                 buf.push(')');
             }
             Self::Const
@@ -239,11 +237,15 @@ impl PutStr for Attribute {
             | Self::Fragment
             | Self::Compute => {
                 buf.push('@');
-                self.put_ident(buf);
+                if !self.is_my_attr() {
+                    buf.push_str(self.outer());
+                }
             }
             Self::WorkgroupSize(x, y, z) => {
                 buf.push('@');
-                self.put_ident(buf);
+                if !self.is_my_attr() {
+                    buf.push_str(self.outer());
+                }
                 buf.push_str(&format!("({x},{y},{z})"));
             }
             Self::MyId(..) => {}
@@ -350,8 +352,8 @@ pub enum BuiltinValue {
     NumWorkgroups,        // Compute input
 }
 
-impl PutStr for BuiltinValue {
-    fn put_ident(&self, buf: &mut String) {
+impl ConstructWgslCode for BuiltinValue {
+    fn write_wgsl_code(&self, buf: &mut String) {
         match self {
             Self::VertexIndex => buf.push_str("vertex_index"),
             Self::InstanceIndex => buf.push_str("instance_index"),
@@ -366,10 +368,6 @@ impl PutStr for BuiltinValue {
             Self::WorkgroupId => buf.push_str("workgroup_id"),
             Self::NumWorkgroups => buf.push_str("num_workgroups"),
         }
-    }
-
-    fn put_str(&self, buf: &mut String) {
-        self.put_ident(buf)
     }
 }
 

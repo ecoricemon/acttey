@@ -28,7 +28,7 @@ webgl = ["wgpu/webgl"]
 
 [dependencies]
 my-ecs = { version = "0.1.0", path = "crates/my-ecs" }
-my-wgsl = { version = "0.1.1", path = "crates/my-wgsl" }
+my-wgsl = { version = "0.1.2", path = "crates/my-wgsl" }
 ahash = { version = "0.8.11" }
 wgpu = { version = "23.0.1" }
 thiserror = { version = "2.0.3" }

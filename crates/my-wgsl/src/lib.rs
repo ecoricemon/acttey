@@ -11,12 +11,8 @@ mod to_code;
 mod util;
 mod var;
 
+pub use builtin_functions::*;
+pub use builtin_types::*;
 pub use module::{BeWgslModule, WgslEntry, WgslModule};
-pub use my_wgsl_macros::wgsl_mod;
+pub use my_wgsl_macros::{layout, wgsl_mod};
 pub use structs::{BeWgslStruct, StructMember, WgslStruct};
-pub use to_code::Identify;
-
-pub mod builtin {
-    pub use super::builtin_functions::*;
-    pub use super::builtin_types::*;
-}

@@ -1,8 +1,8 @@
-use super::{structs::*, util::*};
+use super::{structs::*, traits::*, util::*};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{quote, ToTokens, TokenStreamExt};
 use std::{alloc::Layout, cell::RefCell, collections::HashMap};
-use syn::{parse_quote, Attribute, Error, Ident, Item, ItemMod, Result, Visibility};
+use syn::{parse2, parse_quote, Attribute, Error, Ident, Item, ItemMod, Result, Visibility};
 
 #[derive(Debug)]
 pub(crate) struct WgslMod {
@@ -31,6 +31,9 @@ impl WgslMod {
     fn create_wgsl_items(items: &[Item]) -> Result<Vec<WgslItem>> {
         let layouts = RefCell::new(Self::default_layouts());
         let wgsl_items = RefCell::new(HashMap::new());
+
+        // Preprocessing for extern layouts.
+        Self::insert_extern_layout(items, &mut layouts.borrow_mut())?;
 
         struct Helper<'a> {
             #[allow(clippy::complexity)]
@@ -95,6 +98,27 @@ impl WgslMod {
             }
         }
         Ok(res)
+    }
+
+    fn insert_extern_layout(
+        items: &[Item],
+        layouts: &mut HashMap<Ident, (LayoutExt, LayoutExt)>,
+    ) -> Result<()> {
+        for item in items {
+            let Item::Macro(m) = item else {
+                continue;
+            };
+            if !m.mac.path.is_ident("layout") {
+                continue;
+            }
+            let e = parse2::<ExternLayout>(m.mac.tokens.clone())?;
+
+            let ident = last_type_path_ident(&e.ty)?.clone();
+            let layout = e.layout();
+            layouts.insert(ident, (layout, layout));
+        }
+
+        Ok(())
     }
 
     // Returns type ident -> (Rust layout, WGSL layout) map.
@@ -198,8 +222,32 @@ impl WgslMod {
             same as f32 / total as f32
         }
     }
+}
 
-    fn to_wgsl_code_tokens(&self) -> TokenStream2 {
+impl ToTokens for WgslMod {
+    fn to_tokens(&self, tokens: &mut TokenStream2) {
+        let Self {
+            attrs,
+            vis,
+            ident,
+            items,
+        } = self;
+
+        let runtime_tokens = self.runtime_tokens();
+
+        tokens.append_all(quote! {
+            #(#attrs)*
+            #vis mod #ident {
+                #(#items)*
+
+                #runtime_tokens
+            }
+        });
+    }
+}
+
+impl RuntimeWgslToken for WgslMod {
+    fn runtime_tokens(&self) -> TokenStream2 {
         let push_items = self.items.iter().filter_map(|item| match item {
             WgslItem::Struct(st) => {
                 let st_ident = &st.ident;
@@ -212,9 +260,13 @@ impl WgslMod {
             WgslItem::Other(_) => None,
         });
 
+        let mut wgsl_code = String::new();
+        self.write_wgsl_code(&mut wgsl_code);
+
         quote! {
             // `pub` because the helper struct must be shown to outside.
             pub struct Module;
+
             impl my_wgsl::BeWgslModule for Module {
                 fn be_module() -> my_wgsl::WgslModule {
                     let mut module = WgslModule::new();
@@ -224,28 +276,21 @@ impl WgslMod {
                     module
                 }
             }
+
+            impl Module {
+                pub const WGSL: &str = #wgsl_code;
+            }
         }
     }
 }
 
-impl ToTokens for WgslMod {
-    fn to_tokens(&self, tokens: &mut TokenStream2) {
-        let Self {
-            attrs,
-            vis,
-            ident,
-            items,
-        } = self;
-
-        let decl_module_helper = self.to_wgsl_code_tokens();
-
-        tokens.append_all(quote! {
-            #(#attrs)*
-            #vis mod #ident {
-                #(#items)*
-                #decl_module_helper
+impl ComptimeWgslCode for WgslMod {
+    fn write_wgsl_code(&self, buf: &mut String) {
+        for item in &self.items {
+            if let WgslItem::Struct(st) = item {
+                st.write_wgsl_code(buf);
             }
-        });
+        }
     }
 }
 

@@ -89,14 +89,14 @@ impl App {
     pub fn set_onmessage(&self, f: &js_sys::Function) {
         let c_f = f.clone();
         if let Some(main) = self.cpu_main.as_ref() {
-            main.set_onmessage(move |_| {
+            main.set_on_message(move |_| {
                 let is_cpu = true;
                 c_f.call1(&JsValue::null(), &is_cpu.into()).unwrap();
             });
         }
         let c_f = f.clone();
         if let Some(main) = self.gpu_main.as_ref() {
-            main.set_onmessage(move |_| {
+            main.set_on_message(move |_| {
                 let is_cpu = false;
                 c_f.call1(&JsValue::null(), &is_cpu.into()).unwrap();
             });

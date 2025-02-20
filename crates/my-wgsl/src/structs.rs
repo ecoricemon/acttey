@@ -1,6 +1,6 @@
 use super::{
     attr::{Attribute, Attributes},
-    to_code::{PutStr, PutStrPretty, TAB_SIZE},
+    to_code::{ConstructPrettyCode, ConstructWgslCode, TAB_SIZE},
     util,
 };
 
@@ -8,17 +8,6 @@ pub trait BeWgslStruct {
     fn be_struct() -> WgslStruct;
     fn as_bytes(&self) -> &[u8];
     fn as_mut_bytes(&mut self) -> &mut [u8];
-}
-
-impl<T: BeWgslStruct> PutStr for T {
-    fn put_ident(&self, buf: &mut String) {
-        let st = T::be_struct();
-        buf.push_str(&st.ident)
-    }
-
-    fn put_str(&self, buf: &mut String) {
-        T::be_struct().put_str(buf)
-    }
 }
 
 // 6.2.10. Struct Types
@@ -114,24 +103,20 @@ impl WgslStruct {
     }
 }
 
-impl PutStr for WgslStruct {
-    fn put_ident(&self, buf: &mut String) {
-        buf.push_str(self.ident.as_str());
-    }
-
-    fn put_str(&self, buf: &mut String) {
+impl ConstructWgslCode for WgslStruct {
+    fn write_wgsl_code(&self, buf: &mut String) {
         buf.push_str("struct ");
-        self.put_ident(buf);
+        buf.push_str(self.ident.as_str());
         buf.push('{');
         util::put_str_join(self.members.iter(), buf, "", ",", "");
         buf.push('}');
     }
 }
 
-impl PutStrPretty for WgslStruct {
-    fn put_str_pretty(&self, buf: &mut String) {
+impl ConstructPrettyCode for WgslStruct {
+    fn write_pretty_code(&self, buf: &mut String) {
         buf.push_str("struct ");
-        self.put_ident(buf);
+        buf.push_str(self.ident.as_str());
         buf.push_str(" {\n");
         let tab_str = " ".repeat(TAB_SIZE);
         util::put_str_pretty_join(self.members.iter(), buf, &tab_str, ",\n", "\n");
@@ -180,23 +165,19 @@ impl StructMember {
     }
 }
 
-impl PutStr for StructMember {
-    fn put_ident(&self, buf: &mut String) {
-        buf.push_str(self.ident.as_str());
-    }
-
-    fn put_str(&self, buf: &mut String) {
+impl ConstructWgslCode for StructMember {
+    fn write_wgsl_code(&self, buf: &mut String) {
         util::put_attrs(self.attrs.iter(), buf);
-        self.put_ident(buf);
+        buf.push_str(self.ident.as_str());
         buf.push(':');
         buf.push_str(&self.ty);
     }
 }
 
-impl PutStrPretty for StructMember {
-    fn put_str_pretty(&self, buf: &mut String) {
+impl ConstructPrettyCode for StructMember {
+    fn write_pretty_code(&self, buf: &mut String) {
         util::put_attrs_pretty(self.attrs.iter(), buf);
-        self.put_ident_pretty(buf);
+        buf.push_str(self.ident.as_str());
         buf.push_str(" : ");
         buf.push_str(&self.ty);
     }

@@ -115,7 +115,7 @@ pub trait WgslDot {
     /// # Examples
     ///
     /// ```
-    /// use my_wgsl::builtin::*;
+    /// use my_wgsl::*;
     ///
     /// let a = Vec2i::new(1, 2);
     /// let b = Vec2i::new(3, 4);

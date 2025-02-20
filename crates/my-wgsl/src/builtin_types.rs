@@ -1,17 +1,8 @@
-use super::{builtin_functions::WgslDot, to_code::Identify};
+use super::builtin_functions::WgslDot;
 use std::{
     mem,
     ops::{Add, Deref, DerefMut, Div, Mul, Neg, Rem, Sub},
 };
-
-#[rustfmt::skip]
-macro_rules! impl_identify {
-    ($id:ident, $content:literal) => {
-        impl Identify for $id {
-            fn ident() -> String { $content.to_owned() }
-        }
-    };
-}
 
 #[rustfmt::skip]
 macro_rules! impl_deref_mut {
@@ -245,7 +236,6 @@ macro_rules! impl_from_arr_for_mat {
 // Declares a struct defined by the macro for consistent layout.
 // pub struct Bool ( bool );
 my_wgsl_macros::decl_bool!();
-impl_identify!(Bool, "bool");
 impl_deref_mut!(Bool, bool);
 
 impl Bool {
@@ -254,24 +244,11 @@ impl Bool {
     }
 }
 
-// === i32 ===
-
-impl_identify!(i32, "i32");
-
-// === u32 ===
-
-impl_identify!(u32, "u32");
-
-// === f32 ===
-
-impl_identify!(f32, "f32");
-
 // === Vec2i ===
 
 // Declares a struct defined by the macro for consistent layout.
 // pub struct Vec2i ( [i32; 2] );
 my_wgsl_macros::decl_vec2i!();
-impl_identify!(Vec2i, "vec2i");
 impl_deref_mut!(Vec2i, [i32; 2]);
 impl_vec_component_wise_arithmetic!(Vec2i, 0, 1);
 impl_vec_component_wise_negation!(Vec2i, 0, 1);
@@ -300,7 +277,6 @@ impl From<[i32; 2]> for Vec2i {
 // Declares a struct defined by the macro for consistent layout.
 // pub struct Vec3i ( [i32; 3] );
 my_wgsl_macros::decl_vec3i!();
-impl_identify!(Vec3i, "vec3i");
 impl_deref_mut!(Vec3i, [i32; 3]);
 impl_vec_component_wise_arithmetic!(Vec3i, 0, 1, 2);
 impl_vec_component_wise_negation!(Vec3i, 0, 1, 2);
@@ -329,7 +305,6 @@ impl From<[i32; 3]> for Vec3i {
 // Declares a struct defined by the macro for consistent layout.
 // pub struct Vec4i ( [i32; 4] );
 my_wgsl_macros::decl_vec4i!();
-impl_identify!(Vec4i, "vec4i");
 impl_deref_mut!(Vec4i, [i32; 4]);
 impl_vec_component_wise_arithmetic!(Vec4i, 0, 1, 2, 3);
 impl_vec_component_wise_negation!(Vec4i, 0, 1, 2, 3);
@@ -358,7 +333,6 @@ impl From<[i32; 4]> for Vec4i {
 // Declares a struct defined by the macro for consistent layout.
 // pub struct Vec2u ( [u32; 2] );
 my_wgsl_macros::decl_vec2u!();
-impl_identify!(Vec2u, "vec2u");
 impl_deref_mut!(Vec2u, [u32; 2]);
 impl_vec_component_wise_arithmetic!(Vec2u, 0, 1);
 impl_vec_scalar_arithmetic!(Vec2u, u32);
@@ -386,7 +360,6 @@ impl From<[u32; 2]> for Vec2u {
 // Declares a struct defined by the macro for consistent layout.
 // pub struct Vec3u ( [u32; 3] );
 my_wgsl_macros::decl_vec3u!();
-impl_identify!(Vec3u, "vec3u");
 impl_deref_mut!(Vec3u, [u32; 3]);
 impl_vec_component_wise_arithmetic!(Vec3u, 0, 1, 2);
 impl_vec_scalar_arithmetic!(Vec3u, u32);
@@ -414,7 +387,6 @@ impl From<[u32; 3]> for Vec3u {
 // Declares a struct defined by the macro for consistent layout.
 // pub struct Vec4u ( [u32; 4] );
 my_wgsl_macros::decl_vec4u!();
-impl_identify!(Vec4u, "vec4u");
 impl_deref_mut!(Vec4u, [u32; 4]);
 impl_vec_component_wise_arithmetic!(Vec4u, 0, 1, 2, 3);
 impl_vec_scalar_arithmetic!(Vec4u, u32);
@@ -442,7 +414,6 @@ impl From<[u32; 4]> for Vec4u {
 // Declares a struct defined by the macro for consistent layout.
 // pub struct Vec2f ( [f32; 2] );
 my_wgsl_macros::decl_vec2f!();
-impl_identify!(Vec2f, "vec2f");
 impl_deref_mut!(Vec2f, [f32; 2]);
 impl_vec_component_wise_arithmetic!(Vec2f, 0, 1);
 impl_vec_component_wise_negation!(Vec2f, 0, 1);
@@ -474,7 +445,6 @@ impl From<[f32; 2]> for Vec2f {
 // Declares a struct defined by the macro for consistent layout.
 // pub struct Vec3f ( [f32; 3] );
 my_wgsl_macros::decl_vec3f!();
-impl_identify!(Vec3f, "vec3f");
 impl_deref_mut!(Vec3f, [f32; 3]);
 impl_vec_component_wise_arithmetic!(Vec3f, 0, 1, 2);
 impl_vec_component_wise_negation!(Vec3f, 0, 1, 2);
@@ -506,7 +476,6 @@ impl From<[f32; 3]> for Vec3f {
 // Declares a struct defined by the macro for consistent layout.
 // pub struct Vec4f ( [f32; 4] );
 my_wgsl_macros::decl_vec4f!();
-impl_identify!(Vec4f, "vec4f");
 impl_deref_mut!(Vec4f, [f32; 4]);
 impl_vec_component_wise_arithmetic!(Vec4f, 0, 1, 2, 3);
 impl_vec_component_wise_negation!(Vec4f, 0, 1, 2, 3);
@@ -623,7 +592,6 @@ macro_rules! impl_wide_vec_scalar_arithmetic {
 // #[repr(align(8))]
 // pub struct WideVec2i ( Vec2i );
 my_wgsl_macros::decl_wide_vec2i!();
-impl_identify!(WideVec2i, "vec2i");
 impl_deref_mut!(WideVec2i, Vec2i);
 impl_wide_vec_component_wise_arithmetic!(WideVec2i, Vec2i);
 impl_wide_vec_component_wise_negation!(WideVec2i, Vec2i);
@@ -663,7 +631,6 @@ impl From<WideVec2i> for Vec2i {
 // #[repr(align(16))]
 // pub struct WideVec3i ( Vec3i );
 my_wgsl_macros::decl_wide_vec3i!();
-impl_identify!(WideVec3i, "vec3i");
 impl_deref_mut!(WideVec3i, Vec3i);
 impl_wide_vec_component_wise_arithmetic!(WideVec3i, Vec3i);
 impl_wide_vec_component_wise_negation!(WideVec3i, Vec3i);
@@ -703,7 +670,6 @@ impl From<WideVec3i> for Vec3i {
 // #[repr(align(16))]
 // pub struct WideVec4i ( Vec4i );
 my_wgsl_macros::decl_wide_vec4i!();
-impl_identify!(WideVec4i, "vec4i");
 impl_deref_mut!(WideVec4i, Vec4i);
 impl_wide_vec_component_wise_arithmetic!(WideVec4i, Vec4i);
 impl_wide_vec_component_wise_negation!(WideVec4i, Vec4i);
@@ -743,7 +709,6 @@ impl From<WideVec4i> for Vec4i {
 // #[repr(align(8))]
 // pub struct WideVec2u ( Vec2u );
 my_wgsl_macros::decl_wide_vec2u!();
-impl_identify!(WideVec2u, "vec2u");
 impl_deref_mut!(WideVec2u, Vec2u);
 impl_wide_vec_component_wise_arithmetic!(WideVec2u, Vec2u);
 impl_wide_vec_scalar_arithmetic!(WideVec2u, Vec2u, u32);
@@ -782,7 +747,6 @@ impl From<WideVec2u> for Vec2u {
 // #[repr(align(16))]
 // pub struct WideVec3u ( Vec3u );
 my_wgsl_macros::decl_wide_vec3u!();
-impl_identify!(WideVec3u, "vec3u");
 impl_deref_mut!(WideVec3u, Vec3u);
 impl_wide_vec_component_wise_arithmetic!(WideVec3u, Vec3u);
 impl_wide_vec_scalar_arithmetic!(WideVec3u, Vec3u, u32);
@@ -821,7 +785,6 @@ impl From<WideVec3u> for Vec3u {
 // #[repr(align(16))]
 // pub struct WideVec4u ( Vec4u );
 my_wgsl_macros::decl_wide_vec4u!();
-impl_identify!(WideVec4u, "vec4u");
 impl_deref_mut!(WideVec4u, Vec4u);
 impl_wide_vec_component_wise_arithmetic!(WideVec4u, Vec4u);
 impl_wide_vec_scalar_arithmetic!(WideVec4u, Vec4u, u32);
@@ -860,7 +823,6 @@ impl From<WideVec4u> for Vec4u {
 // #[repr(align(8))]
 // pub struct WideVec2f ( Vec2f );
 my_wgsl_macros::decl_wide_vec2f!();
-impl_identify!(WideVec2f, "vec2f");
 impl_deref_mut!(WideVec2f, Vec2f);
 impl_wide_vec_component_wise_arithmetic!(WideVec2f, Vec2f);
 impl_wide_vec_component_wise_negation!(WideVec2f, Vec2f);
@@ -900,7 +862,6 @@ impl From<WideVec2f> for Vec2f {
 // #[repr(align(16))]
 // pub struct WideVec3f ( Vec3f );
 my_wgsl_macros::decl_wide_vec3f!();
-impl_identify!(WideVec3f, "vec3f");
 impl_deref_mut!(WideVec3f, Vec3f);
 impl_wide_vec_component_wise_arithmetic!(WideVec3f, Vec3f);
 impl_wide_vec_component_wise_negation!(WideVec3f, Vec3f);
@@ -940,7 +901,6 @@ impl From<WideVec3f> for Vec3f {
 // #[repr(align(16))]
 // pub struct WideVec4f ( Vec4f );
 my_wgsl_macros::decl_wide_vec4f!();
-impl_identify!(WideVec4f, "vec4f");
 impl_deref_mut!(WideVec4f, Vec4f);
 impl_wide_vec_component_wise_arithmetic!(WideVec4f, Vec4f);
 impl_wide_vec_component_wise_negation!(WideVec4f, Vec4f);
@@ -979,7 +939,6 @@ impl From<WideVec4f> for Vec4f {
 // Declares structs defined by the macro for consistent layout.
 // pub struct Mat2x2f ( [WideVec2f; 2] )
 my_wgsl_macros::decl_mat2x2f!();
-impl_identify!(Mat2x2f, "mat2x2f");
 impl_deref_mut!(Mat2x2f, [WideVec2f; 2]);
 impl_from_arr_for_mat!(C = 2, R = 2, Cols = 0, 1);
 impl_mat_component_wise_arithmetic!(Mat2x2f, 0, 1);
@@ -1005,7 +964,6 @@ impl Mat2x2f {
 // Declares structs defined by the macro for consistent layout.
 // pub struct Mat2x3f ( [WideVec3f; 2] )
 my_wgsl_macros::decl_mat2x3f!();
-impl_identify!(Mat2x3f, "mat2x3f");
 impl_deref_mut!(Mat2x3f, [WideVec3f; 2]);
 impl_from_arr_for_mat!(C = 2, R = 3, Cols = 0, 1);
 impl_mat_component_wise_arithmetic!(Mat2x3f, 0, 1);
@@ -1030,7 +988,6 @@ impl Mat2x3f {
 // Declares structs defined by the macro for consistent layout.
 // pub struct Mat2x4f ( [WideVec4f; 2] )
 my_wgsl_macros::decl_mat2x4f!();
-impl_identify!(Mat2x4f, "mat2x4f");
 impl_deref_mut!(Mat2x4f, [WideVec4f; 2]);
 impl_from_arr_for_mat!(C = 2, R = 4, Cols = 0, 1);
 impl_mat_component_wise_arithmetic!(Mat2x4f, 0, 1);
@@ -1055,7 +1012,6 @@ impl Mat2x4f {
 // Declares structs defined by the macro for consistent layout.
 // pub struct Mat3x2f ( [WideVec2f; 3] )
 my_wgsl_macros::decl_mat3x2f!();
-impl_identify!(Mat3x2f, "mat3x2f");
 impl_deref_mut!(Mat3x2f, [WideVec2f; 3]);
 impl_from_arr_for_mat!(C = 3, R = 2, Cols = 0, 1, 2);
 impl_mat_component_wise_arithmetic!(Mat3x2f, 0, 1, 2);
@@ -1080,7 +1036,6 @@ impl Mat3x2f {
 // Declares structs defined by the macro for consistent layout.
 // pub struct Mat3x3f ( [WideVec3f; 3] )
 my_wgsl_macros::decl_mat3x3f!();
-impl_identify!(Mat3x3f, "mat3x3f");
 impl_deref_mut!(Mat3x3f, [WideVec3f; 3]);
 impl_from_arr_for_mat!(C = 3, R = 3, Cols = 0, 1, 2);
 impl_mat_component_wise_arithmetic!(Mat3x3f, 0, 1, 2);
@@ -1110,7 +1065,6 @@ impl Mat3x3f {
 // Declares structs defined by the macro for consistent layout.
 // pub struct Mat3x4f ( [WideVec4f; 3] )
 my_wgsl_macros::decl_mat3x4f!();
-impl_identify!(Mat3x4f, "mat3x4f");
 impl_deref_mut!(Mat3x4f, [WideVec4f; 3]);
 impl_from_arr_for_mat!(C = 3, R = 4, Cols = 0, 1, 2);
 impl_mat_component_wise_arithmetic!(Mat3x4f, 0, 1, 2);
@@ -1135,7 +1089,6 @@ impl Mat3x4f {
 // Declares structs defined by the macro for consistent layout.
 // pub struct Mat4x2f ( [WideVec2f; 4] )
 my_wgsl_macros::decl_mat4x2f!();
-impl_identify!(Mat4x2f, "mat4x2f");
 impl_deref_mut!(Mat4x2f, [WideVec2f; 4]);
 impl_from_arr_for_mat!(C = 4, R = 2, Cols = 0, 1, 2, 3);
 impl_mat_component_wise_arithmetic!(Mat4x2f, 0, 1, 2, 3);
@@ -1163,7 +1116,6 @@ impl Mat4x2f {
 // Declares structs defined by the macro for consistent layout.
 // pub struct Mat4x3f ( [WideVec3f; 4] )
 my_wgsl_macros::decl_mat4x3f!();
-impl_identify!(Mat4x3f, "mat4x3f");
 impl_deref_mut!(Mat4x3f, [WideVec3f; 4]);
 impl_from_arr_for_mat!(C = 4, R = 3, Cols = 0, 1, 2, 3);
 impl_mat_component_wise_arithmetic!(Mat4x3f, 0, 1, 2, 3);
@@ -1191,7 +1143,6 @@ impl Mat4x3f {
 // Declares structs defined by the macro for consistent layout.
 // pub struct Mat4x4f ( [WideVec4f; 4] )
 my_wgsl_macros::decl_mat4x4f!();
-impl_identify!(Mat4x4f, "mat4x4f");
 impl_deref_mut!(Mat4x4f, [WideVec4f; 4]);
 impl_from_arr_for_mat!(C = 4, R = 4, Cols = 0, 1, 2, 3);
 impl_mat_component_wise_arithmetic!(Mat4x4f, 0, 1, 2, 3);
@@ -1217,44 +1168,6 @@ impl Mat4x4f {
             + self[1][row] * rhs[1]
             + self[2][row] * rhs[2]
             + self[3][row] * rhs[3]
-    }
-}
-
-// === [T; N] ===
-
-impl<T, const N: usize> Identify for [T; N]
-where
-    T: Identify,
-{
-    fn ident() -> String {
-        let elem = T::ident();
-        let mut buf = String::with_capacity(elem.len() + "array<,>".len() + 4);
-
-        buf.push_str("array<");
-        buf.push_str(&elem);
-        buf.push(',');
-        buf.push_str(&N.to_string());
-        buf.push('>');
-
-        buf
-    }
-}
-
-// === [T] ===
-
-impl<T> Identify for [T]
-where
-    T: Identify,
-{
-    fn ident() -> String {
-        let elem = T::ident();
-        let mut buf = String::with_capacity(elem.len() + "array<, >".len() + 4);
-
-        buf.push_str("array<");
-        buf.push_str(&elem);
-        buf.push('>');
-
-        buf
     }
 }
 

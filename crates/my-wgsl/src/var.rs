@@ -1,6 +1,6 @@
 use super::{
     attr::{Attribute, Attributes},
-    to_code::{PutStr, PutStrPretty},
+    to_code::{ConstructPrettyCode, ConstructWgslCode},
     util,
 };
 
@@ -72,12 +72,8 @@ impl GlobalVariable {
     }
 }
 
-impl PutStr for GlobalVariable {
-    fn put_ident(&self, buf: &mut String) {
-        buf.push_str(self.ident.as_str())
-    }
-
-    fn put_str(&self, buf: &mut String) {
+impl ConstructWgslCode for GlobalVariable {
+    fn write_wgsl_code(&self, buf: &mut String) {
         util::put_attrs(self.attrs.iter(), buf);
         buf.push_str("var");
         if !self.templates.is_empty() {
@@ -87,7 +83,7 @@ impl PutStr for GlobalVariable {
         } else {
             buf.push(' ');
         }
-        self.put_ident(buf);
+        buf.push_str(self.ident.as_str());
         if let Some(ty) = &self.ty {
             buf.push(':');
             buf.push_str(ty);
@@ -100,8 +96,8 @@ impl PutStr for GlobalVariable {
     }
 }
 
-impl PutStrPretty for GlobalVariable {
-    fn put_str_pretty(&self, buf: &mut String) {
+impl ConstructPrettyCode for GlobalVariable {
+    fn write_pretty_code(&self, buf: &mut String) {
         util::put_attrs_pretty(self.attrs.iter(), buf);
         buf.push_str("var");
         if !self.templates.is_empty() {
@@ -110,7 +106,7 @@ impl PutStrPretty for GlobalVariable {
             buf.push('>');
         }
         buf.push(' ');
-        self.put_ident(buf);
+        buf.push_str(self.ident.as_str());
         if let Some(ty) = &self.ty {
             buf.push_str(" : ");
             buf.push_str(ty);
