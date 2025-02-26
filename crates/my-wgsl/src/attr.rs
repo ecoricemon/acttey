@@ -4,7 +4,7 @@ use super::{to_code::ConstructWgslCode, util};
 pub struct Attributes(pub Vec<Attribute>);
 
 impl Attributes {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self(Vec::new())
     }
 
@@ -205,7 +205,7 @@ impl Attribute {
 }
 
 impl ConstructWgslCode for Attribute {
-    fn write_wgsl_code(&self, buf: &mut String) {
+    fn write_wgsl_string(&self, buf: &mut String) {
         match self {
             Self::Align(v)
             | Self::Binding(v)
@@ -227,7 +227,7 @@ impl ConstructWgslCode for Attribute {
                     buf.push_str(self.outer());
                 }
                 buf.push('(');
-                v.write_wgsl_code(buf);
+                v.write_wgsl_string(buf);
                 buf.push(')');
             }
             Self::Const
@@ -353,7 +353,7 @@ pub enum BuiltinValue {
 }
 
 impl ConstructWgslCode for BuiltinValue {
-    fn write_wgsl_code(&self, buf: &mut String) {
+    fn write_wgsl_string(&self, buf: &mut String) {
         match self {
             Self::VertexIndex => buf.push_str("vertex_index"),
             Self::InstanceIndex => buf.push_str("instance_index"),

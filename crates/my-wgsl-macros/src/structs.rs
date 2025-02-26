@@ -1,29 +1,18 @@
-use super::{
-    traits::{ComptimeWgslCode, RuntimeWgslToken},
-    util::*,
-    Vec2f, Vec2i, Vec2u, Vec3f, Vec3i, Vec3u, Vec4f, Vec4i, Vec4u, WideVec2f, WideVec2i, WideVec2u,
-    WideVec3f, WideVec3i, WideVec3u, WideVec4f, WideVec4i, WideVec4u,
-};
-use proc_macro2::{Punct, Spacing, Span, TokenStream as TokenStream2};
+use super::{attr::*, path::*, traits::*, util::*};
+use proc_macro2::{Punct, Spacing, TokenStream as TokenStream2};
 use quote::{format_ident, quote, ToTokens, TokenStreamExt};
-use std::alloc::{Layout, LayoutError};
 use syn::{
-    parse::{Parse, ParseStream},
-    parse_quote,
-    spanned::Spanned,
-    Attribute, Error, Field, Fields, Ident, Index, ItemStruct, LitInt, Meta, Result, Token, Type,
-    Visibility,
+    parse_quote, spanned::Spanned, Attribute, Error, Field, Fields, Ident, Index, ItemStruct,
+    Result, Type, Visibility,
 };
-
-/// Attribute to be compatible with uniform address space.
-pub(crate) const ATTR_UNIFORM: &str = "uniform";
+use wgsl_builtin::{helper::*, prelude::*};
 
 /// Ident prefix for Rust padding fields.
 pub(crate) const PAD_PREFIX: &str = "__pad";
 
 #[derive(Debug)]
 pub(crate) struct WgslStruct {
-    pub(crate) attrs: Vec<WgslAttribute>,
+    pub(crate) attrs: WgslAttributes,
     pub(crate) vis: Visibility,
     pub(crate) ident: Ident,
 
@@ -36,9 +25,15 @@ pub(crate) struct WgslStruct {
 }
 
 impl WgslStruct {
-    pub(crate) fn new<F>(st: &ItemStruct, uniform: bool, mut search: F) -> Result<Self>
+    pub(crate) fn new<F, G>(
+        st: &ItemStruct,
+        uniform: bool,
+        mut find_layout: F,
+        mut find_len: G,
+    ) -> Result<Self>
     where
         F: FnMut(&Ident) -> Result<(LayoutExt, LayoutExt)>,
+        G: FnMut(&Ident) -> Result<usize>,
     {
         if matches!(st.fields, Fields::Unnamed(_)) {
             return Err(Error::new(st.span(), "tuple struct is not allowd for now"));
@@ -54,10 +49,10 @@ impl WgslStruct {
         let num_fields = st.fields.len();
         for (i, cur) in st.fields.iter().enumerate() {
             let (rust_layout, wgsl_layout, wgsl_field_align) =
-                Self::field_to_layout(cur, uniform, &mut search)?;
+                Self::field_to_layout(cur, uniform, &mut find_layout, &mut find_len)?;
 
             // Runtime sized array? then it must be the last member.
-            if !rust_layout.is_sized() && i < num_fields - 1 {
+            if !rust_layout.is_sized && i < num_fields - 1 {
                 return Err(Error::new(
                     cur.span(),
                     "runtime sized array must be the last member",
@@ -69,7 +64,7 @@ impl WgslStruct {
             if need {
                 let (f, layout) = Self::create_pad_field(fields.len(), pad);
                 fields.push(WgslField {
-                    attrs: Vec::new(),
+                    attrs: WgslAttributes::new(),
                     vis: f.vis,
                     ident: f.ident.unwrap(),
                     ty: f.ty,
@@ -81,11 +76,11 @@ impl WgslStruct {
             offset += pad;
 
             // Adds the current field.
-            let mut attrs = WgslAttribute::vec_from(cur.attrs.clone());
+            let mut attrs = WgslAttributes::from_syn(cur.attrs.clone())?;
             if wgsl_field_align > 0 {
                 let width = Index::from(wgsl_field_align);
                 let attr: Attribute = parse_quote!(#[align(#width)]);
-                attrs.push(attr.into());
+                attrs.push(WgslAttribute::from_syn(attr)?);
             }
             fields.push(WgslField {
                 attrs,
@@ -102,7 +97,7 @@ impl WgslStruct {
             if pad > 0 {
                 let (f, layout) = Self::create_pad_field(fields.len(), pad);
                 fields.push(WgslField {
-                    attrs: Vec::new(),
+                    attrs: WgslAttributes::new(),
                     vis: f.vis,
                     ident: f.ident.unwrap(),
                     ty: f.ty,
@@ -113,20 +108,21 @@ impl WgslStruct {
             }
 
             // Adjusts the current offset and maximum alignment.
-            offset += rust_layout.size();
-            max_align = max_align.max(wgsl_layout.align());
+            offset += rust_layout.size;
+            max_align = max_align.max(wgsl_layout.align);
         }
 
         // Creates layout for the struct.
         let size = round_up_by_align(offset, max_align);
-        let is_sized = fields.iter().all(|f| f.rust_layout.sized);
-        let struct_layout = LayoutExt::new(
-            Layout::from_size_align(size, max_align).map_err(|e| Error::new(st.span(), e))?,
-            is_sized,
-        );
+        let is_sized = fields.iter().all(|f| f.rust_layout.is_sized);
+        let struct_layout = LayoutExt::new(size, max_align, is_sized)
+            .ok_or(Error::new(st.span(), "invalid layout"))?;
+
+        // Records ident of the struct.
+        insert_wgsl_path(st.ident.to_string());
 
         Ok(Self {
-            attrs: WgslAttribute::vec_from(Self::filter_attributes(&st.attrs)),
+            attrs: FromSyn::from_syn(Self::filter_attributes(&st.attrs))?,
             vis: st.vis.clone(),
             ident: st.ident.clone(),
             fields,
@@ -135,40 +131,41 @@ impl WgslStruct {
     }
 
     // Returns (Rust layout, WGSL layout, WGSL field align) for the given field.
-    fn field_to_layout<F>(
+    fn field_to_layout<F, G>(
         field: &Field,
         uniform: bool,
-        search: F,
+        find_layout: F,
+        find_len: G,
     ) -> Result<(LayoutExt, LayoutExt, usize)>
     where
         F: FnMut(&Ident) -> Result<(LayoutExt, LayoutExt)>,
+        G: FnMut(&Ident) -> Result<usize>,
     {
         const IN_ARRAY: bool = false;
 
-        let (rust_layout, wgsl_layout) = Self::type_to_layout(&field.ty, search, IN_ARRAY)?;
-        debug_assert!(rust_layout.size() <= wgsl_layout.size());
-        debug_assert!(rust_layout.align() <= wgsl_layout.align());
+        let (rust_layout, wgsl_layout) =
+            Self::type_to_layout(&field.ty, IN_ARRAY, find_layout, find_len)?;
+        debug_assert!(rust_layout.size <= wgsl_layout.size);
+        debug_assert!(rust_layout.align <= wgsl_layout.align);
 
         // `align` attribute affects WGSL layout.
         let wgsl_layout = if let Some(value) = field.get_attribute_value("align") {
-            let value = value
+            let new_align = value
                 .parse::<usize>()
                 .map_err(|e| Error::new(field.span(), e))?;
-            wgsl_layout
-                .align_to(value)
-                .map_err(|e| Error::new(field.span(), e))?
+            LayoutExt::new(wgsl_layout.size, new_align, wgsl_layout.is_sized)
+                .ok_or(Error::new(field.span(), "invalid layout"))?
         } else {
             wgsl_layout
         };
 
         // `size` attribute affects WGSL layout.
         let wgsl_layout = if let Some(value) = field.get_attribute_value("size") {
-            let value = value
+            let new_size = value
                 .parse::<usize>()
                 .map_err(|e| Error::new(field.span(), e))?;
-            let layout = Layout::from_size_align(value, wgsl_layout.align())
-                .map_err(|e| Error::new(field.span(), e))?;
-            LayoutExt::new(layout, wgsl_layout.sized)
+            LayoutExt::new(new_size, wgsl_layout.align, wgsl_layout.is_sized)
+                .ok_or(Error::new(field.span(), "invalid layout"))?
         } else {
             wgsl_layout
         };
@@ -179,7 +176,7 @@ impl WgslStruct {
             match &field.ty {
                 // [T; N] is not allowed in uniform when T's align is not 16*K.
                 Type::Array(ty) => {
-                    if wgsl_layout.align() % 16 != 0 {
+                    if wgsl_layout.align % 16 != 0 {
                         return Err(Error::new(
                             ty.elem.span(),
                             "alignment must be a multiple of 16 in uniform address space",
@@ -196,9 +193,15 @@ impl WgslStruct {
                 _ => {}
             }
 
-            let new_layout = unsafe { wgsl_layout.align_to(16).unwrap_unchecked() };
+            let new_layout = LayoutExt::new(
+                wgsl_layout.size,
+                round_up_by_align(wgsl_layout.align, 16),
+                wgsl_layout.is_sized,
+            )
+            .unwrap();
+
             if wgsl_layout != new_layout {
-                (new_layout, new_layout.align())
+                (new_layout, new_layout.align)
             } else {
                 (new_layout, 0 /* No need to specify */)
             }
@@ -209,35 +212,45 @@ impl WgslStruct {
         Ok((rust_layout, wgsl_layout, wgsl_field_align))
     }
 
-    fn type_to_layout<F>(ty: &Type, mut search: F, in_arr: bool) -> Result<(LayoutExt, LayoutExt)>
+    fn type_to_layout<F, G>(
+        ty: &Type,
+        in_arr: bool,
+        mut find_layout: F,
+        mut find_len: G,
+    ) -> Result<(LayoutExt, LayoutExt)>
     where
         F: FnMut(&Ident) -> Result<(LayoutExt, LayoutExt)>,
+        G: FnMut(&Ident) -> Result<usize>,
     {
         let (rust_layout, wgsl_layout) = match ty {
             // T: Returns (size: size of T, align of T)
             Type::Path(_) => {
                 let ty_ident = last_type_path_ident(ty)?;
-                let (rust_layout, wgsl_layout) = search(ty_ident)?;
+                let (rust_layout, wgsl_layout) = find_layout(ty_ident)?;
 
-                Self::check_type_availability(
-                    ty.span(),
-                    &ty_ident.to_string(),
-                    in_arr,
-                    rust_layout,
-                )?;
+                if in_arr {
+                    Self::is_ok_as_array_elem_type(ty)?;
+                } else {
+                    Self::is_ok_as_struct_member_type(ty)?;
+                }
+                if !rust_layout.is_sized {
+                    return Err(Error::new(
+                        ty.span(),
+                        "type including runtime sized array cannot be a member of another struct",
+                    ));
+                }
 
                 (rust_layout, wgsl_layout)
             }
-            // [T; N]: Returns (size: stride of T, align: align of T)
+            // [T; N]: Returns (size: N * stride of T, align: align of T)
             Type::Array(ty) => {
                 const IN_ARRAY: bool = true;
 
-                let (elem_rust, elem_wgsl) = Self::type_to_layout(&ty.elem, search, IN_ARRAY)?;
-                let len = expr_to_integer(&ty.len)
-                    .ok_or(Error::new(ty.span(), "expected literal"))?
-                    as usize;
-                let rust_layout = Self::array_layout(elem_rust, len, ty.span())?;
-                let wgsl_layout = Self::array_layout(elem_wgsl, len, ty.span())?;
+                let len: usize = ty.len.evaluate(&mut find_len)?;
+                let (elem_rust, elem_wgsl) =
+                    Self::type_to_layout(&ty.elem, IN_ARRAY, find_layout, find_len)?;
+                let rust_layout = elem_rust.to_array_layout(len);
+                let wgsl_layout = elem_wgsl.to_array_layout(len);
                 (rust_layout, wgsl_layout)
             }
             // [T]: Returns (size: stride of T, align: align of T)
@@ -245,16 +258,12 @@ impl WgslStruct {
                 const IN_ARRAY: bool = true;
                 const IS_SIZED: bool = false;
 
-                let (elem_rust, elem_wgsl) = Self::type_to_layout(&ty.elem, search, IN_ARRAY)?;
-
-                let rust_layout = LayoutExt::new(
-                    Layout::from_size_align(elem_rust.stride(), elem_rust.align()).unwrap(),
-                    IS_SIZED,
-                );
-                let wgsl_layout = LayoutExt::new(
-                    Layout::from_size_align(elem_wgsl.stride(), elem_wgsl.align()).unwrap(),
-                    IS_SIZED,
-                );
+                let (elem_rust, elem_wgsl) =
+                    Self::type_to_layout(&ty.elem, IN_ARRAY, find_layout, find_len)?;
+                let rust_layout =
+                    LayoutExt::new(elem_rust.stride(), elem_rust.align, IS_SIZED).unwrap();
+                let wgsl_layout =
+                    LayoutExt::new(elem_wgsl.stride(), elem_wgsl.align, IS_SIZED).unwrap();
 
                 (rust_layout, wgsl_layout)
             }
@@ -264,16 +273,6 @@ impl WgslStruct {
         Ok((rust_layout, wgsl_layout))
     }
 
-    fn array_layout(elem_layout: LayoutExt, len: usize, span: Span) -> Result<LayoutExt> {
-        const IS_SIZED: bool = true;
-
-        Ok(LayoutExt::new(
-            Layout::from_size_align(elem_layout.stride() * len, elem_layout.align())
-                .map_err(|e| Error::new(span, e))?,
-            IS_SIZED,
-        ))
-    }
-
     /// Returns pair of required padding bytes and whether it is required
     /// explicitly.
     ///
@@ -281,12 +280,12 @@ impl WgslStruct {
     /// alignment difference between Rust and WGSL. See an example below.
     ///
     /// ```text
-    /// * Explicit required padding
+    /// * Explicitly required padding
     /// ----[Rust]
     /// --------[WGSL]
     /// -------- : We need explicit padding as much as this amount.
     ///
-    /// * Implicit required padding
+    /// * Implicitly required padding
     /// ----[Rust]
     /// ----[WGSL]
     /// ---- : Rust will put this hidden pad automatically.
@@ -296,10 +295,10 @@ impl WgslStruct {
         rust_layout: LayoutExt,
         wgsl_layout: LayoutExt,
     ) -> (usize, bool) {
-        debug_assert!(rust_layout.align() <= wgsl_layout.align());
+        debug_assert!(rust_layout.align <= wgsl_layout.align);
 
-        let pad = round_up_by_align(offset, wgsl_layout.align()) - offset;
-        let need_explicit = rust_layout.align() != wgsl_layout.align() && pad > 0;
+        let pad = round_up_by_align(offset, wgsl_layout.align) - offset;
+        let need_explicit = rust_layout.align != wgsl_layout.align && pad > 0;
 
         (pad, need_explicit)
     }
@@ -315,9 +314,9 @@ impl WgslStruct {
     ///           ---- : We need padding as much as this amount.
     /// ```
     const fn following_pad(rust_layout: LayoutExt, wgsl_layout: LayoutExt) -> usize {
-        debug_assert!(rust_layout.size() <= wgsl_layout.size());
+        debug_assert!(rust_layout.size <= wgsl_layout.size);
 
-        wgsl_layout.size() - rust_layout.size()
+        wgsl_layout.size - rust_layout.size
     }
 
     fn create_pad_field(i: usize, size: usize) -> (Field, LayoutExt) {
@@ -328,7 +327,8 @@ impl WgslStruct {
         let pad_field: Field = parse_quote! {
             #ident: std::mem::MaybeUninit<[u8; #len]>
         };
-        let layout = LayoutExt::new(Layout::from_size_align(size, 1).unwrap(), IS_SIZED);
+        let layout = LayoutExt::new(size, 1, IS_SIZED).unwrap();
+
         (pad_field, layout)
     }
 
@@ -350,43 +350,63 @@ impl WgslStruct {
     /// If the struct contains runtime sized array as the last member, it is not
     /// a sized struct, so that returns false in that case.
     fn is_sized(&self) -> bool {
-        self.struct_layout.is_sized()
+        self.struct_layout.is_sized
     }
 
     #[rustfmt::skip]
-    fn check_type_availability(
-        span: Span,
-        ident: &str,
-        in_arr: bool,
-        layout: LayoutExt,
-    ) -> Result<()> {
-        if in_arr {
-            const DISALLOWED: [&str; 9] = [
-                Vec2i::ident(), Vec3i::ident(), Vec4i::ident(),
-                Vec2u::ident(), Vec3u::ident(), Vec4u::ident(),
-                Vec2f::ident(), Vec3f::ident(), Vec4f::ident(),
-            ];
-            const ALTERNATIVES: [&str; 9] = [
-                WideVec2i::ident(), WideVec3i::ident(), WideVec4i::ident(),
-                WideVec2u::ident(), WideVec3u::ident(), WideVec4u::ident(),
-                WideVec2f::ident(), WideVec3f::ident(), WideVec4f::ident(),
-            ];
-            if let Some((i, _)) = DISALLOWED.iter().enumerate().find(|(_, &v)| v == ident) {
-                return Err(Error::new(
-                    span,
-                    format!("`{ident}` is not allowed in array due to alignment. please use `{}` instead", ALTERNATIVES[i])
-                ));
-            }
-        }
+    fn is_ok_as_array_elem_type(ty: &Type) -> Result<()> {
+        let disallowed: [&str; 9] = [
+            Vec2i::ident(), Vec3i::ident(), Vec4i::ident(),
+            Vec2u::ident(), Vec3u::ident(), Vec4u::ident(),
+            Vec2f::ident(), Vec3f::ident(), Vec4f::ident(),
+        ];
+        let alternatives: [&str; 9] = [
+            WideVec2i::ident(), WideVec3i::ident(), WideVec4i::ident(),
+            WideVec2u::ident(), WideVec3u::ident(), WideVec4u::ident(),
+            WideVec2f::ident(), WideVec3f::ident(), WideVec4f::ident(),
+        ];
+        let ty_ident = last_type_path_ident(ty)?;
+        let ident_str = &ty_ident.to_string();
 
-        if !layout.is_sized() {
-            return Err(Error::new(
-                span,
-                "type including runtime sized array cannot be a member of another struct",
-            ));
+        if let Some((i, _)) = disallowed.iter().enumerate().find(|(_, &v)| v == ident_str) {
+            Err(Error::new(
+                ty.span(),
+                format!(
+                    "`{ty_ident}` is not allowed in array due to alignment. please use `{}` instead",
+                    alternatives[i]
+                ),
+            ))
+        } else {
+            Ok(())
         }
+    }
 
-        Ok(())
+    #[rustfmt::skip]
+    fn is_ok_as_struct_member_type(ty: &Type) -> Result<()> {
+        let disallowed: [&str; 9] = [
+            WideVec2i::ident(), WideVec3i::ident(), WideVec4i::ident(),
+            WideVec2u::ident(), WideVec3u::ident(), WideVec4u::ident(),
+            WideVec2f::ident(), WideVec3f::ident(), WideVec4f::ident(),
+        ];
+        let alternatives: [&str; 9] = [
+            Vec2i::ident(), Vec3i::ident(), Vec4i::ident(),
+            Vec2u::ident(), Vec3u::ident(), Vec4u::ident(),
+            Vec2f::ident(), Vec3f::ident(), Vec4f::ident(),
+        ];
+        let ty_ident = last_type_path_ident(ty)?;
+        let ident_str = &ty_ident.to_string();
+
+        if let Some((i, _)) = disallowed.iter().enumerate().find(|(_, &v)| v == ident_str) {
+            Err(Error::new(
+                ty.span(),
+                format!(
+                    "`{ty_ident}` is not allowed in struct due to size. please use `{}` instead",
+                    alternatives[i]
+                ),
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     fn to_unsized_tokens(&self, tokens: &mut TokenStream2) {
@@ -404,7 +424,7 @@ impl WgslStruct {
         let decl_inner = Self::decl_unsized_inner(vis, &inner_ident, fields.clone());
 
         tokens.append_all(quote! {
-            #(#attrs)*
+            #attrs
             #[repr(transparent)]
             #vis struct #ident(#inner_ident);
 
@@ -738,14 +758,14 @@ impl ToTokens for WgslStruct {
 
         let decl_new = self.decl_sized_new();
 
-        if !struct_layout.is_sized() {
+        if !struct_layout.is_sized {
             // Contaiing runtime sized array.
             self.to_unsized_tokens(tokens);
-        } else if self.layout().size() > 0 {
+        } else if self.layout().size > 0 {
             // Not a ZST.
-            let struct_align = Index::from(struct_layout.align());
+            let struct_align = Index::from(struct_layout.align);
             tokens.append_all(quote! {
-                #(#attrs)*
+                #attrs
                 #[repr(C, align(#struct_align))]
                 #vis struct #ident {
                     #(#fields),*
@@ -756,7 +776,7 @@ impl ToTokens for WgslStruct {
         } else {
             // Allow ZST?
             tokens.append_all(quote! {
-                #(#attrs)*
+                #attrs
                 #vis struct #ident;
             });
         }
@@ -765,14 +785,38 @@ impl ToTokens for WgslStruct {
     }
 }
 
+impl ToWgslString for WgslStruct {
+    fn write_wgsl_string(&self, buf: &mut String) {
+        buf.push_str("struct ");
+        buf.push_str(&self.ident.to_string());
+        buf.push('{');
+        for f in self.fields.iter().filter(|f| !f.is_pad()) {
+            f.write_wgsl_string(buf);
+            buf.push(',');
+        }
+        if let Some(c) = buf.pop() {
+            if c != ',' {
+                buf.push(c);
+            }
+        }
+        buf.push('}');
+    }
+}
+
 impl RuntimeWgslToken for WgslStruct {
     fn runtime_tokens(&self) -> TokenStream2 {
         let ident = &self.ident;
 
-        let fields = self
-            .fields
-            .iter()
-            .filter_map(|f| (!f.is_pad()).then_some(f.runtime_tokens()));
+        let fields = self.fields.iter().filter_map(|f| {
+            if !f.is_pad() {
+                let struct_member = f.runtime_tokens();
+                Some(quote! {
+                    wgsl_struct.members.push(#struct_member);
+                })
+            } else {
+                None
+            }
+        });
 
         let as_bytes = if self.is_sized() {
             quote! {
@@ -799,7 +843,7 @@ impl RuntimeWgslToken for WgslStruct {
         };
 
         let mut wgsl_code = String::new();
-        self.write_wgsl_code(&mut wgsl_code);
+        self.write_wgsl_string(&mut wgsl_code);
 
         quote! {
             impl my_wgsl::BeWgslStruct for #ident {
@@ -822,27 +866,9 @@ impl RuntimeWgslToken for WgslStruct {
     }
 }
 
-impl ComptimeWgslCode for WgslStruct {
-    fn write_wgsl_code(&self, buf: &mut String) {
-        buf.push_str("struct ");
-        buf.push_str(&self.ident.to_string());
-        buf.push('{');
-        for f in self.fields.iter().filter(|f| !f.is_pad()) {
-            f.write_wgsl_code(buf);
-            buf.push(',');
-        }
-        if let Some(c) = buf.pop() {
-            if c != ',' {
-                buf.push(c);
-            }
-        }
-        buf.push('}');
-    }
-}
-
 #[derive(Debug)]
 pub(crate) struct WgslField {
-    pub(crate) attrs: Vec<WgslAttribute>,
+    pub(crate) attrs: WgslAttributes,
 
     pub(crate) vis: Visibility,
 
@@ -872,7 +898,7 @@ impl WgslField {
 
 impl ToTokens for WgslField {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
-        tokens.append_all(&self.attrs);
+        self.attrs.to_tokens(tokens);
         self.vis.to_tokens(tokens);
         self.ident.to_tokens(tokens);
         tokens.append(Punct::new(':', Spacing::Alone));
@@ -880,225 +906,70 @@ impl ToTokens for WgslField {
     }
 }
 
+impl ToWgslString for WgslField {
+    fn write_wgsl_string(&self, buf: &mut String) {
+        self.attrs.write_wgsl_string(buf);
+        buf.push_str(&self.ident.to_string());
+        buf.push(':');
+        buf.push_str(&self.ty.wgsl_string());
+    }
+}
+
 impl RuntimeWgslToken for WgslField {
     fn runtime_tokens(&self) -> TokenStream2 {
         let ident = &self.ident;
-        let ty = wgsl_type_str(&self.ty);
+        let ty = self.ty.wgsl_string();
 
-        let mut tokens = quote! {
-            let mut struct_member = my_wgsl::StructMember::new(
-                stringify!(#ident).to_owned(),
-                #ty.to_owned()
-            );
-        };
-
-        for attr in &self.attrs {
-            tokens.append_all(attr.runtime_tokens());
-        }
-
-        tokens.append_all(quote! {
-            wgsl_struct.members.push(struct_member);
-        });
-
-        tokens
-    }
-}
-
-impl ComptimeWgslCode for WgslField {
-    fn write_wgsl_code(&self, buf: &mut String) {
-        for a in &self.attrs {
-            a.write_wgsl_code(buf);
-        }
-        if !self.attrs.is_empty() && !matches!(buf.chars().last(), Some(')')) {
-            buf.push(' ');
-        }
-        buf.push_str(&self.ident.to_string());
-        buf.push(':');
-        buf.push_str(&wgsl_type_str(&self.ty));
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct WgslAttribute {
-    pub(crate) meta: Meta,
-    pub(crate) rust_show: bool,
-    pub(crate) wgsl_show: bool,
-}
-
-impl WgslAttribute {
-    fn vec_from(attrs: Vec<Attribute>) -> Vec<Self> {
-        attrs.into_iter().map(Into::into).collect()
-    }
-}
-
-impl ToTokens for WgslAttribute {
-    fn to_tokens(&self, tokens: &mut TokenStream2) {
-        if !self.rust_show {
-            return;
-        }
-
-        let meta = &self.meta;
-
-        tokens.append_all(quote! {
-            #[#meta]
-        });
-    }
-}
-
-impl RuntimeWgslToken for WgslAttribute {
-    fn runtime_tokens(&self) -> TokenStream2 {
-        if !self.wgsl_show {
-            return TokenStream2::new();
-        }
-
-        let outer = self.meta.path();
-        let inner = match &self.meta {
-            Meta::List(l) => {
-                let inner = &l.tokens;
-                quote! { Some(stringify!(#inner)) }
+        let push_attrs = self.attrs.iter().map(|a| {
+            let attr = a.runtime_tokens();
+            quote! {
+                struct_member.attrs.push(#attr);
             }
-            _ => quote! { None },
-        };
+        });
 
         quote! {
-            struct_member.insert_attribute(stringify!(#outer), #inner);
+            {
+                let mut struct_member = my_wgsl::StructMember::new(
+                    stringify!(#ident).to_owned(),
+                    #ty.to_owned()
+                );
+                #(#push_attrs)*
+                struct_member
+            }
         }
-    }
-}
-
-impl ComptimeWgslCode for WgslAttribute {
-    fn write_wgsl_code(&self, buf: &mut String) {
-        if !self.wgsl_show {
-            return;
-        }
-
-        buf.push('@');
-        buf.push_str(&self.meta.path().to_token_stream().to_string());
-
-        if let Meta::List(l) = &self.meta {
-            buf.push('(');
-            buf.push_str(&l.tokens.to_string());
-            buf.push(')');
-        }
-    }
-}
-
-impl From<Attribute> for WgslAttribute {
-    #[rustfmt::skip]
-    fn from(value: Attribute) -> Self {
-        const WGSL_ONLY: [&str; 16] = [
-            "align", "binding", "blend_src", "builtin", "const", "diagnostic",
-            "group", "id", "interpolate", "invariant", "location", "size",
-            "workgroup_size", "vectex", "fragment", "compute"
-        ];
-        const BOTH: [&str; 1] = ["must_use"];
-
-        let (rust_show, wgsl_show) = if WGSL_ONLY.iter().any(|s| value.path().is_ident(s)) {
-            (false, true)
-        } else if BOTH.iter().any(|s| value.path().is_ident(s)) {
-            (true, true)
-        } else {
-            (true, false)
-        };
-
-        Self {
-            meta: value.meta,
-            rust_show,
-            wgsl_show
-        }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct ExternLayout {
-    pub(crate) ty: Type,
-    _comma_token1: Token![,],
-    pub(crate) size: usize,
-    _comma_token2: Token![,],
-    pub(crate) align: usize,
-}
-
-impl ExternLayout {
-    pub(crate) fn layout(&self) -> LayoutExt {
-        let sized = true;
-        LayoutExt::new(
-            Layout::from_size_align(self.size, self.align).unwrap(),
-            sized,
-        )
-    }
-}
-
-impl Parse for ExternLayout {
-    fn parse(input: ParseStream) -> Result<Self> {
-        let ty: Type = input.parse()?;
-        let _comma_token1: Token![,] = input.parse()?;
-        let size_lit: LitInt = input.parse()?;
-        let _comma_token2: Token![,] = input.parse()?;
-        let align_lit: LitInt = input.parse()?;
-
-        let size = size_lit.base10_parse::<usize>()?;
-        let align = align_lit.base10_parse::<usize>()?;
-
-        let _ = Layout::from_size_align(size, align)
-            .map_err(|_| Error::new(ty.span(), "invalid layout"))?;
-
-        Ok(Self {
-            ty,
-            _comma_token1,
-            size,
-            _comma_token2,
-            align,
-        })
-    }
-}
-
-impl ToTokens for ExternLayout {
-    fn to_tokens(&self, tokens: &mut TokenStream2) {
-        let Self {
-            ty, size, align, ..
-        } = self;
-
-        let ty_name = ty.to_token_stream().to_string();
-        let size_errmsg = format!("size of `{ty_name}` is not {size}");
-        let align_errmsg = format!("alignment of `{ty_name}` is not {align}");
-
-        tokens.append_all(quote! {
-            const _: () = assert!(size_of::<#ty>() == #size, #size_errmsg);
-            const _: () = assert!(align_of::<#ty>() == #align, #align_errmsg);
-        });
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct LayoutExt {
-    layout: Layout,
-    sized: bool,
+    pub(crate) size: usize,
+    pub(crate) align: usize,
+    pub(crate) is_sized: bool,
 }
 
 impl LayoutExt {
-    pub(crate) const fn new(layout: Layout, sized: bool) -> Self {
-        Self { layout, sized }
+    pub(crate) const fn new(size: usize, align: usize, is_sized: bool) -> Option<Self> {
+        if (align == 0)
+            || (!align.is_power_of_two())
+            || (round_up_by_align(size, align) > isize::MAX as usize)
+        {
+            None
+        } else {
+            Some(Self {
+                size,
+                align,
+                is_sized,
+            })
+        }
     }
 
-    const fn size(&self) -> usize {
-        self.layout.size()
+    pub(crate) const fn to_array_layout(self, len: usize) -> Self {
+        debug_assert!(self.is_sized);
+
+        unsafe { Self::new(self.size * len, self.align, self.is_sized).unwrap_unchecked() }
     }
 
-    const fn align(&self) -> usize {
-        self.layout.align()
-    }
-
-    const fn stride(&self) -> usize {
-        round_up_by_align(self.size(), self.align())
-    }
-
-    const fn is_sized(&self) -> bool {
-        self.sized
-    }
-
-    fn align_to(&self, align: usize) -> std::result::Result<Self, LayoutError> {
-        self.layout
-            .align_to(align)
-            .map(|l| Self::new(l, self.sized))
+    pub(crate) const fn stride(&self) -> usize {
+        round_up_by_align(self.size, self.align)
     }
 }

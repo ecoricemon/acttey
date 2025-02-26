@@ -4,7 +4,7 @@ use super::{
     structs::{BeWgslStruct, StructMember, WgslStruct},
     to_code::{ConstructPrettyCode, ConstructWgslCode},
     util,
-    var::GlobalVariable,
+    var::WgslVarDecl,
 };
 
 pub trait BeWgslModule {
@@ -36,7 +36,7 @@ impl WgslModule {
     pub fn build(&self) -> String {
         let mut buf = String::new();
         for entry in self.entries.iter() {
-            entry.write_wgsl_code(&mut buf);
+            entry.write_wgsl_string(&mut buf);
         }
         buf
     }
@@ -184,7 +184,7 @@ impl WgslModule {
     }
 
     /// Retrieves the `my_wgsl::GlobalVariable` that has the given name.
-    pub fn get_global_variable(&self, ident: &str) -> Option<&GlobalVariable> {
+    pub fn get_global_variable(&self, ident: &str) -> Option<&WgslVarDecl> {
         // Safety: `i` points to valid `ShaderEntry::GlobalVariable`.
         self.find_global_variable(ident).map(|i| unsafe {
             self.entries
@@ -196,7 +196,7 @@ impl WgslModule {
     }
 
     /// Retrieves the `my_wgsl::GlobalVariable` that has the given name.
-    pub fn get_global_variable_mut(&mut self, ident: &str) -> Option<&mut GlobalVariable> {
+    pub fn get_global_variable_mut(&mut self, ident: &str) -> Option<&mut WgslVarDecl> {
         // Safety: `i` points to valid `ShaderEntry::GlobalVariable`.
         self.find_global_variable(ident).map(|i| unsafe {
             self.entries
@@ -208,13 +208,13 @@ impl WgslModule {
     }
 
     /// Appends the given global variable.
-    pub fn push_global_variable(&mut self, var: GlobalVariable) {
+    pub fn push_global_variable(&mut self, var: WgslVarDecl) {
         self.entries.push(WgslEntry::GlobalVariable(var));
     }
 
     /// Tries to remove the global variable that has the given name.
     /// If succeeded, returns removed one.
-    pub fn remove_global_variable(&mut self, ident: &str) -> Option<GlobalVariable> {
+    pub fn remove_global_variable(&mut self, ident: &str) -> Option<WgslVarDecl> {
         self.find_global_variable(ident)
             .map(|i| match self.entries.remove(i) {
                 WgslEntry::GlobalVariable(var) => var,
@@ -363,7 +363,7 @@ impl_from_tuple_for_wgsl_module!(0, 1, 2, 3, 4, 5, 6, 7);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum WgslEntry {
     Struct(WgslStruct),
-    GlobalVariable(GlobalVariable),
+    GlobalVariable(WgslVarDecl),
     Function(WgslFn),
 }
 
@@ -391,16 +391,16 @@ macro_rules! impl_shader_entry_matcher {
 
 impl WgslEntry {
     impl_shader_entry_matcher!(as_struct, Struct, WgslStruct);
-    impl_shader_entry_matcher!(as_global_variable, GlobalVariable, GlobalVariable);
+    impl_shader_entry_matcher!(as_global_variable, GlobalVariable, WgslVarDecl);
     impl_shader_entry_matcher!(as_function, Function, WgslFn);
 }
 
 impl ConstructWgslCode for WgslEntry {
-    fn write_wgsl_code(&self, buf: &mut String) {
+    fn write_wgsl_string(&self, buf: &mut String) {
         match self {
-            Self::Struct(st) => st.write_wgsl_code(buf),
-            Self::GlobalVariable(global_variable) => global_variable.write_wgsl_code(buf),
-            Self::Function(function) => function.write_wgsl_code(buf),
+            Self::Struct(st) => st.write_wgsl_string(buf),
+            Self::GlobalVariable(global_variable) => global_variable.write_wgsl_string(buf),
+            Self::Function(function) => function.write_wgsl_string(buf),
         }
     }
 }

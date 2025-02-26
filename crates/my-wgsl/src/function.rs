@@ -56,7 +56,7 @@ impl WgslFn {
 }
 
 impl ConstructWgslCode for WgslFn {
-    fn write_wgsl_code(&self, buf: &mut String) {
+    fn write_wgsl_string(&self, buf: &mut String) {
         util::put_attrs(self.attrs.iter(), buf);
         buf.push_str("fn ");
         buf.push_str(self.ident.as_str());
@@ -65,9 +65,9 @@ impl ConstructWgslCode for WgslFn {
         buf.push(')');
         if let Some(output) = &self.output {
             buf.push_str("->");
-            output.write_wgsl_code(buf);
+            output.write_wgsl_string(buf);
         }
-        self.stmt.write_wgsl_code(buf);
+        self.stmt.write_wgsl_string(buf);
     }
 }
 
@@ -126,7 +126,7 @@ pub struct FnParam {
 }
 
 impl ConstructWgslCode for FnParam {
-    fn write_wgsl_code(&self, buf: &mut String) {
+    fn write_wgsl_string(&self, buf: &mut String) {
         util::put_attrs(self.attrs.iter(), buf);
         if let Some(ident) = &self.ident {
             buf.push_str(ident);
@@ -289,7 +289,7 @@ impl CompoundStatement {
 }
 
 impl ConstructWgslCode for CompoundStatement {
-    fn write_wgsl_code(&self, buf: &mut String) {
+    fn write_wgsl_string(&self, buf: &mut String) {
         util::put_str_join(self.attrs.iter(), buf, "", "", "");
         buf.push('{');
         util::put_str_join(self.stmts.iter(), buf, "", "", "");
@@ -329,9 +329,9 @@ pub enum Statement {
 }
 
 impl ConstructWgslCode for Statement {
-    fn write_wgsl_code(&self, buf: &mut String) {
+    fn write_wgsl_string(&self, buf: &mut String) {
         match self {
-            Self::Compound(comp_stmt) => comp_stmt.write_wgsl_code(buf),
+            Self::Compound(comp_stmt) => comp_stmt.write_wgsl_string(buf),
             Self::BareCompound(comp_stmt) => comp_stmt.put_str_inner(buf),
             Self::Other(others) => {
                 let mut prev = &String::from(".");

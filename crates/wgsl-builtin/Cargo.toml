@@ -1,0 +1,13 @@
+[package]
+name = "wgsl-builtin"
+version = "0.1.0"
+edition = "2021"
+description = "WGSL builtin types"
+repository = "https://github.com/ecoricemon/acttey"
+license = "Apache-2.0 OR MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+paste = { version = "1.0.14" }

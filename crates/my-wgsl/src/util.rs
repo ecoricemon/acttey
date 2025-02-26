@@ -80,7 +80,7 @@ pub(crate) fn put_str_join<'a, I, II>(
         pre,
         sep,
         last_punct,
-        ConstructWgslCode::write_wgsl_code,
+        ConstructWgslCode::write_wgsl_string,
     );
 }
 

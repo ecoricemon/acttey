@@ -1,6 +1,6 @@
-use super::builtin_functions::WgslDot;
+use super::functions::WgslDot;
 use std::{
-    mem,
+    fmt, mem,
     ops::{Add, Deref, DerefMut, Div, Mul, Neg, Rem, Sub},
 };
 
@@ -13,6 +13,48 @@ macro_rules! impl_deref_mut {
         }
         impl DerefMut for $outer {
             fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+        }
+    };
+}
+
+macro_rules! impl_fmt {
+    ($ty:ty) => {
+        impl fmt::Debug for $ty {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                self.0.fmt(f)
+            }
+        }
+    };
+}
+
+macro_rules! impl_vec_constructor {
+    ($ty:ty, $arg_ty:ty, $n:expr, $($args:ident),*) => {
+        impl $ty {
+            pub const ZERO: Self = Self::splat(0 as $arg_ty);
+
+            pub const fn new( $($args : $arg_ty),* ) -> Self {
+                Self([ $($args),* ])
+            }
+
+            pub const fn splat(v: $arg_ty) -> Self {
+                Self([ v; $n ])
+            }
+        }
+    };
+}
+
+macro_rules! impl_wide_vec_constructor {
+    ($outer:ty, $inner:ident, $arg_ty:ty, $n:expr, $($args:ident),*) => {
+        impl $outer {
+            pub const ZERO: Self = Self::splat(0 as $arg_ty);
+
+            pub const fn new( $($args : $arg_ty),* ) -> Self {
+                Self( $inner::new( $($args),* ) )
+            }
+
+            pub const fn splat(v: $arg_ty) -> Self {
+                Self( $inner::splat(v) )
+            }
         }
     };
 }
@@ -108,6 +150,88 @@ macro_rules! impl_vec_scalar_arithmetic {
         impl Rem<$v> for $s {
             type Output = $v;
             fn rem(self, rhs: $v) -> Self::Output { $v::splat(self) % rhs }
+        }
+    };
+}
+
+#[rustfmt::skip]
+macro_rules! impl_wide_vec_component_wise_arithmetic {
+    ($id:ty, $out:ty) => {
+        impl Add for $id {
+            type Output = $out;
+            fn add(self, rhs: Self) -> Self::Output { self.0 + rhs.0 }
+        }
+        impl Sub for $id {
+            type Output = $out;
+            fn sub(self, rhs: Self) -> Self::Output { self.0 - rhs.0 }
+        }
+        impl Mul for $id {
+            type Output = $out;
+            fn mul(self, rhs: Self) -> Self::Output { self.0 * rhs.0 }
+        }
+        impl Div for $id {
+            type Output = $out;
+            fn div(self, rhs: Self) -> Self::Output { self.0 / rhs.0 }
+        }
+        impl Rem for $id {
+            type Output = $out;
+            fn rem(self, rhs: Self) -> Self::Output { self.0 % rhs.0 }
+        }
+    };
+}
+
+#[rustfmt::skip]
+macro_rules! impl_wide_vec_component_wise_negation {
+    ($id:ty, $out:ty) => {
+        impl Neg for $id {
+            type Output = $out;
+            fn neg(self) -> Self::Output { -self.0 }
+        }
+    };
+}
+
+#[rustfmt::skip]
+macro_rules! impl_wide_vec_scalar_arithmetic {
+    ($id:ty, $v:ty, $s:ty) => {
+        impl Add<$s> for $id {
+            type Output = $v;
+            fn add(self, rhs: $s) -> Self::Output { self.0 + rhs }
+        }
+        impl Sub<$s> for $id {
+            type Output = $v;
+            fn sub(self, rhs: $s) -> Self::Output { self.0 - rhs }
+        }
+        impl Mul<$s> for $id {
+            type Output = $v;
+            fn mul(self, rhs: $s) -> Self::Output { self.0 * rhs }
+        }
+        impl Div<$s> for $id {
+            type Output = $v;
+            fn div(self, rhs: $s) -> Self::Output { self.0 / rhs }
+        }
+        impl Rem<$s> for $id {
+            type Output = $v;
+            fn rem(self, rhs: $s) -> Self::Output { self.0 % rhs }
+        }
+        impl Add<$id> for $s {
+            type Output = $v;
+            fn add(self, rhs: $id) -> Self::Output { self + rhs.0 }
+        }
+        impl Sub<$id> for $s {
+            type Output = $v;
+            fn sub(self, rhs: $id) -> Self::Output { self - rhs.0 }
+        }
+        impl Mul<$id> for $s {
+            type Output = $v;
+            fn mul(self, rhs: $id) -> Self::Output { self * rhs.0 }
+        }
+        impl Div<$id> for $s {
+            type Output = $v;
+            fn div(self, rhs: $id) -> Self::Output { self / rhs.0 }
+        }
+        impl Rem<$id> for $s {
+            type Output = $v;
+            fn rem(self, rhs: $id) -> Self::Output { self % rhs.0 }
         }
     };
 }
@@ -216,14 +340,13 @@ macro_rules! impl_from_arr_for_mat {
     (C = $c:expr, R = $r:expr, Cols = $($i:expr),*) => { const _: () = {
         paste::paste! {
             type M = [<Mat $c x $r f>];
-            type V = [<Vec $r f>];
             const L: usize = $c * $r;
 
             impl From<[f32; L]> for M {
                 fn from(value: [f32; L]) -> Self {
                     let s: [[f32; $r]; $c] = unsafe { mem::transmute(value) };
                     Self::new(
-                        $( V::from(s[$i]) ),*
+                        $( [<Vec $r f>]( s[$i] ) ),*
                     )
                 }
             }
@@ -233,188 +356,97 @@ macro_rules! impl_from_arr_for_mat {
 
 // === Bool ===
 
-// Declares a struct defined by the macro for consistent layout.
-// pub struct Bool ( bool );
-my_wgsl_macros::decl_bool!();
-impl_deref_mut!(Bool, bool);
+#[repr(align(4))]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd, Eq, Ord, Hash)]
+pub struct Bool(pub bool);
 
-impl Bool {
-    pub const fn new(value: bool) -> Self {
-        Self(value)
-    }
-}
+impl_deref_mut!(Bool, bool);
+impl_fmt!(Bool);
 
 // === Vec2i ===
 
-// Declares a struct defined by the macro for consistent layout.
-// pub struct Vec2i ( [i32; 2] );
-my_wgsl_macros::decl_vec2i!();
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd, Eq, Ord, Hash)]
+pub struct Vec2i(pub [i32; 2]);
+
 impl_deref_mut!(Vec2i, [i32; 2]);
+impl_fmt!(Vec2i);
+impl_vec_constructor!(Vec2i, i32, 2, x, y);
 impl_vec_component_wise_arithmetic!(Vec2i, 0, 1);
 impl_vec_component_wise_negation!(Vec2i, 0, 1);
 impl_vec_scalar_arithmetic!(Vec2i, i32);
 
-impl Vec2i {
-    pub const ZERO: Self = Self::new(0, 0);
-
-    pub const fn new(x: i32, y: i32) -> Self {
-        Self([x, y])
-    }
-
-    pub const fn splat(v: i32) -> Self {
-        Self::new(v, v)
-    }
-}
-
-impl From<[i32; 2]> for Vec2i {
-    fn from(value: [i32; 2]) -> Self {
-        Self(value)
-    }
-}
-
 // === Vec3i ===
 
-// Declares a struct defined by the macro for consistent layout.
-// pub struct Vec3i ( [i32; 3] );
-my_wgsl_macros::decl_vec3i!();
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd, Eq, Ord, Hash)]
+pub struct Vec3i(pub [i32; 3]);
+
 impl_deref_mut!(Vec3i, [i32; 3]);
+impl_fmt!(Vec3i);
+impl_vec_constructor!(Vec3i, i32, 3, x, y, z);
 impl_vec_component_wise_arithmetic!(Vec3i, 0, 1, 2);
 impl_vec_component_wise_negation!(Vec3i, 0, 1, 2);
 impl_vec_scalar_arithmetic!(Vec3i, i32);
 
-impl Vec3i {
-    pub const ZERO: Self = Self::new(0, 0, 0);
-
-    pub const fn new(x: i32, y: i32, z: i32) -> Self {
-        Self([x, y, z])
-    }
-
-    pub const fn splat(v: i32) -> Self {
-        Self::new(v, v, v)
-    }
-}
-
-impl From<[i32; 3]> for Vec3i {
-    fn from(value: [i32; 3]) -> Self {
-        Self(value)
-    }
-}
-
 // === Vec4i ===
 
-// Declares a struct defined by the macro for consistent layout.
-// pub struct Vec4i ( [i32; 4] );
-my_wgsl_macros::decl_vec4i!();
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd, Eq, Ord, Hash)]
+pub struct Vec4i(pub [i32; 4]);
+
 impl_deref_mut!(Vec4i, [i32; 4]);
+impl_fmt!(Vec4i);
+impl_vec_constructor!(Vec4i, i32, 4, x, y, z, w);
 impl_vec_component_wise_arithmetic!(Vec4i, 0, 1, 2, 3);
 impl_vec_component_wise_negation!(Vec4i, 0, 1, 2, 3);
 impl_vec_scalar_arithmetic!(Vec4i, i32);
 
-impl Vec4i {
-    pub const ZERO: Self = Self::new(0, 0, 0, 0);
-
-    pub const fn new(x: i32, y: i32, z: i32, w: i32) -> Self {
-        Self([x, y, z, w])
-    }
-
-    pub const fn splat(v: i32) -> Self {
-        Self::new(v, v, v, v)
-    }
-}
-
-impl From<[i32; 4]> for Vec4i {
-    fn from(value: [i32; 4]) -> Self {
-        Self(value)
-    }
-}
-
 // === Vec2u ===
 
-// Declares a struct defined by the macro for consistent layout.
-// pub struct Vec2u ( [u32; 2] );
-my_wgsl_macros::decl_vec2u!();
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd, Eq, Ord, Hash)]
+pub struct Vec2u(pub [u32; 2]);
+
 impl_deref_mut!(Vec2u, [u32; 2]);
+impl_fmt!(Vec2u);
+impl_vec_constructor!(Vec2u, u32, 2, x, y);
 impl_vec_component_wise_arithmetic!(Vec2u, 0, 1);
 impl_vec_scalar_arithmetic!(Vec2u, u32);
 
-impl Vec2u {
-    pub const ZERO: Self = Self::new(0, 0);
-
-    pub const fn new(x: u32, y: u32) -> Self {
-        Self([x, y])
-    }
-
-    pub const fn splat(v: u32) -> Self {
-        Self::new(v, v)
-    }
-}
-
-impl From<[u32; 2]> for Vec2u {
-    fn from(value: [u32; 2]) -> Self {
-        Self(value)
-    }
-}
-
 // === Vec3u ===
 
-// Declares a struct defined by the macro for consistent layout.
-// pub struct Vec3u ( [u32; 3] );
-my_wgsl_macros::decl_vec3u!();
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd, Eq, Ord, Hash)]
+pub struct Vec3u(pub [u32; 3]);
+
 impl_deref_mut!(Vec3u, [u32; 3]);
+impl_fmt!(Vec3u);
+impl_vec_constructor!(Vec3u, u32, 3, x, y, z);
 impl_vec_component_wise_arithmetic!(Vec3u, 0, 1, 2);
 impl_vec_scalar_arithmetic!(Vec3u, u32);
 
-impl Vec3u {
-    pub const ZERO: Self = Self::new(0, 0, 0);
-
-    pub const fn new(x: u32, y: u32, z: u32) -> Self {
-        Self([x, y, z])
-    }
-
-    pub const fn splat(v: u32) -> Self {
-        Self::new(v, v, v)
-    }
-}
-
-impl From<[u32; 3]> for Vec3u {
-    fn from(value: [u32; 3]) -> Self {
-        Self(value)
-    }
-}
-
 // === Vec4u ===
 
-// Declares a struct defined by the macro for consistent layout.
-// pub struct Vec4u ( [u32; 4] );
-my_wgsl_macros::decl_vec4u!();
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd, Eq, Ord, Hash)]
+pub struct Vec4u(pub [u32; 4]);
+
 impl_deref_mut!(Vec4u, [u32; 4]);
+impl_fmt!(Vec4u);
+impl_vec_constructor!(Vec4u, u32, 4, x, y, z, w);
 impl_vec_component_wise_arithmetic!(Vec4u, 0, 1, 2, 3);
 impl_vec_scalar_arithmetic!(Vec4u, u32);
 
-impl Vec4u {
-    pub const ZERO: Self = Self::new(0, 0, 0, 0);
-
-    pub const fn new(x: u32, y: u32, z: u32, w: u32) -> Self {
-        Self([x, y, z, w])
-    }
-
-    pub const fn splat(v: u32) -> Self {
-        Self::new(v, v, v, v)
-    }
-}
-
-impl From<[u32; 4]> for Vec4u {
-    fn from(value: [u32; 4]) -> Self {
-        Self(value)
-    }
-}
-
 // === Vec2f ===
 
-// Declares a struct defined by the macro for consistent layout.
-// pub struct Vec2f ( [f32; 2] );
-my_wgsl_macros::decl_vec2f!();
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd)]
+pub struct Vec2f(pub [f32; 2]);
+
 impl_deref_mut!(Vec2f, [f32; 2]);
+impl_fmt!(Vec2f);
+impl_vec_constructor!(Vec2f, f32, 2, x, y);
 impl_vec_component_wise_arithmetic!(Vec2f, 0, 1);
 impl_vec_component_wise_negation!(Vec2f, 0, 1);
 impl_vec_scalar_arithmetic!(Vec2f, f32);
@@ -422,30 +454,15 @@ impl_vec_mul_mat!(Vec2f, Mat2x2f, Vec2f, 0, 1);
 impl_vec_mul_mat!(Vec2f, Mat3x2f, Vec3f, 0, 1, 2);
 impl_vec_mul_mat!(Vec2f, Mat4x2f, Vec4f, 0, 1, 2, 3);
 
-impl Vec2f {
-    pub const ZERO: Self = Self::new(0., 0.);
-
-    pub const fn new(x: f32, y: f32) -> Self {
-        Self([x, y])
-    }
-
-    pub const fn splat(v: f32) -> Self {
-        Self::new(v, v)
-    }
-}
-
-impl From<[f32; 2]> for Vec2f {
-    fn from(value: [f32; 2]) -> Self {
-        Self(value)
-    }
-}
-
 // === Vec3f ===
 
-// Declares a struct defined by the macro for consistent layout.
-// pub struct Vec3f ( [f32; 3] );
-my_wgsl_macros::decl_vec3f!();
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd)]
+pub struct Vec3f(pub [f32; 3]);
+
 impl_deref_mut!(Vec3f, [f32; 3]);
+impl_fmt!(Vec3f);
+impl_vec_constructor!(Vec3f, f32, 3, x, y, z);
 impl_vec_component_wise_arithmetic!(Vec3f, 0, 1, 2);
 impl_vec_component_wise_negation!(Vec3f, 0, 1, 2);
 impl_vec_scalar_arithmetic!(Vec3f, f32);
@@ -453,30 +470,15 @@ impl_vec_mul_mat!(Vec3f, Mat2x3f, Vec2f, 0, 1);
 impl_vec_mul_mat!(Vec3f, Mat3x3f, Vec3f, 0, 1, 2);
 impl_vec_mul_mat!(Vec3f, Mat4x3f, Vec4f, 0, 1, 2, 3);
 
-impl Vec3f {
-    pub const ZERO: Self = Self::new(0., 0., 0.);
-
-    pub const fn new(x: f32, y: f32, z: f32) -> Self {
-        Self([x, y, z])
-    }
-
-    pub const fn splat(v: f32) -> Self {
-        Self::new(v, v, v)
-    }
-}
-
-impl From<[f32; 3]> for Vec3f {
-    fn from(value: [f32; 3]) -> Self {
-        Self(value)
-    }
-}
-
 // === Vec4f ===
 
-// Declares a struct defined by the macro for consistent layout.
-// pub struct Vec4f ( [f32; 4] );
-my_wgsl_macros::decl_vec4f!();
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd)]
+pub struct Vec4f(pub [f32; 4]);
+
 impl_deref_mut!(Vec4f, [f32; 4]);
+impl_fmt!(Vec4f);
+impl_vec_constructor!(Vec4f, f32, 4, x, y, z, w);
 impl_vec_component_wise_arithmetic!(Vec4f, 0, 1, 2, 3);
 impl_vec_component_wise_negation!(Vec4f, 0, 1, 2, 3);
 impl_vec_scalar_arithmetic!(Vec4f, f32);
@@ -484,462 +486,148 @@ impl_vec_mul_mat!(Vec4f, Mat2x4f, Vec2f, 0, 1);
 impl_vec_mul_mat!(Vec4f, Mat3x4f, Vec3f, 0, 1, 2);
 impl_vec_mul_mat!(Vec4f, Mat4x4f, Vec4f, 0, 1, 2, 3);
 
-impl Vec4f {
-    pub const ZERO: Self = Self::new(0., 0., 0., 0.);
-
-    pub const fn new(x: f32, y: f32, z: f32, w: f32) -> Self {
-        Self([x, y, z, w])
-    }
-
-    pub const fn splat(v: f32) -> Self {
-        Self::new(v, v, v, v)
-    }
-}
-
-impl From<[f32; 4]> for Vec4f {
-    fn from(value: [f32; 4]) -> Self {
-        Self(value)
-    }
-}
-
-// === WideVec ===
-
-#[rustfmt::skip]
-macro_rules! impl_wide_vec_component_wise_arithmetic {
-    ($id:ty, $out:ty) => {
-        impl Add for $id {
-            type Output = $out;
-            fn add(self, rhs: Self) -> Self::Output { self.0 + rhs.0 }
-        }
-        impl Sub for $id {
-            type Output = $out;
-            fn sub(self, rhs: Self) -> Self::Output { self.0 - rhs.0 }
-        }
-        impl Mul for $id {
-            type Output = $out;
-            fn mul(self, rhs: Self) -> Self::Output { self.0 * rhs.0 }
-        }
-        impl Div for $id {
-            type Output = $out;
-            fn div(self, rhs: Self) -> Self::Output { self.0 / rhs.0 }
-        }
-        impl Rem for $id {
-            type Output = $out;
-            fn rem(self, rhs: Self) -> Self::Output { self.0 % rhs.0 }
-        }
-    };
-}
-
-#[rustfmt::skip]
-macro_rules! impl_wide_vec_component_wise_negation {
-    ($id:ty, $out:ty) => {
-        impl Neg for $id {
-            type Output = $out;
-            fn neg(self) -> Self::Output { -self.0 }
-        }
-    };
-}
-
-#[rustfmt::skip]
-macro_rules! impl_wide_vec_scalar_arithmetic {
-    ($id:ty, $v:ty, $s:ty) => {
-        impl Add<$s> for $id {
-            type Output = $v;
-            fn add(self, rhs: $s) -> Self::Output { self.0 + rhs }
-        }
-        impl Sub<$s> for $id {
-            type Output = $v;
-            fn sub(self, rhs: $s) -> Self::Output { self.0 - rhs }
-        }
-        impl Mul<$s> for $id {
-            type Output = $v;
-            fn mul(self, rhs: $s) -> Self::Output { self.0 * rhs }
-        }
-        impl Div<$s> for $id {
-            type Output = $v;
-            fn div(self, rhs: $s) -> Self::Output { self.0 / rhs }
-        }
-        impl Rem<$s> for $id {
-            type Output = $v;
-            fn rem(self, rhs: $s) -> Self::Output { self.0 % rhs }
-        }
-        impl Add<$id> for $s {
-            type Output = $v;
-            fn add(self, rhs: $id) -> Self::Output { self + rhs.0 }
-        }
-        impl Sub<$id> for $s {
-            type Output = $v;
-            fn sub(self, rhs: $id) -> Self::Output { self - rhs.0 }
-        }
-        impl Mul<$id> for $s {
-            type Output = $v;
-            fn mul(self, rhs: $id) -> Self::Output { self * rhs.0 }
-        }
-        impl Div<$id> for $s {
-            type Output = $v;
-            fn div(self, rhs: $id) -> Self::Output { self / rhs.0 }
-        }
-        impl Rem<$id> for $s {
-            type Output = $v;
-            fn rem(self, rhs: $id) -> Self::Output { self % rhs.0 }
-        }
-    };
-}
+// WideVec
+//
+// Why we need WideVec?
+//
+// * TLDR; Use Vec in structs. Use WideVec in arrays.
+//
+// - Clients can use Vec inside structs. This macro will append required pad
+//   fields after Vec fields to be compatible with WGSL.
+// - But, clients are disallowed to use Vec inside arrays. This macro cannot
+//   insert required pad siliently into the array elements.
+// - WideVec is forcefully aligned for WGSL, so that it can be used in arrays.
+// - Then, can clients use WideVec only? WGSL defines Vec3 to have 12 bytes
+//   size and 16 bytes alignment. So 4 bytes types can follow it and be packed
+//   with it for compact size. Unfortunately, Rust doesn't allow 12/16 layout
+//   like WGSL. Vec3 in Rust has 12/4 layout so that it can be packed with 4
+//   bytes types.
+// - Consequently, the macro will put pad fields in structs when it needed.
+//   But, the macro cannot do that in arrays, so clients need to use WideVec
+//   instead.
 
 // === WideVec2i ===
 
-// Declares structs defined by the macro for consistent layout.
-// #[repr(align(8))]
-// pub struct WideVec2i ( Vec2i );
-my_wgsl_macros::decl_wide_vec2i!();
+#[repr(align(8))]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd, Eq, Ord, Hash)]
+pub struct WideVec2i(pub Vec2i);
+
 impl_deref_mut!(WideVec2i, Vec2i);
+impl_fmt!(WideVec2i);
+impl_wide_vec_constructor!(WideVec2i, Vec2i, i32, 2, x, y);
 impl_wide_vec_component_wise_arithmetic!(WideVec2i, Vec2i);
 impl_wide_vec_component_wise_negation!(WideVec2i, Vec2i);
 impl_wide_vec_scalar_arithmetic!(WideVec2i, Vec2i, i32);
 
-impl WideVec2i {
-    pub const ZERO: Self = Self::new(0, 0);
-
-    pub const fn new(x: i32, y: i32) -> Self {
-        Self(Vec2i::new(x, y))
-    }
-
-    pub const fn splat(v: i32) -> Self {
-        Self::new(v, v)
-    }
-}
-
-impl From<[i32; 2]> for WideVec2i {
-    fn from(value: [i32; 2]) -> Self {
-        Self(Vec2i::from(value))
-    }
-}
-impl From<Vec2i> for WideVec2i {
-    fn from(value: Vec2i) -> Self {
-        Self(value)
-    }
-}
-impl From<WideVec2i> for Vec2i {
-    fn from(value: WideVec2i) -> Self {
-        value.0
-    }
-}
-
 // === WideVec3i ===
 
-// Declares structs defined by the macro for consistent layout.
-// #[repr(align(16))]
-// pub struct WideVec3i ( Vec3i );
-my_wgsl_macros::decl_wide_vec3i!();
+#[repr(align(16))]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd, Eq, Ord, Hash)]
+pub struct WideVec3i(pub Vec3i);
+
 impl_deref_mut!(WideVec3i, Vec3i);
+impl_fmt!(WideVec3i);
+impl_wide_vec_constructor!(WideVec3i, Vec3i, i32, 3, x, y, z);
 impl_wide_vec_component_wise_arithmetic!(WideVec3i, Vec3i);
 impl_wide_vec_component_wise_negation!(WideVec3i, Vec3i);
 impl_wide_vec_scalar_arithmetic!(WideVec3i, Vec3i, i32);
 
-impl WideVec3i {
-    pub const ZERO: Self = Self::new(0, 0, 0);
-
-    pub const fn new(x: i32, y: i32, z: i32) -> Self {
-        Self(Vec3i::new(x, y, z))
-    }
-
-    pub const fn splat(v: i32) -> Self {
-        Self::new(v, v, v)
-    }
-}
-
-impl From<[i32; 3]> for WideVec3i {
-    fn from(value: [i32; 3]) -> Self {
-        Self(Vec3i::from(value))
-    }
-}
-impl From<Vec3i> for WideVec3i {
-    fn from(value: Vec3i) -> Self {
-        Self(value)
-    }
-}
-impl From<WideVec3i> for Vec3i {
-    fn from(value: WideVec3i) -> Self {
-        value.0
-    }
-}
-
 // === WideVec4i ===
 
-// Declares structs defined by the macro for consistent layout.
-// #[repr(align(16))]
-// pub struct WideVec4i ( Vec4i );
-my_wgsl_macros::decl_wide_vec4i!();
+#[repr(align(16))]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd, Eq, Ord, Hash)]
+pub struct WideVec4i(pub Vec4i);
+
 impl_deref_mut!(WideVec4i, Vec4i);
+impl_fmt!(WideVec4i);
+impl_wide_vec_constructor!(WideVec4i, Vec4i, i32, 4, x, y, z, w);
 impl_wide_vec_component_wise_arithmetic!(WideVec4i, Vec4i);
 impl_wide_vec_component_wise_negation!(WideVec4i, Vec4i);
 impl_wide_vec_scalar_arithmetic!(WideVec4i, Vec4i, i32);
 
-impl WideVec4i {
-    pub const ZERO: Self = Self::new(0, 0, 0, 0);
-
-    pub const fn new(x: i32, y: i32, z: i32, w: i32) -> Self {
-        Self(Vec4i::new(x, y, z, w))
-    }
-
-    pub const fn splat(v: i32) -> Self {
-        Self::new(v, v, v, v)
-    }
-}
-
-impl From<[i32; 4]> for WideVec4i {
-    fn from(value: [i32; 4]) -> Self {
-        Self(Vec4i::from(value))
-    }
-}
-impl From<Vec4i> for WideVec4i {
-    fn from(value: Vec4i) -> Self {
-        Self(value)
-    }
-}
-impl From<WideVec4i> for Vec4i {
-    fn from(value: WideVec4i) -> Self {
-        value.0
-    }
-}
-
 // === WideVec2u ===
 
-// Declares structs defined by the macro for consistent layout.
-// #[repr(align(8))]
-// pub struct WideVec2u ( Vec2u );
-my_wgsl_macros::decl_wide_vec2u!();
+#[repr(align(8))]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd, Eq, Ord, Hash)]
+pub struct WideVec2u(pub Vec2u);
+
 impl_deref_mut!(WideVec2u, Vec2u);
+impl_fmt!(WideVec2u);
+impl_wide_vec_constructor!(WideVec2u, Vec2u, u32, 2, x, y);
 impl_wide_vec_component_wise_arithmetic!(WideVec2u, Vec2u);
 impl_wide_vec_scalar_arithmetic!(WideVec2u, Vec2u, u32);
 
-impl WideVec2u {
-    pub const ZERO: Self = Self::new(0, 0);
-
-    pub const fn new(x: u32, y: u32) -> Self {
-        Self(Vec2u::new(x, y))
-    }
-
-    pub const fn splat(v: u32) -> Self {
-        Self::new(v, v)
-    }
-}
-
-impl From<[u32; 2]> for WideVec2u {
-    fn from(value: [u32; 2]) -> Self {
-        Self(Vec2u::from(value))
-    }
-}
-impl From<Vec2u> for WideVec2u {
-    fn from(value: Vec2u) -> Self {
-        Self(value)
-    }
-}
-impl From<WideVec2u> for Vec2u {
-    fn from(value: WideVec2u) -> Self {
-        value.0
-    }
-}
-
 // === WideVec3u ===
 
-// Declares structs defined by the macro for consistent layout.
-// #[repr(align(16))]
-// pub struct WideVec3u ( Vec3u );
-my_wgsl_macros::decl_wide_vec3u!();
+#[repr(align(16))]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd, Eq, Ord, Hash)]
+pub struct WideVec3u(pub Vec3u);
+
 impl_deref_mut!(WideVec3u, Vec3u);
+impl_fmt!(WideVec3u);
+impl_wide_vec_constructor!(WideVec3u, Vec3u, u32, 3, x, y, z);
 impl_wide_vec_component_wise_arithmetic!(WideVec3u, Vec3u);
 impl_wide_vec_scalar_arithmetic!(WideVec3u, Vec3u, u32);
 
-impl WideVec3u {
-    pub const ZERO: Self = Self::new(0, 0, 0);
-
-    pub const fn new(x: u32, y: u32, z: u32) -> Self {
-        Self(Vec3u::new(x, y, z))
-    }
-
-    pub const fn splat(v: u32) -> Self {
-        Self::new(v, v, v)
-    }
-}
-
-impl From<[u32; 3]> for WideVec3u {
-    fn from(value: [u32; 3]) -> Self {
-        Self(Vec3u::from(value))
-    }
-}
-impl From<Vec3u> for WideVec3u {
-    fn from(value: Vec3u) -> Self {
-        Self(value)
-    }
-}
-impl From<WideVec3u> for Vec3u {
-    fn from(value: WideVec3u) -> Self {
-        value.0
-    }
-}
-
 // === WideVec4u ===
 
-// Declares structs defined by the macro for consistent layout.
-// #[repr(align(16))]
-// pub struct WideVec4u ( Vec4u );
-my_wgsl_macros::decl_wide_vec4u!();
+#[repr(align(16))]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd, Eq, Ord, Hash)]
+pub struct WideVec4u(pub Vec4u);
+
 impl_deref_mut!(WideVec4u, Vec4u);
+impl_fmt!(WideVec4u);
+impl_wide_vec_constructor!(WideVec4u, Vec4u, u32, 4, x, y, z, w);
 impl_wide_vec_component_wise_arithmetic!(WideVec4u, Vec4u);
 impl_wide_vec_scalar_arithmetic!(WideVec4u, Vec4u, u32);
 
-impl WideVec4u {
-    pub const ZERO: Self = Self::new(0, 0, 0, 0);
-
-    pub const fn new(x: u32, y: u32, z: u32, w: u32) -> Self {
-        Self(Vec4u::new(x, y, z, w))
-    }
-
-    pub const fn splat(v: u32) -> Self {
-        Self::new(v, v, v, v)
-    }
-}
-
-impl From<[u32; 4]> for WideVec4u {
-    fn from(value: [u32; 4]) -> Self {
-        Self(Vec4u::from(value))
-    }
-}
-impl From<Vec4u> for WideVec4u {
-    fn from(value: Vec4u) -> Self {
-        Self(value)
-    }
-}
-impl From<WideVec4u> for Vec4u {
-    fn from(value: WideVec4u) -> Self {
-        value.0
-    }
-}
-
 // === WideVec2f ===
 
-// Declares structs defined by the macro for consistent layout.
-// #[repr(align(8))]
-// pub struct WideVec2f ( Vec2f );
-my_wgsl_macros::decl_wide_vec2f!();
+#[repr(align(8))]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd)]
+pub struct WideVec2f(pub Vec2f);
+
 impl_deref_mut!(WideVec2f, Vec2f);
+impl_fmt!(WideVec2f);
+impl_wide_vec_constructor!(WideVec2f, Vec2f, f32, 2, x, y);
 impl_wide_vec_component_wise_arithmetic!(WideVec2f, Vec2f);
 impl_wide_vec_component_wise_negation!(WideVec2f, Vec2f);
 impl_wide_vec_scalar_arithmetic!(WideVec2f, Vec2f, f32);
 
-impl WideVec2f {
-    pub const ZERO: Self = Self::new(0., 0.);
-
-    pub const fn new(x: f32, y: f32) -> Self {
-        Self(Vec2f::new(x, y))
-    }
-
-    pub const fn splat(v: f32) -> Self {
-        Self::new(v, v)
-    }
-}
-
-impl From<[f32; 2]> for WideVec2f {
-    fn from(value: [f32; 2]) -> Self {
-        Self(Vec2f::from(value))
-    }
-}
-impl From<Vec2f> for WideVec2f {
-    fn from(value: Vec2f) -> Self {
-        Self(value)
-    }
-}
-impl From<WideVec2f> for Vec2f {
-    fn from(value: WideVec2f) -> Self {
-        value.0
-    }
-}
-
 // === WideVec3f ===
 
-// Declares structs defined by the macro for consistent layout.
-// #[repr(align(16))]
-// pub struct WideVec3f ( Vec3f );
-my_wgsl_macros::decl_wide_vec3f!();
+#[repr(align(16))]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd)]
+pub struct WideVec3f(pub Vec3f);
+
 impl_deref_mut!(WideVec3f, Vec3f);
+impl_fmt!(WideVec3f);
+impl_wide_vec_constructor!(WideVec3f, Vec3f, f32, 3, x, y, z);
 impl_wide_vec_component_wise_arithmetic!(WideVec3f, Vec3f);
 impl_wide_vec_component_wise_negation!(WideVec3f, Vec3f);
 impl_wide_vec_scalar_arithmetic!(WideVec3f, Vec3f, f32);
 
-impl WideVec3f {
-    pub const ZERO: Self = Self::new(0., 0., 0.);
-
-    pub const fn new(x: f32, y: f32, z: f32) -> Self {
-        Self(Vec3f::new(x, y, z))
-    }
-
-    pub const fn splat(v: f32) -> Self {
-        Self::new(v, v, v)
-    }
-}
-
-impl From<[f32; 3]> for WideVec3f {
-    fn from(value: [f32; 3]) -> Self {
-        Self(Vec3f::from(value))
-    }
-}
-impl From<Vec3f> for WideVec3f {
-    fn from(value: Vec3f) -> Self {
-        Self(value)
-    }
-}
-impl From<WideVec3f> for Vec3f {
-    fn from(value: WideVec3f) -> Self {
-        value.0
-    }
-}
-
 // === WideVec4f ===
 
-// Declares structs defined by the macro for consistent layout.
-// #[repr(align(16))]
-// pub struct WideVec4f ( Vec4f );
-my_wgsl_macros::decl_wide_vec4f!();
+#[repr(align(16))]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd)]
+pub struct WideVec4f(pub Vec4f);
+
 impl_deref_mut!(WideVec4f, Vec4f);
+impl_fmt!(WideVec4f);
+impl_wide_vec_constructor!(WideVec4f, Vec4f, f32, 4, x, y, z, w);
 impl_wide_vec_component_wise_arithmetic!(WideVec4f, Vec4f);
 impl_wide_vec_component_wise_negation!(WideVec4f, Vec4f);
 impl_wide_vec_scalar_arithmetic!(WideVec4f, Vec4f, f32);
 
-impl WideVec4f {
-    pub const ZERO: Self = Self::new(0., 0., 0., 0.);
-
-    pub const fn new(x: f32, y: f32, z: f32, w: f32) -> Self {
-        Self(Vec4f::new(x, y, z, w))
-    }
-
-    pub const fn splat(v: f32) -> Self {
-        Self::new(v, v, v, v)
-    }
-}
-
-impl From<[f32; 4]> for WideVec4f {
-    fn from(value: [f32; 4]) -> Self {
-        Self(Vec4f::from(value))
-    }
-}
-impl From<Vec4f> for WideVec4f {
-    fn from(value: Vec4f) -> Self {
-        Self(value)
-    }
-}
-impl From<WideVec4f> for Vec4f {
-    fn from(value: WideVec4f) -> Self {
-        value.0
-    }
-}
-
 // === Mat2x2f ===
 
-// Declares structs defined by the macro for consistent layout.
-// pub struct Mat2x2f ( [WideVec2f; 2] )
-my_wgsl_macros::decl_mat2x2f!();
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd)]
+pub struct Mat2x2f(pub [WideVec2f; 2]);
+
 impl_deref_mut!(Mat2x2f, [WideVec2f; 2]);
+impl_fmt!(Mat2x2f);
 impl_from_arr_for_mat!(C = 2, R = 2, Cols = 0, 1);
 impl_mat_component_wise_arithmetic!(Mat2x2f, 0, 1);
 impl_mat_mul_scalar!(Mat2x2f, f32, 0, 1);
@@ -961,10 +649,12 @@ impl Mat2x2f {
 
 // === Mat2x3f ===
 
-// Declares structs defined by the macro for consistent layout.
-// pub struct Mat2x3f ( [WideVec3f; 2] )
-my_wgsl_macros::decl_mat2x3f!();
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd)]
+pub struct Mat2x3f(pub [WideVec3f; 2]);
+
 impl_deref_mut!(Mat2x3f, [WideVec3f; 2]);
+impl_fmt!(Mat2x3f);
 impl_from_arr_for_mat!(C = 2, R = 3, Cols = 0, 1);
 impl_mat_component_wise_arithmetic!(Mat2x3f, 0, 1);
 impl_mat_mul_scalar!(Mat2x3f, f32, 0, 1);
@@ -985,10 +675,12 @@ impl Mat2x3f {
 
 // === Mat2x4f ===
 
-// Declares structs defined by the macro for consistent layout.
-// pub struct Mat2x4f ( [WideVec4f; 2] )
-my_wgsl_macros::decl_mat2x4f!();
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd)]
+pub struct Mat2x4f(pub [WideVec4f; 2]);
+
 impl_deref_mut!(Mat2x4f, [WideVec4f; 2]);
+impl_fmt!(Mat2x4f);
 impl_from_arr_for_mat!(C = 2, R = 4, Cols = 0, 1);
 impl_mat_component_wise_arithmetic!(Mat2x4f, 0, 1);
 impl_mat_mul_scalar!(Mat2x4f, f32, 0, 1);
@@ -1009,10 +701,12 @@ impl Mat2x4f {
 
 // === Mat3x2f ===
 
-// Declares structs defined by the macro for consistent layout.
-// pub struct Mat3x2f ( [WideVec2f; 3] )
-my_wgsl_macros::decl_mat3x2f!();
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd)]
+pub struct Mat3x2f(pub [WideVec2f; 3]);
+
 impl_deref_mut!(Mat3x2f, [WideVec2f; 3]);
+impl_fmt!(Mat3x2f);
 impl_from_arr_for_mat!(C = 3, R = 2, Cols = 0, 1, 2);
 impl_mat_component_wise_arithmetic!(Mat3x2f, 0, 1, 2);
 impl_mat_mul_scalar!(Mat3x2f, f32, 0, 1, 2);
@@ -1033,10 +727,12 @@ impl Mat3x2f {
 
 // === Mat3x3f ===
 
-// Declares structs defined by the macro for consistent layout.
-// pub struct Mat3x3f ( [WideVec3f; 3] )
-my_wgsl_macros::decl_mat3x3f!();
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd)]
+pub struct Mat3x3f(pub [WideVec3f; 3]);
+
 impl_deref_mut!(Mat3x3f, [WideVec3f; 3]);
+impl_fmt!(Mat3x3f);
 impl_from_arr_for_mat!(C = 3, R = 3, Cols = 0, 1, 2);
 impl_mat_component_wise_arithmetic!(Mat3x3f, 0, 1, 2);
 impl_mat_mul_scalar!(Mat3x3f, f32, 0, 1, 2);
@@ -1062,10 +758,12 @@ impl Mat3x3f {
 
 // === Mat3x4f ===
 
-// Declares structs defined by the macro for consistent layout.
-// pub struct Mat3x4f ( [WideVec4f; 3] )
-my_wgsl_macros::decl_mat3x4f!();
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd)]
+pub struct Mat3x4f(pub [WideVec4f; 3]);
+
 impl_deref_mut!(Mat3x4f, [WideVec4f; 3]);
+impl_fmt!(Mat3x4f);
 impl_from_arr_for_mat!(C = 3, R = 4, Cols = 0, 1, 2);
 impl_mat_component_wise_arithmetic!(Mat3x4f, 0, 1, 2);
 impl_mat_mul_scalar!(Mat3x4f, f32, 0, 1, 2);
@@ -1086,10 +784,12 @@ impl Mat3x4f {
 
 // === Mat4x2f ===
 
-// Declares structs defined by the macro for consistent layout.
-// pub struct Mat4x2f ( [WideVec2f; 4] )
-my_wgsl_macros::decl_mat4x2f!();
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd)]
+pub struct Mat4x2f(pub [WideVec2f; 4]);
+
 impl_deref_mut!(Mat4x2f, [WideVec2f; 4]);
+impl_fmt!(Mat4x2f);
 impl_from_arr_for_mat!(C = 4, R = 2, Cols = 0, 1, 2, 3);
 impl_mat_component_wise_arithmetic!(Mat4x2f, 0, 1, 2, 3);
 impl_mat_mul_scalar!(Mat4x2f, f32, 0, 1, 2, 3);
@@ -1113,10 +813,12 @@ impl Mat4x2f {
 
 // === Mat4x3f ===
 
-// Declares structs defined by the macro for consistent layout.
-// pub struct Mat4x3f ( [WideVec3f; 4] )
-my_wgsl_macros::decl_mat4x3f!();
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd)]
+pub struct Mat4x3f(pub [WideVec3f; 4]);
+
 impl_deref_mut!(Mat4x3f, [WideVec3f; 4]);
+impl_fmt!(Mat4x3f);
 impl_from_arr_for_mat!(C = 4, R = 3, Cols = 0, 1, 2, 3);
 impl_mat_component_wise_arithmetic!(Mat4x3f, 0, 1, 2, 3);
 impl_mat_mul_scalar!(Mat4x3f, f32, 0, 1, 2, 3);
@@ -1140,10 +842,12 @@ impl Mat4x3f {
 
 // === Mat4x4f ===
 
-// Declares structs defined by the macro for consistent layout.
-// pub struct Mat4x4f ( [WideVec4f; 4] )
-my_wgsl_macros::decl_mat4x4f!();
+#[repr(transparent)]
+#[derive(Clone, Copy, Default, PartialEq, PartialOrd)]
+pub struct Mat4x4f(pub [WideVec4f; 4]);
+
 impl_deref_mut!(Mat4x4f, [WideVec4f; 4]);
+impl_fmt!(Mat4x4f);
 impl_from_arr_for_mat!(C = 4, R = 4, Cols = 0, 1, 2, 3);
 impl_mat_component_wise_arithmetic!(Mat4x4f, 0, 1, 2, 3);
 impl_mat_mul_scalar!(Mat4x4f, f32, 0, 1, 2, 3);

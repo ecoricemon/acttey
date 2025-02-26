@@ -104,7 +104,7 @@ impl WgslStruct {
 }
 
 impl ConstructWgslCode for WgslStruct {
-    fn write_wgsl_code(&self, buf: &mut String) {
+    fn write_wgsl_string(&self, buf: &mut String) {
         buf.push_str("struct ");
         buf.push_str(self.ident.as_str());
         buf.push('{');
@@ -166,7 +166,7 @@ impl StructMember {
 }
 
 impl ConstructWgslCode for StructMember {
-    fn write_wgsl_code(&self, buf: &mut String) {
+    fn write_wgsl_string(&self, buf: &mut String) {
         util::put_attrs(self.attrs.iter(), buf);
         buf.push_str(self.ident.as_str());
         buf.push(':');

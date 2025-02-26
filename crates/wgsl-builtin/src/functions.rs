@@ -1,6 +1,6 @@
 // Use SIMD? Not convinced yet. Consider when portable SIMD becomes stable.
 
-use super::builtin_types::{
+use super::types::{
     Mat2x2f, Mat2x3f, Mat2x4f, Mat3x2f, Mat3x3f, Mat3x4f, Mat4x2f, Mat4x3f, Mat4x4f, Vec2f, Vec2i,
     Vec2u, Vec3f, Vec3i, Vec3u, Vec4f, Vec4i, Vec4u,
 };
@@ -110,17 +110,6 @@ impl WgslDeterminant for Mat4x4f {
 pub trait WgslDot {
     type Output;
 
-    /// Returns dot product.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use my_wgsl::*;
-    ///
-    /// let a = Vec2i::new(1, 2);
-    /// let b = Vec2i::new(3, 4);
-    /// assert_eq!(a.dot(b), 11);
-    /// ```
     #[must_use]
     fn dot(self, rhs: Self) -> Self::Output;
 }

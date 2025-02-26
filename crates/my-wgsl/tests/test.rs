@@ -8,104 +8,104 @@ fn test_struct_size_align() {
         use super::*;
 
         pub(super) struct S0 { a: Bool }
-        pub(super) const S0_SIZE_ALIGN: (usize, usize) = (4, 4);
+        #[hide] pub(super) const S0_SIZE_ALIGN: (usize, usize) = (4, 4);
 
         pub(super) struct S1 { a: i32 }
-        pub(super) const S1_SIZE_ALIGN: (usize, usize) = (4, 4);
+        #[hide] pub(super) const S1_SIZE_ALIGN: (usize, usize) = (4, 4);
 
         pub(super) struct S2 { a: u32 }
-        pub(super) const S2_SIZE_ALIGN: (usize, usize) = (4, 4);
+        #[hide] pub(super) const S2_SIZE_ALIGN: (usize, usize) = (4, 4);
 
         pub(super) struct S3 { a: f32 }
-        pub(super) const S3_SIZE_ALIGN: (usize, usize) = (4, 4);
+        #[hide] pub(super) const S3_SIZE_ALIGN: (usize, usize) = (4, 4);
 
         pub(super) struct S4 { a: Bool, b: u32 }
-        pub(super) const S4_SIZE_ALIGN: (usize, usize) = (8, 4);
+        #[hide] pub(super) const S4_SIZE_ALIGN: (usize, usize) = (8, 4);
 
         pub(super) struct S5 { a: f32, b: u32 }
-        pub(super) const S5_SIZE_ALIGN: (usize, usize) = (8, 4);
+        #[hide] pub(super) const S5_SIZE_ALIGN: (usize, usize) = (8, 4);
 
         pub(super) struct S6 { a: Vec2i }
-        pub(super) const S6_SIZE_ALIGN: (usize, usize) = (8, 8);
+        #[hide] pub(super) const S6_SIZE_ALIGN: (usize, usize) = (8, 8);
 
         pub(super) struct S7 { a: Vec3i }
-        pub(super) const S7_SIZE_ALIGN: (usize, usize) = (16, 16);
+        #[hide] pub(super) const S7_SIZE_ALIGN: (usize, usize) = (16, 16);
 
         pub(super) struct S8 { a: Vec4i }
-        pub(super) const S8_SIZE_ALIGN: (usize, usize) = (16, 16);
+        #[hide] pub(super) const S8_SIZE_ALIGN: (usize, usize) = (16, 16);
 
         pub(super) struct S9 { a: Vec2u }
-        pub(super) const S9_SIZE_ALIGN: (usize, usize) = (8, 8);
+        #[hide] pub(super) const S9_SIZE_ALIGN: (usize, usize) = (8, 8);
 
         pub(super) struct S10 { a: Vec3u }
-        pub(super) const S10_SIZE_ALIGN: (usize, usize) = (16, 16);
+        #[hide] pub(super) const S10_SIZE_ALIGN: (usize, usize) = (16, 16);
 
         pub(super) struct S11 { a: Vec4u }
-        pub(super) const S11_SIZE_ALIGN: (usize, usize) = (16, 16);
+        #[hide] pub(super) const S11_SIZE_ALIGN: (usize, usize) = (16, 16);
 
         pub(super) struct S12 { a: Vec2f }
-        pub(super) const S12_SIZE_ALIGN: (usize, usize) = (8, 8);
+        #[hide] pub(super) const S12_SIZE_ALIGN: (usize, usize) = (8, 8);
 
         pub(super) struct S13 { a: Vec3f }
-        pub(super) const S13_SIZE_ALIGN: (usize, usize) = (16, 16);
+        #[hide] pub(super) const S13_SIZE_ALIGN: (usize, usize) = (16, 16);
 
         pub(super) struct S14 { a: Vec4f }
-        pub(super) const S14_SIZE_ALIGN: (usize, usize) = (16, 16);
+        #[hide] pub(super) const S14_SIZE_ALIGN: (usize, usize) = (16, 16);
 
         pub(super) struct S15 { a: Vec3i, b: u32 }
-        pub(super) const S15_SIZE_ALIGN: (usize, usize) = (16, 16);
+        #[hide] pub(super) const S15_SIZE_ALIGN: (usize, usize) = (16, 16);
 
         pub(super) struct S16 { a: Vec3u, b: u32 }
-        pub(super) const S16_SIZE_ALIGN: (usize, usize) = (16, 16);
+        #[hide] pub(super) const S16_SIZE_ALIGN: (usize, usize) = (16, 16);
 
         pub(super) struct S17 { a: Vec3f, b: u32 }
-        pub(super) const S17_SIZE_ALIGN: (usize, usize) = (16, 16);
+        #[hide] pub(super) const S17_SIZE_ALIGN: (usize, usize) = (16, 16);
 
         pub(super) struct S18 { a: S12, b: S13 }
-        pub(super) const S18_SIZE_ALIGN: (usize, usize) = (32, 16);
+        #[hide] pub(super) const S18_SIZE_ALIGN: (usize, usize) = (32, 16);
 
         pub(super) struct S19 { a: Mat2x2f }
-        pub(super) const S19_SIZE_ALIGN: (usize, usize) = (16, 8);
+        #[hide] pub(super) const S19_SIZE_ALIGN: (usize, usize) = (16, 8);
 
         pub(super) struct S20 { a: Mat2x3f }
-        pub(super) const S20_SIZE_ALIGN: (usize, usize) = (32, 16);
+        #[hide] pub(super) const S20_SIZE_ALIGN: (usize, usize) = (32, 16);
 
         pub(super) struct S21 { a: Mat2x4f }
-        pub(super) const S21_SIZE_ALIGN: (usize, usize) = (32, 16);
+        #[hide] pub(super) const S21_SIZE_ALIGN: (usize, usize) = (32, 16);
 
         pub(super) struct S22 { a: Mat3x2f }
-        pub(super) const S22_SIZE_ALIGN: (usize, usize) = (24, 8);
+        #[hide] pub(super) const S22_SIZE_ALIGN: (usize, usize) = (24, 8);
 
         pub(super) struct S23 { a: Mat3x3f }
-        pub(super) const S23_SIZE_ALIGN: (usize, usize) = (48, 16);
+        #[hide] pub(super) const S23_SIZE_ALIGN: (usize, usize) = (48, 16);
 
         pub(super) struct S24 { a: Mat3x4f }
-        pub(super) const S24_SIZE_ALIGN: (usize, usize) = (48, 16);
+        #[hide] pub(super) const S24_SIZE_ALIGN: (usize, usize) = (48, 16);
 
         pub(super) struct S25 { a: Mat4x2f }
-        pub(super) const S25_SIZE_ALIGN: (usize, usize) = (32, 8);
+        #[hide] pub(super) const S25_SIZE_ALIGN: (usize, usize) = (32, 8);
 
         pub(super) struct S26 { a: Mat4x3f }
-        pub(super) const S26_SIZE_ALIGN: (usize, usize) = (64, 16);
+        #[hide] pub(super) const S26_SIZE_ALIGN: (usize, usize) = (64, 16);
 
         pub(super) struct S27 { a: Mat4x4f }
-        pub(super) const S27_SIZE_ALIGN: (usize, usize) = (64, 16);
+        #[hide] pub(super) const S27_SIZE_ALIGN: (usize, usize) = (64, 16);
 
         pub(super) struct S28 { a: [Bool; 3] }
-        pub(super) const S28_SIZE_ALIGN: (usize, usize) = (12, 4);
+        #[hide] pub(super) const S28_SIZE_ALIGN: (usize, usize) = (12, 4);
 
         pub(super) struct S29 { a: [f32; 3] }
-        pub(super) const S29_SIZE_ALIGN: (usize, usize) = (12, 4);
+        #[hide] pub(super) const S29_SIZE_ALIGN: (usize, usize) = (12, 4);
 
         pub(super) struct S30 { a: [[f32; 3]; 3] }
-        pub(super) const S30_SIZE_ALIGN: (usize, usize) = (36, 4);
+        #[hide] pub(super) const S30_SIZE_ALIGN: (usize, usize) = (36, 4);
 
         pub(super) struct S31 { a: [S30; 3] }
-        pub(super) const S31_SIZE_ALIGN: (usize, usize) = 
+        #[hide] pub(super) const S31_SIZE_ALIGN: (usize, usize) = 
             (S30_SIZE_ALIGN.0 * 3, S30_SIZE_ALIGN.1);
 
         #[uniform] pub(super) struct S32 { a: f32 }
-        pub(super) const S32_SIZE_ALIGN: (usize, usize) = (16, 16);
+        #[hide] pub(super) const S32_SIZE_ALIGN: (usize, usize) = (16, 16);
 
         pub(super) struct S100 { a: crate::Mat4x4f }
     }
@@ -160,6 +160,14 @@ fn test_struct_offset() {
         struct S5 { a: Vec2i, b: Vec3i, c: [WideVec3i; 2] }
         pub(super) fn s5() { assert_eq!(offset_of!(S5, b), 16) }
         pub(super) fn s6() { assert_eq!(offset_of!(S5, c), 32) }
+
+        struct S6 { a: [i32; 2], b: Vec3i }
+        pub(super) fn s7() { assert_eq!(offset_of!(S6, b), 16) }
+
+        const C0: usize = 1;
+        const C1: usize = C0 + 1;
+        struct S7 { a: [i32; C1], b: Vec3i }
+        pub(super) fn s8() { assert_eq!(offset_of!(S7, b), 16) }
     }
     use m::*;
 
@@ -173,7 +181,7 @@ fn test_struct_offset() {
         };
     }
 
-    assert_offset_many!(0, 1, 2, 3, 4, 5, 6);
+    assert_offset_many!(0, 1, 2, 3, 4, 5, 6, 7, 8);
 }
 
 #[test]
@@ -296,4 +304,61 @@ fn test_runtime_sized_array_in_struct() {
         assert_eq!(s_bytes[c2_start..c2_end], raw_bytes[c2_start..c2_end]);
     }
     test_as_bytes();
+}
+
+#[test]
+#[rustfmt::skip]
+fn test_wgsl_code() {
+    #[wgsl_mod]
+    mod a { 
+        const A: usize = 1; 
+        struct B { b: [f32; A] }
+        const C: [[i32; 2]; 2] = [[0, 1], [2, 3]];
+    }
+
+    assert_code_eq(
+        WgslModule::of::<a::Module>().build(),
+        a::Module::WGSL, 
+        "
+        const A = 1;
+        struct B { b: array<f32, A> }
+        const C: array<array<i32,2>,2> = array(array(0, 1), array(2, 3));
+        "
+    );
+
+    #[wgsl_mod]
+    mod b {
+        use my_wgsl::*;
+        const A: Vec2i = Vec2i::new(0, 1);
+        const B: Vec2i = Vec2i::splat(2);
+        const C: Vec2i = Vec2i::ZERO;
+        const D: Mat2x2f = Mat2x2f::new(Vec2f::new(0., 1.), Vec2f::new(2., 3.));
+        const E: Mat2x2f = Mat2x2f::ZERO;
+        const F: Mat2x2f = Mat2x2f::IDENTITY;
+    }
+
+    assert_code_eq(
+        WgslModule::of::<b::Module>().build(),
+        b::Module::WGSL,
+        "
+        const A: vec2i = vec2i(0, 1);
+        const B: vec2i = vec2i(2);
+        const C: vec2i = vec2i();
+        const D: mat2x2f = mat2x2f(vec2f(0., 1.), vec2f(2., 3.));
+        const E: mat2x2f = mat2x2f(0, 0, 0, 0);
+        const F: mat2x2f = mat2x2f(1, 0, 0, 1);
+        "
+    );
+}
+
+fn assert_code_eq(mut r: String, c: &str, e: &str) {
+    let mut c = c.to_owned();
+    let mut e = e.to_owned();
+
+    r.retain(|c| !c.is_whitespace());
+    c.retain(|c| !c.is_whitespace());
+    e.retain(|c| !c.is_whitespace());
+
+    pretty_assertions::assert_eq!(r, e);
+    pretty_assertions::assert_eq!(c, e);
 }

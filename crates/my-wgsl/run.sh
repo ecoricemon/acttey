@@ -11,7 +11,6 @@ help() {
     echo "arguments:"
     echo "  -r    : Release mode."
     echo "  -a    : Debug & Release modes."
-    echo "  -tsan : Test with thread sanitizer. Available with test only."
     echo "  -R    : Run recursively."
     exit 1
 }
@@ -80,21 +79,6 @@ test_release() {
         if [ $ret -ne 0 ]; then
             exit $ret
         fi
-    fi
-}
-
-test_tsan() {
-    local ret=0
-}
-
-test_repeat() {
-    local ret=0
-
-    print_title "Repeat test"
-    REPEAT=1 cargo test --tests -r --target $(get_host_triple)
-    ret=$?
-    if [ $ret -ne 0 ]; then
-        exit $ret
     fi
 }
 
@@ -184,14 +168,8 @@ cmd=${all_args[0]}
 
 case $cmd in
     test)
-        if [ "$test_kind" == "tsan" ]; then
-            test_tsan
-        elif [ "$test_kind" == "rep" ]; then
-            test_repeat
-        else
-            test_debug
-            test_release
-        fi
+        test_debug
+        test_release
         ;;
     doc)
         test_doc
@@ -202,7 +180,7 @@ case $cmd in
     all)
         test_doc
         test_debug
-        test_repeat
+        test_release
         run_examples
         ;;
     clean)

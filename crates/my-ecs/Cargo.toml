@@ -26,7 +26,7 @@ stat = []
 # ====================
 
 [dependencies]
-my-ecs-macros = { version = "0.1.0", path = "src/macros" }
+my-ecs-macros = { version = "0.1.0", path = "../my-ecs-macros" }
 paste = { version = "1.0.14" }
 thiserror = { version = "2.0.3" }
 crossbeam-deque = { version = "0.8.5" }

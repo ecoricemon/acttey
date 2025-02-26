@@ -29,8 +29,8 @@ mod m {
 
 ## Bytes representation
 
-Structs are required to be represented as `&[u8]` in order to be written in GPU
-buffers. This crate provides a method for each struct for the bytes
+Structs are required to be represented as `&[u8]` in order to be written into
+GPU buffers. This crate provides a method for each struct for the bytes
 representation. The function can return `&[u8]` without copy because the structs
 have the same layout as WGSL due to padding insertion.
 
@@ -100,15 +100,13 @@ assert_eq!(s.get_b(), &[WideVec2i::splat(1)]);
 
 Structs can be declared across multiple modules and imported from other modules.
 But because type layout information cannot cross module boundary, you need to
-let the crate know the information like this.
+let the crate know the information via `extern_type!`.
 
 ```rust ignore
 use my_wgsl::*;
 
 #[wgsl_mod]
 mod a {
-    use my_wgsl::*;
-
     pub struct A { a: f32 }
 }
 
@@ -119,7 +117,7 @@ mod b {
 
     // A's size and alignment are 4 bytes each. There is compile time validation
     // as well, so that you will notice whenever you make changes to the type.
-    layout!(A, 4, 4);
+    extern_type!(A, 4, 4);
 
     struct B { a: A }
 }
@@ -131,9 +129,10 @@ This crate makes WGSL code as is, which is of type `&'static str`, at compile
 time.
 
 ```rust ignore
+use my_wgsl::*;
+
 #[wgsl_mod]
 mod a {
-    use my_wgsl::*;
     pub struct A { a: f32 }
 }
 
@@ -163,7 +162,6 @@ use my_wgsl::*;
 
 #[wgsl_mod]
 mod a {
-    use my_wgsl::*;
     pub struct A { a: f32 }
 }
 
@@ -180,3 +178,9 @@ let builder: WgslModule = (a::Module, b::Module).into();
 let code: String = builder.build();
 println!("{code}"); // struct A {..} struct B {..}
 ```
+
+## Examples
+
+Here are more examples.
+
+* [variable](examples/var.rs)
