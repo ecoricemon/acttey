@@ -11,7 +11,7 @@ use crate::{
         SimpleHolder, TypeInfo,
     },
     ecs::EcsError,
-    util::{macros::debug_format, With},
+    util::{With, macros::debug_format},
 };
 use std::{
     any::TypeId,

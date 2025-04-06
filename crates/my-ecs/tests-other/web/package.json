@@ -4,7 +4,7 @@
   "name": "tester",
   "version": "0.0.0",
   "scripts": {
-    "wasm-common": "cross-env RUSTFLAGS=\"-C target-feature=+atomics,+bulk-memory,+mutable-globals\" rustup run nightly wasm-pack build --target web --out-name wasm-index --out-dir pkg .",
+    "wasm-common": "cross-env RUSTFLAGS=\"-C target-feature=+atomics,+bulk-memory,+mutable-globals\" rustup run nightly-2025-01-03 wasm-pack build --target web --out-name wasm-index --out-dir pkg .",
     "wasm-d": "npm run wasm-common -- --dev -Z build-std=panic_abort,std",
     "wasm-r": "npm run wasm-common -- --release -Z build-std=panic_abort,std",
     "bundle-d": "vite build --mode development",

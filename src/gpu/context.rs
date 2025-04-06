@@ -1,4 +1,4 @@
-use crate::{util::macros::debug_format, ActteyError};
+use crate::{ActteyError, util::macros::debug_format};
 use my_ecs::prelude::Resource;
 use std::sync::Arc;
 

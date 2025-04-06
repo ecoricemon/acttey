@@ -1,7 +1,8 @@
 [package]
 name = "my-wgsl"
 version = "0.1.3"
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
 description = "A WGSL generation library from Rust"
 documentation = "https://docs.rs/my-wgsl"
 readme = "README.md" 

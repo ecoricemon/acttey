@@ -349,6 +349,23 @@ fn test_wgsl_code() {
         const F: mat2x2f = mat2x2f(1, 0, 0, 1);
         "
     );
+
+    #[wgsl_mod]
+    mod c {
+        struct St {
+            a: i32
+        }
+        const A: St = St::new(0);
+    }
+
+    assert_code_eq(
+        WgslModule::of::<c::Module>().build(),
+        c::Module::WGSL,
+        "
+        struct St { a: i32 }
+        const A: St = St(0);
+        "
+    );
 }
 
 fn assert_code_eq(mut r: String, c: &str, e: &str) {

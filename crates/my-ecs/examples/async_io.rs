@@ -9,7 +9,7 @@ fn main() {}
 
 #[cfg(not(target_arch = "wasm32"))]
 mod non_web {
-    use futures::{channel::oneshot, select, FutureExt};
+    use futures::{FutureExt, channel::oneshot, select};
     use my_ecs::prelude::*;
     use std::{
         thread,

@@ -1,42 +1,32 @@
 use super::{attr::*, externs::*, structs::*, traits::*, util::*, var::*};
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{quote, ToTokens, TokenStreamExt};
+use quote::{ToTokens, TokenStreamExt, quote};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashMap},
     ops::{Deref, DerefMut},
 };
 use syn::{
-    parse2, parse_quote, spanned::Spanned, Attribute, Error, Expr, Ident, Item, ItemConst, ItemMod,
-    Result, Type, TypePath, Visibility,
+    Error, Expr, Ident, Item, ItemConst, Result, Token, Type, TypePath, Visibility, braced,
+    parse::{Parse, ParseStream},
+    parse_quote, parse2,
+    spanned::Spanned,
+    token::Brace,
 };
 use wgsl_builtin::{helper::*, prelude::*};
 
 #[derive(Debug)]
 pub(crate) struct WgslMod {
-    attrs: Vec<Attribute>,
+    attrs: WgslAttributes,
     vis: Visibility,
+    mod_token: Token![mod],
     ident: Ident,
+    brace_token: Brace,
     items: Vec<WgslItem>,
     memo: RefCell<Memo>,
 }
 
 impl WgslMod {
-    pub(crate) fn new(module: ItemMod) -> Result<Self> {
-        let mut this = Self {
-            attrs: module.attrs,
-            vis: module.vis,
-            ident: module.ident,
-            items: Vec::new(),
-            memo: RefCell::new(Memo::new()),
-        };
-
-        let items = module.content.map(|(_, items)| items).unwrap_or_default();
-        this.extend_items(items)?;
-
-        Ok(this)
-    }
-
     fn extend_items(&mut self, items: Vec<Item>) -> Result<()> {
         // Bypasses hidden items.
         let mut input: BTreeMap<usize, Item> = items.into_iter().enumerate().collect();
@@ -138,11 +128,7 @@ impl WgslMod {
                     return Ok(value);
                 }
 
-                let mut reason = format!("`{ident}` is unknown in this module");
-                if let Some(s) = self.find_similar_const_ident(ident) {
-                    reason.push_str(&format!(". did you mean `{s}`?"));
-                }
-                Err(Error::new(ident.span(), reason))
+                Ok(MemoValue::UnknownConst)
             },
         };
 
@@ -202,12 +188,10 @@ impl WgslMod {
                             Err(Error::new(ident.span(), "could not find layout"))
                         }
                     };
-                    let find_len = |ident: &Ident| {
-                        if let MemoValue::Int(int) = (h.f)(h, ident, uni)? {
-                            Ok(int as usize)
-                        } else {
-                            Err(Error::new(ident.span(), "not an integer"))
-                        }
+                    let find_len = |ident: &Ident| match (h.f)(h, ident, uni)? {
+                        MemoValue::Int(v) => Ok(Some(v as usize)),
+                        MemoValue::UnknownConst => Ok(None),
+                        _ => Err(Error::new(ident.span(), "not an integer")),
                     };
                     let st = WgslStruct::new(st, uni, find_layout, find_len)?;
                     let value = MemoValue::Layout {
@@ -219,11 +203,19 @@ impl WgslMod {
                     return Ok(value);
                 }
 
-                let mut reason = format!("`{ident}` is unknown in this module");
                 if let Some(s) = self.find_similar_type_ident(ident) {
-                    reason.push_str(&format!(". did you mean `{s}`?"));
+                    let reason = format!(
+                        "unknown symbol in this module. did you mean `{s}`? or consider using `{EXTERN_TYPE}!`"
+                    );
+                    Err(Error::new(ident.span(), reason))
+                } else {
+                    let reason = const_format::concatcp!(
+                        "unknown symbol in this module. consider using `",
+                        EXTERN_TYPE,
+                        "!`"
+                    );
+                    Err(Error::new(ident.span(), reason))
                 }
-                Err(Error::new(ident.span(), reason))
             },
         };
 
@@ -260,28 +252,6 @@ impl WgslMod {
         }
 
         Ok(())
-    }
-
-    fn find_similar_const_ident(&self, target: &Ident) -> Option<String> {
-        let target = target.to_string();
-        let mut max_score = 0.0;
-        let mut max_ident = String::new();
-
-        for (ident, _) in self
-            .memo
-            .borrow()
-            .iter()
-            .filter(|(_, v)| matches!(v, MemoValue::Int(_) | MemoValue::Float(_)))
-        {
-            let known = ident.to_string();
-            let score = Self::calc_similarity(&target, &known);
-            if score > max_score {
-                max_score = score;
-                max_ident = known;
-            }
-        }
-
-        (max_score > 0.5).then_some(max_ident)
     }
 
     fn find_similar_type_ident(&self, target: &Ident) -> Option<String> {
@@ -335,25 +305,48 @@ impl WgslMod {
     }
 }
 
-impl ToTokens for WgslMod {
-    fn to_tokens(&self, tokens: &mut TokenStream2) {
-        let Self {
+impl Parse for WgslMod {
+    fn parse(input: ParseStream) -> Result<Self> {
+        let mut attrs = input.call(WgslAttributes::parse_outer)?;
+        let vis: Visibility = input.parse()?;
+        let mod_token: Token![mod] = input.parse()?;
+        let ident: Ident = input.parse()?;
+
+        let content;
+        let brace_token = braced!(content in input);
+        attrs.extend_by_parsing_inner(&content)?;
+
+        let mut items: Vec<Item> = Vec::new();
+        while !content.is_empty() {
+            items.push(content.parse()?);
+        }
+
+        let mut this = Self {
             attrs,
             vis,
+            mod_token,
             ident,
-            items,
-            ..
-        } = self;
+            brace_token,
+            items: Vec::new(),
+            memo: RefCell::new(Memo::new()),
+        };
 
-        let runtime_tokens = self.runtime_tokens();
+        this.extend_items(items)?;
 
-        tokens.append_all(quote! {
-            #(#attrs)*
-            #vis mod #ident {
-                #(#items)*
+        Ok(this)
+    }
+}
 
-                #runtime_tokens
-            }
+impl ToTokens for WgslMod {
+    fn to_tokens(&self, tokens: &mut TokenStream2) {
+        tokens.append_all(self.attrs.outer());
+        self.vis.to_tokens(tokens);
+        self.mod_token.to_tokens(tokens);
+        self.ident.to_tokens(tokens);
+        self.brace_token.surround(tokens, |tokens| {
+            tokens.append_all(self.attrs.inner());
+            tokens.append_all(&self.items);
+            tokens.append_all(self.runtime_tokens());
         });
     }
 }
@@ -524,16 +517,19 @@ enum MemoValue {
 
     /// Abstract-int in a const expression.
     ///
-    /// Abstract-int should be evaluated at macro expansion time due to
-    /// determining array layouts.
+    /// If an abstract-int is used in structs, it should be evaluated at macro
+    /// expansion time due to determining array layouts.
     Int(i64),
 
     /// Abstract-float in a const expression.
     ///
-    /// Abstract-float should be evaluated at macro expansion time due to
-    /// conversion into abstract-int. Conversion availability in WGSL dose not
-    /// matter.
+    /// We may need to evaluate an abstract-float like abstract-int.
     Float(f64),
+
+    /// Not evaluated constant.
+    ///
+    /// It's fine to not evaluate if the value is not used in structs.
+    UnknownConst,
 
     /// No memoization.
     Blank,
@@ -554,34 +550,44 @@ impl MemoValue {
     where
         F: FnMut(&Ident) -> Result<MemoValue>,
     {
-        Ok(match last_path_ident(&path.path)?.to_string().as_str() {
+        match last_path_ident(&path.path)?.to_string().as_str() {
             "i8" | "u8" | "i32" | "u32" | "i64" | "u64" | "isize" | "usize" => {
-                let eval: i64 = c.expr.evaluate(&mut |ident| {
+                let eval = c.expr.evaluate(&mut |ident| {
                     match find(ident)? {
-                        MemoValue::Int(int) => Ok(int),
+                        MemoValue::Int(v) => Ok(Some(v)),
                         // Abtract-float may not be able to become int? But fine.
-                        MemoValue::Float(float) => Ok(float as i64),
+                        MemoValue::Float(v) => Ok(Some(v as i64)),
+                        MemoValue::UnknownConst => Ok(None),
                         _ => Err(Error::new(
                             ident.span(),
                             "expected integer or floating number",
                         )),
                     }
                 })?;
-                Self::Int(eval)
+                if let Some(eval) = eval {
+                    Ok(Self::Int(eval))
+                } else {
+                    Ok(Self::UnknownConst)
+                }
             }
             "f32" | "f64" => {
-                let eval: f64 = c.expr.evaluate(&mut |ident| match find(ident)? {
-                    MemoValue::Int(int) => Ok(int as f64),
-                    MemoValue::Float(float) => Ok(float),
+                let eval = c.expr.evaluate(&mut |ident| match find(ident)? {
+                    MemoValue::Int(v) => Ok(Some(v as f64)),
+                    MemoValue::Float(v) => Ok(Some(v)),
+                    MemoValue::UnknownConst => Ok(None),
                     _ => Err(Error::new(
                         ident.span(),
                         "expected integer or floating number",
                     )),
                 })?;
-                Self::Float(eval)
+                if let Some(eval) = eval {
+                    Ok(Self::Float(eval))
+                } else {
+                    Ok(Self::UnknownConst)
+                }
             }
-            _ => Self::Blank,
-        })
+            _ => Ok(Self::Blank),
+        }
     }
 
     pub(crate) fn infer_const(expr: &Expr) -> Result<Self> {

@@ -5,8 +5,8 @@ use std::{
     hash::BuildHasher,
     hint,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     thread,
     time::Duration,
@@ -547,7 +547,7 @@ fn try_request_lock_ok(workers: Vec<Worker>) -> Vec<Worker> {
             // sync task cannot get access to the resource.
             c_is_async.store(true, Ordering::Relaxed);
             thread::park_timeout(Duration::from_millis(100));
-            let mut dec = || { 
+            let mut dec = || {
                 guard.res_write.0 -= 1;
                 true
             };

@@ -141,7 +141,7 @@ mod b {
     use my_wgsl::*;
     use super::a::A;
 
-    layout!(A, 4, 4);
+    extern_type!(A, 4, 4);
     struct B { a: A }
 }
 
@@ -170,7 +170,7 @@ mod b {
     use my_wgsl::*;
     use super::a::A;
 
-    layout!(A, 4, 4);
+    extern_type!(A, 4, 4);
     struct B { a: A }
 }
 

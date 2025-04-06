@@ -78,7 +78,7 @@ impl SysTask {
         // In web panic hook, we're going to use this info for recovery.
         #[cfg(target_arch = "wasm32")]
         {
-            use super::comm::{TaskKind, WorkId, WORK_ID};
+            use super::comm::{TaskKind, WORK_ID, WorkId};
 
             WORK_ID.set(WorkId {
                 wid: _wid,
@@ -165,7 +165,7 @@ impl ParTask {
         // In web panic hook, we're going to use this info for recovery.
         #[cfg(target_arch = "wasm32")]
         {
-            use super::comm::{TaskKind, WorkId, WORK_ID};
+            use super::comm::{TaskKind, WORK_ID, WorkId};
 
             WORK_ID.set(WorkId {
                 wid: _wid,
@@ -221,7 +221,7 @@ where
         #[cfg(target_arch = "wasm32")]
         {
             let res = f(f_cx);
-            *this.res.get() = Some(res);
+            unsafe { *this.res.get() = Some(res) };
             this.flag.done();
         }
     }
@@ -283,7 +283,7 @@ impl AsyncTask {
         // In web panic hook, we're going to use this info for recovery.
         #[cfg(target_arch = "wasm32")]
         {
-            use super::comm::{TaskKind, WorkId, WORK_ID};
+            use super::comm::{TaskKind, WORK_ID, WorkId};
 
             WORK_ID.set(WorkId {
                 wid: _wid,

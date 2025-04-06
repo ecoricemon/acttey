@@ -4,7 +4,7 @@ use crate::{
         SimpleHolder,
     },
     ecs::EcsError,
-    util::{macros::debug_format, Or, With},
+    util::{Or, With, macros::debug_format},
 };
 use std::{
     any::Any,
@@ -249,7 +249,7 @@ where
         if self.is_valid_index(&ri) {
             self.ptrs
                 .get(ri.index())
-                .map(|holder| *holder.get_unchecked())
+                .map(|holder| unsafe { *holder.get_unchecked() })
         } else {
             None
         }

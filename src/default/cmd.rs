@@ -1,4 +1,5 @@
 use crate::{
+    ActteyError,
     gpu::{
         bind::{BindGroupLayoutStorage, BindGroupStorage},
         buffer::GpuBufferStorage,
@@ -7,7 +8,6 @@ use crate::{
         pipeline::{ComputePipelineStorage, PipelineLayoutStorage},
         shader::ShaderStorage,
     },
-    ActteyError,
 };
 use my_ecs::prelude::*;
 use std::sync::Arc;

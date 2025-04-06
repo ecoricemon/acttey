@@ -15,7 +15,7 @@
 
 use super::{attr::*, expr::*, path::*, traits::*, util::*};
 use proc_macro2::{Punct, Spacing, TokenStream as TokenStream2};
-use quote::{quote, ToTokens, TokenStreamExt};
+use quote::{ToTokens, TokenStreamExt, quote};
 use syn::{Ident, ItemConst, Result, Token, Type, Visibility};
 
 #[derive(Debug)]
@@ -54,7 +54,7 @@ impl WgslConst {
 
 impl ToTokens for WgslConst {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
-        self.attrs.to_tokens(tokens);
+        tokens.append_all(self.attrs.outer());
         self.vis.to_tokens(tokens);
         let const_token: Token![const] = Default::default();
         const_token.to_tokens(tokens);

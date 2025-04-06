@@ -319,7 +319,7 @@ impl Xorshift {
     /// use my_ecs::ds::Xorshift;
     /// use std::num::NonZeroU32;
     ///
-    /// let gen = Xorshift::new(NonZeroU32::MIN);
+    /// let generator = Xorshift::new(NonZeroU32::MIN);
     /// ```
     pub const fn new(seed: NonZeroU32) -> Self {
         Self {
@@ -339,10 +339,10 @@ impl Xorshift {
     /// use my_ecs::ds::Xorshift;
     /// use std::{num::NonZeroU32, collections::HashSet};
     ///
-    /// let gen = Xorshift::new(NonZeroU32::MIN);
+    /// let generator = Xorshift::new(NonZeroU32::MIN);
     /// let mut randoms = HashSet::new();
     /// for _ in 0..100 {
-    ///     let is_new = randoms.insert(gen.next());
+    ///     let is_new = randoms.insert(generator.next());
     ///     assert!(is_new);
     /// }
     /// ```

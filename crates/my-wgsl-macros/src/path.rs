@@ -3,7 +3,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::ToTokens;
 use std::{borrow::Cow, cell::RefCell, fmt};
 use syn::{
-    punctuated::Punctuated, spanned::Spanned, Error, Ident, Path, PathSegment, Result, Token,
+    Error, Ident, Path, PathSegment, Result, Token, punctuated::Punctuated, spanned::Spanned,
 };
 use wgsl_builtin::{helper::*, prelude::*};
 
@@ -25,14 +25,7 @@ impl AsIdent for WgslPath {
 
 impl fmt::Display for WgslPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut path_str = String::new();
-        for pair in self.segments.pairs() {
-            path_str.push_str(&pair.value().ident.to_string());
-            if pair.punct().is_some() {
-                path_str.push_str("::");
-            }
-        }
-        write!(f, "{}", path_str)
+        write!(f, "{}", path_segments_to_string(&self.segments))
     }
 }
 
@@ -55,17 +48,47 @@ impl ToTokens for WgslPath {
 
 impl ToWgslString for WgslPath {
     fn write_wgsl_string(&self, buf: &mut String) {
-        let path_str = self.to_string();
-        let mut slice = path_str.as_str();
-        while !slice.is_empty() {
-            if let Some(found) = to_wgsl_path(slice) {
-                buf.push_str(found);
-                return;
-            }
-            if let Some(i) = slice.find("::") {
-                slice = &slice[i + 2..];
-            }
+        write_path_to_buffer(self, buf);
+    }
+}
+
+pub(crate) fn path_segments_to_string(segments: &Punctuated<PathSegment, Token![::]>) -> String {
+    let mut path_str = String::new();
+    for pair in segments.pairs() {
+        path_str.push_str(&pair.value().ident.to_string());
+        if pair.punct().is_some() {
+            path_str.push_str("::");
         }
+    }
+    path_str
+}
+
+pub(crate) fn write_path_to_buffer<T: ToString>(path: &T, buf: &mut String) {
+    let path_str = path.to_string();
+    let mut slice = path_str.as_str();
+    while !slice.is_empty() {
+        if let Some(found) = to_wgsl_path(slice) {
+            buf.push_str(found);
+            return;
+        }
+        if let Some(i) = slice.find("::") {
+            slice = &slice[i + 2..];
+        } else {
+            break;
+        }
+    }
+
+    // Path not found.
+    // TODO: Better approach?
+    let mut window = [None, None];
+    for segment in path_str.split("::") {
+        window[0] = window[1];
+        window[1] = Some(segment);
+    }
+    match window {
+        [Some(before), _] => buf.push_str(before), // ... :: A :: new -> A
+        [_, Some(last)] => buf.push_str(last),     // A -> A
+        _ => {}
     }
 }
 
@@ -108,8 +131,6 @@ thread_local! {
         root.insert("i32", "i32".into());
         root.insert("u32", "u32".into());
         root.insert("f32", "f32".into());
-
-        root.insert("new", "".into());
 
         root
     });

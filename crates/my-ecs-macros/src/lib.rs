@@ -1,17 +1,17 @@
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use proc_macro2::TokenTree as TokenTree2;
-use quote::{quote, ToTokens, TokenStreamExt};
+use quote::{ToTokens, TokenStreamExt, quote};
 use std::iter;
 use syn::token::Comma;
 use syn::{
-    parenthesized,
+    Data, DeriveInput, Error, Expr, ExprRange, Ident, Index, Lit, LitInt, Path, RangeLimits,
+    Result, Token, Type, TypePath, Visibility, parenthesized,
     parse::{Parse, ParseStream},
     parse_macro_input,
     punctuated::Punctuated,
     spanned::Spanned,
-    token, Data, DeriveInput, Error, Expr, ExprRange, Ident, Index, Lit, LitInt, Path, RangeLimits,
-    Result, Token, Type, TypePath, Visibility,
+    token,
 };
 
 /// Implements [`Component`] for the type.

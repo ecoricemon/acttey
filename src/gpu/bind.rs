@@ -1,7 +1,7 @@
 use super::common::{HasLabel, LabelledGenVec};
 use crate::{
-    util::{AsOr, StaticStr},
     ActteyError,
+    util::{AsOr, StaticStr},
 };
 use my_ecs::prelude::{Or, Resource, ResourceId, ResourceIndex};
 use std::{fmt, ops::Deref, sync::Arc};

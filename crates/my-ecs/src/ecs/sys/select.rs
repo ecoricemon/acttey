@@ -9,13 +9,13 @@ use crate::{
         storage::EntityContainerRef,
     },
     util::{
+        TakeRecur,
         macros::{
             impl_into_iterator_for_parallel, impl_parallel_iterator, impl_unindexed_producer,
         },
-        TakeRecur,
     },
 };
-use rayon::iter::{plumbing::Producer, IntoParallelIterator};
+use rayon::iter::{IntoParallelIterator, plumbing::Producer};
 use std::{
     any, fmt, iter,
     marker::PhantomData,

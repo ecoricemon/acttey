@@ -1,11 +1,11 @@
 use super::system::{PoisonedSystem, SystemGroup, SystemId};
 use crate::{
+    MAX_GROUP,
     ds::Array,
     ecs::{
-        sys::system::{InsertPos, SystemData, Tick},
         EcsError,
+        sys::system::{InsertPos, SystemData, Tick},
     },
-    MAX_GROUP,
 };
 use std::hash::BuildHasher;
 

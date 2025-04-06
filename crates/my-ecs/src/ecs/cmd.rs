@@ -1,9 +1,9 @@
 use super::{
+    DynResult,
     ent::{component::Component, entity::EntityId},
     entry::Ecs,
     post::EntMoveStorage,
     sched::comm::CommandSender,
-    DynResult,
 };
 use crate::{ds::ReadyFuture, util::macros::impl_from_for_enum};
 use std::{fmt, ptr::NonNull, sync::MutexGuard};
@@ -228,7 +228,7 @@ impl<'a> EntityMoveCommandBuilder<'a> {
     }
 
     /// Finishes to build an entity move command.
-    pub fn finish(mut self) -> impl Command + 'static {
+    pub fn finish(mut self) -> impl Command + use<> {
         assert!(self.len > 0);
 
         let cmd = self._finish();

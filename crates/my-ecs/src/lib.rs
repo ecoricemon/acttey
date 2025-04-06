@@ -14,7 +14,7 @@ pub mod prelude {
     pub use super::global;
     pub use super::{default::prelude::*, ds::prelude::*, ecs::prelude::*, util::prelude::*};
     pub use super::{log, tinfo};
-    pub use my_ecs_macros::{filter, request, Component, Entity, Resource};
+    pub use my_ecs_macros::{Component, Entity, Resource, filter, request};
     #[doc(no_inline)]
     pub use rayon::prelude::*;
 }

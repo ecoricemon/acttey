@@ -4,10 +4,10 @@ use super::{
 };
 use crate::global;
 use rayon::iter::{
+    IndexedParallelIterator, ParallelIterator,
     plumbing::{
         Consumer, Folder, Producer, ProducerCallback, Reducer, UnindexedConsumer, UnindexedProducer,
     },
-    IndexedParallelIterator, ParallelIterator,
 };
 
 // ref: https://github.com/rayon-rs/rayon/blob/7543ed40c9a017dee32b3dc72b3ae819820e8366/rayon-core/src/lib.rs#L851

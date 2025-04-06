@@ -5,8 +5,8 @@ use super::{
     pipeline::ComputePipeline,
 };
 use crate::{
-    util::{AsOr, StaticStr},
     ActteyError,
+    util::{AsOr, StaticStr},
 };
 use my_ecs::prelude::{Or, Resource, ResourceId, ResourceIndex};
 use std::{

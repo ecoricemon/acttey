@@ -3,8 +3,8 @@ use proc_macro2::{Delimiter, Group, Punct, Spacing, TokenStream as TokenStream2}
 use quote::{ToTokens, TokenStreamExt};
 use std::ops::{Deref, DerefMut};
 use syn::{
-    punctuated::Punctuated, BinOp, Expr, ExprArray, ExprBinary, ExprCall, ExprLit, ExprPath, Ident,
-    Lit, Result, Token,
+    BinOp, Expr, ExprArray, ExprBinary, ExprCall, ExprLit, ExprPath, Ident, Lit, Result, Token,
+    punctuated::Punctuated,
 };
 
 // === CommaSepWgslExprs ===
@@ -130,7 +130,7 @@ impl FromSyn<ExprArray> for WgslExprArray {
 
 impl ToTokens for WgslExprArray {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
-        self.attrs.to_tokens(tokens);
+        tokens.append_all(self.attrs.outer());
         Group::new(Delimiter::Bracket, self.elems.to_token_stream()).to_tokens(tokens);
     }
 }
@@ -172,7 +172,7 @@ impl FromSyn<ExprBinary> for WgslExprBinary {
 
 impl ToTokens for WgslExprBinary {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
-        self.attrs.to_tokens(tokens);
+        tokens.append_all(self.attrs.outer());
         self.left.to_tokens(tokens);
         self.op.to_tokens(tokens);
         self.right.to_tokens(tokens);
@@ -209,7 +209,7 @@ impl FromSyn<ExprCall> for WgslExprCall {
 
 impl ToTokens for WgslExprCall {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
-        self.attrs.to_tokens(tokens);
+        tokens.append_all(self.attrs.outer());
         self.func.to_tokens(tokens);
         Group::new(Delimiter::Parenthesis, self.args.to_token_stream()).to_tokens(tokens);
     }
@@ -244,7 +244,7 @@ impl FromSyn<ExprLit> for WgslExprLit {
 
 impl ToTokens for WgslExprLit {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
-        self.attrs.to_tokens(tokens);
+        tokens.append_all(self.attrs.outer());
         self.lit.to_tokens(tokens);
     }
 }
@@ -281,7 +281,7 @@ impl FromSyn<ExprPath> for WgslExprPath {
 
 impl ToTokens for WgslExprPath {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
-        self.attrs.to_tokens(tokens);
+        tokens.append_all(self.attrs.outer());
         self.path.to_tokens(tokens);
     }
 }

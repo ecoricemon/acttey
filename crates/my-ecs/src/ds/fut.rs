@@ -5,8 +5,8 @@ use std::{
     pin::Pin,
     ptr::NonNull,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     task::{Context, Poll, RawWaker, RawWakerVTable, Waker},
     thread::{self, Thread},

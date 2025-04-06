@@ -1252,9 +1252,11 @@ impl ChunkAnyVec {
     pub unsafe fn resize_raw(&mut self, new_len: usize, val_ptr: NonNull<u8>) {
         assert!(self.is_clone(), "expected `Clone` type");
 
-        self._resize(new_len, |last_chunk, new_last_chunk_len| unsafe {
-            last_chunk.resize_raw(new_last_chunk_len, val_ptr);
-        });
+        unsafe {
+            self._resize(new_len, |last_chunk, new_last_chunk_len| {
+                last_chunk.resize_raw(new_last_chunk_len, val_ptr);
+            });
+        }
     }
 
     /// Resizes the vector to the given length.

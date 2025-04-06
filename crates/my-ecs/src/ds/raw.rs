@@ -2,7 +2,7 @@ use super::ptr::SendSyncPtr;
 use crate::util::macros::{
     impl_into_iterator_for_parallel, impl_parallel_iterator, impl_unindexed_producer,
 };
-use rayon::iter::{plumbing::Producer, IntoParallelIterator};
+use rayon::iter::{IntoParallelIterator, plumbing::Producer};
 use std::{
     iter,
     marker::PhantomData,
@@ -228,7 +228,7 @@ pub trait AsFlatRawIter {
     // accessible even if the iterator yields poniters. That's why this method
     // is unsafe.
     unsafe fn par_iter(&self) -> ParFlatRawIter {
-        ParFlatRawIter(self.iter())
+        ParFlatRawIter(unsafe { self.iter() })
     }
 
     /// Returns a new iterator.
@@ -310,7 +310,7 @@ pub trait AsFlatRawIter {
     /// ```
     #[inline]
     unsafe fn par_iter_of<T>(&self) -> ParFlatIter<'_, T> {
-        ParFlatIter(self.iter_of())
+        ParFlatIter(unsafe { self.iter_of() })
     }
 
     /// Returns a new parallel mutable iterator.
@@ -338,7 +338,7 @@ pub trait AsFlatRawIter {
     /// ```
     #[inline]
     unsafe fn par_iter_mut_of<T>(&mut self) -> ParFlatIterMut<'_, T> {
-        ParFlatIterMut(self.iter_mut_of())
+        ParFlatIterMut(unsafe { self.iter_mut_of() })
     }
 }
 
@@ -496,7 +496,7 @@ impl RawIter {
         } else {
             self.cur.as_ptr().cast::<T>().cast_const()
         };
-        slice::from_raw_parts(ptr, self.len())
+        unsafe { slice::from_raw_parts(ptr, self.len()) }
     }
 
     /// Returns a mutable slice from the remaining iterator.
@@ -512,7 +512,7 @@ impl RawIter {
         } else {
             self.cur.as_ptr().cast::<T>()
         };
-        slice::from_raw_parts_mut(ptr, self.len())
+        unsafe { slice::from_raw_parts_mut(ptr, self.len()) }
     }
 }
 
@@ -1385,8 +1385,10 @@ impl FlatRawIter {
     /// - Lifetime define by caller must be sufficient to the iterator.
     pub unsafe fn as_slice<'o, T>(&self, chunk_idx: usize) -> &'o [T] {
         // `fn_iter` gives us empty iterator if `chunk` is out of bounds.
-        let raw_iter = unsafe { (self.fn_iter)(self.this.as_nonnull(), chunk_idx) };
-        raw_iter.as_slice()
+        unsafe {
+            let raw_iter = (self.fn_iter)(self.this.as_nonnull(), chunk_idx);
+            raw_iter.as_slice()
+        }
     }
 
     /// Returns a mutable slice from the remaining iterator.
@@ -1397,8 +1399,10 @@ impl FlatRawIter {
     /// - Lifetime define by caller must be sufficient to the iterator.
     pub unsafe fn as_mut_slice<'o, T>(&mut self, chunk_idx: usize) -> &'o mut [T] {
         // `fn_iter` gives us empty iterator if `chunk` is out of bounds.
-        let mut raw_iter = unsafe { (self.fn_iter)(self.this.as_nonnull(), chunk_idx) };
-        raw_iter.as_mut_slice()
+        unsafe {
+            let mut raw_iter = (self.fn_iter)(self.this.as_nonnull(), chunk_idx);
+            raw_iter.as_mut_slice()
+        }
     }
 
     /// Returns number of chunks if you've not been called

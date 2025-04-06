@@ -265,8 +265,8 @@ mod web {
         pin::Pin,
         rc::Rc,
         sync::{
-            atomic::{AtomicBool, Ordering},
             Arc, OnceLock,
+            atomic::{AtomicBool, Ordering},
         },
     };
     use wasm_bindgen::prelude::*;
@@ -1100,7 +1100,7 @@ mod web {
     /// Undefined behavior if the pointer is not valid or aliased.
     #[wasm_bindgen(js_name = workerOnMessage)]
     pub unsafe fn worker_on_message(cx: *mut SubContext) {
-        let cx = ManagedConstPtr::new(NonNullExt::new_unchecked(cx));
+        let cx = unsafe { ManagedConstPtr::new(NonNullExt::new_unchecked(cx)) };
         SubContext::execute(cx);
     }
 
@@ -1256,7 +1256,7 @@ mod web {
         unsafe fn decode_from_array(arr: &js_sys::Uint32Array) -> fn() {
             let mut buf: [u32; Self::len()] = [0; Self::len()];
             arr.copy_to(&mut buf);
-            Self::decode(buf)
+            unsafe { Self::decode(buf) }
         }
 
         /// # Safety
@@ -1264,7 +1264,7 @@ mod web {
         /// Undefined behavior if the given data is not a valid function pointer.
         #[inline]
         const unsafe fn decode(encoded: [u32; Self::len()]) -> fn() {
-            Self { dst: encoded }.src
+            unsafe { Self { dst: encoded }.src }
         }
     }
 
@@ -1305,7 +1305,7 @@ mod web {
         unsafe fn decode_from_array(arr: &js_sys::Uint32Array) -> DynFnOnceExt<(), ()> {
             let mut buf: [u32; Self::len()] = [0; Self::len()];
             arr.copy_to(&mut buf);
-            Self::decode(buf)
+            unsafe { Self::decode(buf) }
         }
 
         /// # Safety
@@ -1314,7 +1314,7 @@ mod web {
         /// Also, return value must be cast as the original type.
         #[inline]
         const unsafe fn decode(encoded: [u32; Self::len()]) -> DynFnOnceExt<(), ()> {
-            let f = Self { dst: encoded }.src;
+            let f = unsafe { Self { dst: encoded }.src };
             DynFnOnceExt(f)
         }
     }

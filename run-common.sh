@@ -1,7 +1,5 @@
 #!/bin/bash
 
-web_test_dir="tests-other/web"
-
 help() {
     echo "Usage: $0 [commands] <argument>"
     echo "commands:"
@@ -13,7 +11,6 @@ help() {
     echo "arguments:"
     echo "  -r    : Release mode."
     echo "  -a    : Debug & Release modes."
-    echo "  -tsan : Test with thread sanitizer. Available with test only."
     echo "  -R    : Run recursively."
     exit 1
 }
@@ -64,7 +61,7 @@ test_debug() {
 
     if [ $is_debug -eq 1 ]; then
         print_title "Test on Debug build"
-        cargo test --tests -F check,stat --target $(get_host_triple)
+        cargo test --tests --target $(get_host_triple)
         ret=$?
         if [ $ret -ne 0 ]; then
             exit $ret
@@ -85,66 +82,9 @@ test_release() {
     fi
 }
 
-test_debug_web() {
-    local ret=0
-
-    if [ $is_debug -eq 1 ]; then
-        print_title "Test-Web on Debug build"
-        pushd . > /dev/null
-        cd $web_test_dir
-        npm install && npm run build-d && npm run test
-        ret=$?
-        if [ $ret -ne 0 ]; then
-            popd > /dev/null
-            exit $ret
-        fi
-        popd > /dev/null
-    fi
-}
-
-test_release_web() {
-    local ret=0
-
-    if [ $is_release -eq 1 ]; then
-        print_title "Test-Web on Release build"
-        pushd . > /dev/null
-        cd $web_test_dir
-        npm install && npm run build-r && npm run test
-        ret=$?
-        if [ $ret -ne 0 ]; then
-            popd > /dev/null
-            exit $ret
-        fi
-        popd > /dev/null
-    fi
-}
-
-test_tsan() {
-    local ret=0
-
-    print_title "Test with thread sanitizer"
-    RUSTFLAGS='-Zsanitizer=thread' \
-        cargo +nightly-2025-01-03 run --example tsan --target $(get_host_triple)
-    ret=$?
-    if [ $ret -ne 0 ]; then
-        exit $ret
-    fi
-}
-
-test_repeat() {
-    local ret=0
-
-    print_title "Repeat test"
-    REPEAT=1 cargo test --tests -r --target $(get_host_triple)
-    ret=$?
-    if [ $ret -ne 0 ]; then
-        exit $ret
-    fi
-}
-
 test_doc() {
     local ret=0
-    
+
     print_title "Doc Test"
     cargo test --doc --target $(get_host_triple)
     ret=$?
@@ -184,16 +124,6 @@ clean() {
     print_title "Clean Lib"
     cargo clean
     rm Cargo.lock
-
-    more=($web_test_dir)
-    for target in ${more[@]}; do
-        print_title "Clean $target"
-        if [ -f "$target/package.json" ]; then
-            npm run clean-all --prefix $target
-        elif [ -f "$target/run.sh" ]; then
-            run.sh clean
-        fi
-    done
 }
 
 is_debug=1
@@ -238,16 +168,8 @@ cmd=${all_args[0]}
 
 case $cmd in
     test)
-        if [ "$test_kind" == "tsan" ]; then
-            test_tsan
-        elif [ "$test_kind" == "rep" ]; then
-            test_repeat
-        else
-            test_debug
-            test_debug_web
-            test_release
-            test_release_web
-        fi
+        test_debug
+        test_release
         ;;
     doc)
         test_doc
@@ -258,9 +180,7 @@ case $cmd in
     all)
         test_doc
         test_debug
-        test_debug_web
-        test_release_web
-        test_repeat
+        test_release
         run_examples
         ;;
     clean)

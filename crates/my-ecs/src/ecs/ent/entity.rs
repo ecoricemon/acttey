@@ -1,7 +1,7 @@
 use super::component::{ComponentKey, Components};
 use crate::{
     ds::{BorrowResult, RawGetter, TypeInfo},
-    util::{macros::impl_from_for_enum, With},
+    util::{With, macros::impl_from_for_enum},
 };
 use std::{any::TypeId, fmt, mem, mem::MaybeUninit, ops::Deref, ptr::NonNull, sync::Arc};
 

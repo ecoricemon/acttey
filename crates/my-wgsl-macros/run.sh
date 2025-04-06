@@ -1,1 +1,0 @@
-../my-wgsl/run.sh

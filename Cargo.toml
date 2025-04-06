@@ -1,8 +1,8 @@
 [package]
 name = "acttey"
 version = "0.1.0"
-edition = "2021"
-rust-version = "1.80" # std::sync::LazyLock is stable since 1.80.0.
+edition = "2024"
+rust-version = "1.85"
 description = "An Entity Component System (ECS) library based on CPU & GPU parallelism"
 documentation = "https://docs.rs/acttey"
 readme = "README.md" 

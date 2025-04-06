@@ -10,9 +10,9 @@ use crossbeam_deque as cb;
 use std::{
     cell::Cell,
     sync::{
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, Ordering},
         mpsc::{self, SendError, Sender, TryRecvError},
-        Arc, Mutex,
     },
     thread::{self, Thread},
 };

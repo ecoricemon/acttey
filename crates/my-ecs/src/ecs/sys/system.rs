@@ -1,13 +1,13 @@
 use super::{
     query::{EntQueryMut, Query, QueryMut, ResQuery, ResQueryMut},
     request::{
-        Request, RequestInfo, RequestKey, Response, StoreRequestInfo, SystemBuffer, RINFO_STOR,
+        RINFO_STOR, Request, RequestInfo, RequestKey, Response, StoreRequestInfo, SystemBuffer,
     },
 };
 use crate::{
     ds::{ATypeId, ListPos, ManagedMutPtr, NonNullExt, SetList, SimpleVecPool},
     ecs::EcsError,
-    util::{macros::debug_format, Or},
+    util::{Or, macros::debug_format},
 };
 use std::{
     any::{self, Any},
@@ -1080,11 +1080,7 @@ impl SystemFlags {
 impl fmt::Debug for SystemFlags {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let dedi = if !self.is_dedi_empty() {
-            if self.is_dedi() {
-                "DEDI"
-            } else {
-                "NON-DEDI"
-            }
+            if self.is_dedi() { "DEDI" } else { "NON-DEDI" }
         } else {
             "DEDI?"
         };

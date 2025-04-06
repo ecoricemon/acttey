@@ -1,9 +1,9 @@
-use super::{attr::*, path::*, traits::*, util::*};
+use super::{attr::*, externs::*, path::*, traits::*, util::*};
 use proc_macro2::{Punct, Spacing, TokenStream as TokenStream2};
-use quote::{format_ident, quote, ToTokens, TokenStreamExt};
+use quote::{ToTokens, TokenStreamExt, format_ident, quote};
 use syn::{
-    parse_quote, spanned::Spanned, Attribute, Error, Field, Fields, Ident, Index, ItemStruct,
-    Result, Type, Visibility,
+    Attribute, Error, Field, Fields, Ident, Index, ItemStruct, Result, Type, Visibility,
+    parse_quote, spanned::Spanned,
 };
 use wgsl_builtin::{helper::*, prelude::*};
 
@@ -33,7 +33,7 @@ impl WgslStruct {
     ) -> Result<Self>
     where
         F: FnMut(&Ident) -> Result<(LayoutExt, LayoutExt)>,
-        G: FnMut(&Ident) -> Result<usize>,
+        G: FnMut(&Ident) -> Result<Option<usize>>,
     {
         if matches!(st.fields, Fields::Unnamed(_)) {
             return Err(Error::new(st.span(), "tuple struct is not allowd for now"));
@@ -139,7 +139,7 @@ impl WgslStruct {
     ) -> Result<(LayoutExt, LayoutExt, usize)>
     where
         F: FnMut(&Ident) -> Result<(LayoutExt, LayoutExt)>,
-        G: FnMut(&Ident) -> Result<usize>,
+        G: FnMut(&Ident) -> Result<Option<usize>>,
     {
         const IN_ARRAY: bool = false;
 
@@ -220,7 +220,7 @@ impl WgslStruct {
     ) -> Result<(LayoutExt, LayoutExt)>
     where
         F: FnMut(&Ident) -> Result<(LayoutExt, LayoutExt)>,
-        G: FnMut(&Ident) -> Result<usize>,
+        G: FnMut(&Ident) -> Result<Option<usize>>,
     {
         let (rust_layout, wgsl_layout) = match ty {
             // T: Returns (size: size of T, align of T)
@@ -246,7 +246,16 @@ impl WgslStruct {
             Type::Array(ty) => {
                 const IN_ARRAY: bool = true;
 
-                let len: usize = ty.len.evaluate(&mut find_len)?;
+                let Some(len) = ty.len.evaluate(&mut find_len)? else {
+                    return Err(Error::new(
+                        ty.len.span(),
+                        const_format::concatcp!(
+                            "unknown symbol in this module. consider using `",
+                            EXTERN_CONST,
+                            "!`"
+                        ),
+                    ));
+                };
                 let (elem_rust, elem_wgsl) =
                     Self::type_to_layout(&ty.elem, IN_ARRAY, find_layout, find_len)?;
                 let rust_layout = elem_rust.to_array_layout(len);
@@ -368,7 +377,7 @@ impl WgslStruct {
         let ty_ident = last_type_path_ident(ty)?;
         let ident_str = &ty_ident.to_string();
 
-        if let Some((i, _)) = disallowed.iter().enumerate().find(|(_, &v)| v == ident_str) {
+        if let Some((i, _)) = disallowed.iter().enumerate().find(|(_, v)| *v == ident_str) {
             Err(Error::new(
                 ty.span(),
                 format!(
@@ -396,7 +405,7 @@ impl WgslStruct {
         let ty_ident = last_type_path_ident(ty)?;
         let ident_str = &ty_ident.to_string();
 
-        if let Some((i, _)) = disallowed.iter().enumerate().find(|(_, &v)| v == ident_str) {
+        if let Some((i, _)) = disallowed.iter().enumerate().find(|(_, v)| *v == ident_str) {
             Err(Error::new(
                 ty.span(),
                 format!(
@@ -418,13 +427,14 @@ impl WgslStruct {
             ..
         } = self;
 
+        let attrs = attrs.outer();
         let inner_ident = format_ident!("__{}", ident);
         let fields = fields.iter().filter(|f| !f.is_pad());
         let decl_new = Self::decl_unsized_outer_new(&inner_ident, fields.clone());
         let decl_inner = Self::decl_unsized_inner(vis, &inner_ident, fields.clone());
 
         tokens.append_all(quote! {
-            #attrs
+            #(#attrs)*
             #[repr(transparent)]
             #vis struct #ident(#inner_ident);
 
@@ -756,6 +766,7 @@ impl ToTokens for WgslStruct {
             struct_layout,
         } = self;
 
+        let attrs = attrs.outer();
         let decl_new = self.decl_sized_new();
 
         if !struct_layout.is_sized {
@@ -765,7 +776,7 @@ impl ToTokens for WgslStruct {
             // Not a ZST.
             let struct_align = Index::from(struct_layout.align);
             tokens.append_all(quote! {
-                #attrs
+                #(#attrs)*
                 #[repr(C, align(#struct_align))]
                 #vis struct #ident {
                     #(#fields),*
@@ -776,7 +787,7 @@ impl ToTokens for WgslStruct {
         } else {
             // Allow ZST?
             tokens.append_all(quote! {
-                #attrs
+                #(#attrs)*
                 #vis struct #ident;
             });
         }
@@ -898,7 +909,7 @@ impl WgslField {
 
 impl ToTokens for WgslField {
     fn to_tokens(&self, tokens: &mut TokenStream2) {
-        self.attrs.to_tokens(tokens);
+        tokens.append_all(self.attrs.outer());
         self.vis.to_tokens(tokens);
         self.ident.to_tokens(tokens);
         tokens.append(Punct::new(':', Spacing::Alone));

@@ -2,9 +2,9 @@ use super::{path::*, util::*};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::ToTokens;
 use syn::{
-    spanned::Spanned, Attribute, BinOp, Error, Expr, ExprArray, ExprBinary, ExprCall, ExprLit,
-    ExprPath, Field, Ident, Item, ItemConst, ItemStruct, Meta, Path, Result, Type, TypeArray,
-    TypePath, TypeSlice,
+    Attribute, BinOp, Error, Expr, ExprArray, ExprBinary, ExprCall, ExprLit, ExprPath, Field,
+    Ident, Item, ItemConst, ItemStruct, Meta, Path, Result, Type, TypeArray, TypePath, TypeSlice,
+    spanned::Spanned,
 };
 
 pub(crate) trait RuntimeWgslToken {
@@ -115,14 +115,16 @@ impl ToWgslString for ExprPath {
 
 impl ToWgslString for Path {
     fn write_wgsl_string(&self, buf: &mut String) {
-        for seg in &self.segments {
-            let seg_ident = seg.ident.to_string();
+        struct Helper<'a>(&'a Path);
 
-            // Unknown segments are discarded.
-            if let Some(seg_ident) = to_wgsl_path(&seg_ident) {
-                buf.push_str(seg_ident);
+        #[allow(clippy::to_string_trait_impl)]
+        impl ToString for Helper<'_> {
+            fn to_string(&self) -> String {
+                path_segments_to_string(&self.0.segments)
             }
         }
+
+        write_path_to_buffer(&Helper(self), buf);
     }
 }
 
@@ -289,33 +291,53 @@ pub(crate) trait FromSyn<Input>: Sized {
 // === Evaluate ===
 
 pub(crate) trait Evaluate<Out> {
-    fn evaluate<F>(&self, find: &mut F) -> Result<Out>
+    fn evaluate<F>(&self, find: &mut F) -> Result<Option<Out>>
     where
-        F: FnMut(&Ident) -> Result<Out>;
+        F: FnMut(&Ident) -> Result<Option<Out>>;
 }
 
 macro_rules! impl_evaluate_for_wgsl_expr {
     ($ty:ty) => {
         impl Evaluate<$ty> for Expr {
-            fn evaluate<F>(&self, find: &mut F) -> Result<$ty>
+            fn evaluate<F>(&self, find: &mut F) -> Result<Option<$ty>>
             where
-                F: FnMut(&Ident) -> Result<$ty>,
+                F: FnMut(&Ident) -> Result<Option<$ty>>,
             {
-                Ok(match self {
+                match self {
                     Expr::Binary(e) => {
-                        let l = e.left.evaluate(find)?;
-                        let r = e.right.evaluate(find)?;
+                        let Some(l) = e.left.evaluate(find)? else {
+                            return Ok(None);
+                        };
+                        let Some(r) = e.right.evaluate(find)? else {
+                            return Ok(None);
+                        };
+
                         let res = (e.op, l, r).evaluate(find)?;
-                        if res as u64 <= i64::MAX as u64 {
-                            res
-                        } else {
-                            return Err(Error::new(self.span(), "cannot exceed i64::MAX"));
+                        let Some(res) = res else {
+                            return Err(Error::new(
+                                self.span(),
+                                "evaluated result cannot fit in the type",
+                            ));
+                        };
+                        if res as u64 > i64::MAX as u64 {
+                            return Err(Error::new(
+                                self.span(),
+                                "evaluated result cannot exceed i64::MAX",
+                            ));
                         }
+
+                        Ok(Some(res))
                     }
-                    Expr::Lit(e) => lit_to_number(&e.lit)?,
-                    Expr::Path(e) => find(e.as_ident()?)?,
-                    _ => return Err(Error::new(self.span(), "expected integer expression")),
-                })
+                    Expr::Lit(e) => {
+                        let number = lit_to_number(&e.lit)?;
+                        Ok(Some(number))
+                    }
+                    Expr::Path(e) => {
+                        let ident = e.as_ident()?;
+                        find(ident)
+                    }
+                    _ => Err(Error::new(self.span(), "expected integer expression")),
+                }
             }
         }
     };
@@ -324,23 +346,23 @@ macro_rules! impl_evaluate_for_wgsl_expr {
 macro_rules! impl_evaluate_for_int {
     ($ty:ty) => {
         impl Evaluate<$ty> for (BinOp, $ty, $ty) {
-            fn evaluate<F>(&self, _find: &mut F) -> Result<$ty>
+            fn evaluate<F>(&self, _find: &mut F) -> Result<Option<$ty>>
             where
-                F: FnMut(&Ident) -> Result<$ty>,
+                F: FnMut(&Ident) -> Result<Option<$ty>>,
             {
                 let (op, l, r) = self;
 
                 Ok(match op {
-                    BinOp::Add(_) => l + r,
-                    BinOp::Sub(_) => l - r,
-                    BinOp::Mul(_) => l * r,
-                    BinOp::Div(_) => l / r,
-                    BinOp::Rem(_) => l % r,
-                    BinOp::BitXor(_) => l ^ r,
-                    BinOp::BitAnd(_) => l & r,
-                    BinOp::BitOr(_) => l | r,
-                    BinOp::Shl(_) => l << r,
-                    BinOp::Shr(_) => l >> r,
+                    BinOp::Add(_) => l.checked_add(*r),
+                    BinOp::Sub(_) => l.checked_sub(*r),
+                    BinOp::Mul(_) => l.checked_mul(*r),
+                    BinOp::Div(_) => l.checked_div(*r),
+                    BinOp::Rem(_) => l.checked_rem(*r),
+                    BinOp::BitXor(_) => Some(l ^ r),
+                    BinOp::BitAnd(_) => Some(l & r),
+                    BinOp::BitOr(_) => Some(l | r),
+                    BinOp::Shl(_) => l.checked_shl(*r as u32),
+                    BinOp::Shr(_) => l.checked_shr(*r as u32),
                     _ => return Err(Error::new(op.span(), "not supported operator")),
                 })
             }
@@ -351,18 +373,18 @@ macro_rules! impl_evaluate_for_int {
 macro_rules! impl_evaluate_for_float {
     ($ty:ty) => {
         impl Evaluate<$ty> for (BinOp, $ty, $ty) {
-            fn evaluate<F>(&self, _find: &mut F) -> Result<$ty>
+            fn evaluate<F>(&self, _find: &mut F) -> Result<Option<$ty>>
             where
-                F: FnMut(&Ident) -> Result<$ty>,
+                F: FnMut(&Ident) -> Result<Option<$ty>>,
             {
                 let (op, l, r) = self;
 
                 Ok(match op {
-                    BinOp::Add(_) => l + r,
-                    BinOp::Sub(_) => l - r,
-                    BinOp::Mul(_) => l * r,
-                    BinOp::Div(_) => l / r,
-                    BinOp::Rem(_) => l % r,
+                    BinOp::Add(_) => Some(l + r),
+                    BinOp::Sub(_) => Some(l - r),
+                    BinOp::Mul(_) => Some(l * r),
+                    BinOp::Div(_) => Some(l / r),
+                    BinOp::Rem(_) => Some(l % r),
                     _ => return Err(Error::new(op.span(), "not supported operator")),
                 })
             }

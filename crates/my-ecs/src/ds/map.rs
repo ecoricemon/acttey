@@ -1,6 +1,6 @@
 use crate::ds::vec::OptVec;
 use std::{
-    collections::{hash_map::Entry, HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::Entry},
     hash::{BuildHasher, Hash},
 };
 

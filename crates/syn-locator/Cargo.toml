@@ -1,20 +1,21 @@
 [package]
-name = "my-wgsl-macros"
-version = "0.1.3"
+name = "syn-locator"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "A procedural macro for my-wgsl crate"
+description = "Simple source code locator for syn crate"
 repository = "https://github.com/ecoricemon/acttey"
 license = "Apache-2.0 OR MIT"
 
 [lib]
-proc-macro = true
-doctest = false
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-wgsl-builtin = { version = "0.1.0", path = "../wgsl-builtin" }
 proc-macro2 = "1.0.69"
 quote = "1.0.33"
 syn = { version = "2.0.38", features = ["full", "extra-traits"] }
+regex = { version = "1.11.1" }
 paste = { version = "1.0.14" }
-const_format = { version = "0.2.34" }
+
+[dev-dependencies]
+pretty_assertions = { version = "1.4.1" }

@@ -1,12 +1,12 @@
 use super::{path::*, structs::LayoutExt, traits::*};
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{quote, ToTokens, TokenStreamExt};
+use quote::{ToTokens, TokenStreamExt, quote};
 use syn::{
+    Error, Expr, LitInt, Path, Result, Token,
     parse::{Parse, ParseStream},
     parse_macro_input,
     spanned::Spanned,
-    Error, Expr, LitInt, Path, Result, Token,
 };
 
 // Must be the same as the function name.

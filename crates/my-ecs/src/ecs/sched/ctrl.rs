@@ -7,6 +7,7 @@ use super::{
     task::{AsyncTask, ParTask, SysTask, Task},
 };
 use crate::{
+    MAX_GROUP,
     ds::{
         Array, ListPos, ManagedConstPtr, ManagedMutPtr, NonNullExt, SetValueList, UnsafeFuture,
         WakeSend,
@@ -19,7 +20,6 @@ use crate::{
         worker::{Message, PanicMessage, Work, WorkerId},
     },
     util::prelude::*,
-    MAX_GROUP,
 };
 use crossbeam_deque as cb;
 use std::{
@@ -34,8 +34,8 @@ use std::{
     ptr::NonNull,
     rc::Rc,
     sync::{
-        atomic::{AtomicU32, Ordering},
         Arc,
+        atomic::{AtomicU32, Ordering},
     },
     thread::{self, Thread, ThreadId},
     time::Duration,
@@ -1427,8 +1427,8 @@ mod sub {
     use super::SubState;
     use crate::ds::ArrayDeque;
     use std::sync::{
-        atomic::{AtomicU32, Ordering},
         Mutex,
+        atomic::{AtomicU32, Ordering},
     };
 
     /// Guidance for [`SubContext`] on what state it should start with or need

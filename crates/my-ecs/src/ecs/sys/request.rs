@@ -10,10 +10,10 @@ use super::{
     },
 };
 use crate::{
+    DefaultRandomState,
     ds::{ATypeId, Borrowed, ManagedConstPtr, ManagedMutPtr},
     ecs::resource::ResourceKey,
     util::macros::debug_format,
-    DefaultRandomState,
 };
 use std::{
     any,

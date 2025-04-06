@@ -1,4 +1,5 @@
 use super::{
+    DynResult,
     cmd::{Command, CommandObject, RawCommand},
     entry::{Ecs, EcsEntry},
     sched::{
@@ -10,7 +11,6 @@ use super::{
         system::{InsertPos, Invoke, System, SystemData, SystemDesc, SystemId, SystemState},
     },
     worker::{Message, WorkerId},
-    DynResult,
 };
 use crate::ds::ManagedMutPtr;
 use std::{

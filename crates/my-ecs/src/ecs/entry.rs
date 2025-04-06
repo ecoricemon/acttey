@@ -1,4 +1,5 @@
 use super::{
+    DynResult, EcsError,
     cache::{CacheStorage, RefreshCacheStorage},
     cmd::Command,
     ent::{
@@ -9,7 +10,7 @@ use super::{
     post::{Commander, Post},
     resource::{Resource, ResourceDesc, ResourceIndex, ResourceKey, ResourceStorage},
     sched::{
-        comm::{command_channel, CommandReceiver, CommandSender},
+        comm::{CommandReceiver, CommandSender, command_channel},
         ctrl::Scheduler,
     },
     sys::{
@@ -20,9 +21,8 @@ use super::{
         },
     },
     worker::Work,
-    DynResult, EcsError,
 };
-use crate::util::{macros::debug_format, Or, With, WithResult};
+use crate::util::{Or, With, WithResult, macros::debug_format};
 use my_ecs_macros::repeat_macro;
 use std::{
     any::Any,
@@ -2154,7 +2154,7 @@ impl LeakedEcsApp {
     #[cfg(target_arch = "wasm32")]
     pub(crate) unsafe fn get(&self) -> EcsExt<'static> {
         EcsExt {
-            ecs: self.this.copy(),
+            ecs: unsafe { self.this.copy() },
         }
     }
 }

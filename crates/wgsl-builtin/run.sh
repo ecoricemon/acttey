@@ -1,1 +1,1 @@
-../my-wgsl/run.sh
+../../run-common.sh

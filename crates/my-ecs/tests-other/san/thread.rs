@@ -3,9 +3,9 @@ use std::{
     future::Future,
     pin::Pin,
     sync::{
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Sender},
-        Arc, Mutex,
     },
     task::{Context, Poll},
     thread::{self, JoinHandle},
