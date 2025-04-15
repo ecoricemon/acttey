@@ -1,17 +1,34 @@
-use super::{
-    file::SmFile,
-    item::{SmField, SmItemConst, SmItemMod, SmItemStruct},
-};
+//! # Visibility
+//!
+//! Some [`PathValue`]s contain `vis_scope` field. That field indicates a node
+//! index of a module that the value is visible. See an example below.
+//! ```ignore
+//! mod a {
+//!     mod b {
+//!         struct A;            // vis_scope: Node index to 'mod b'
+//!         pub(super) struct B; // vis_scope: Node index to 'mod a'
+//!     }
+//! }
+//! ```
+//! We use node index instead of path id becuase a node can have only one
+//! module, plus, it makes visibility check easy.
+
 use crate::{
-    traits::{IdentifySyn, SynId},
-    util,
+    Result,
+    front::{
+        syntax::{
+            common::{IdentifySyn, SynId},
+            file::SmFile,
+        },
+        util,
+    },
 };
 use smallvec::SmallVec;
 use std::{
     borrow::Cow,
     cell::Cell,
     cmp,
-    collections::{HashSet, VecDeque},
+    collections::HashSet,
     fmt,
     iter::{self, FusedIterator},
     mem,
@@ -19,7 +36,6 @@ use std::{
     path::{Path as StdPath, PathBuf},
     result::Result as StdResult,
 };
-use syn::{FnArg, ItemFn, ItemType, ItemUse, Result, VisRestricted, Visibility, spanned::Spanned};
 
 pub struct PathTree {
     nodes: Vec<PathNode>,
@@ -144,6 +160,20 @@ impl PathTree {
         Ok((cur, advance))
     }
 
+    pub fn is_in_block<'a, I>(&self, key: I) -> bool
+    where
+        I: Iterator<Item = &'a str>,
+    {
+        let value = self.search_nearest_value(key, |value| {
+            matches!(
+                value,
+                PathValue::Block(_) | PathValue::Mod(_) | PathValue::ModRaw(_)
+            )
+        });
+
+        matches!(value, Some(PathValue::Block(_)))
+    }
+
     pub fn search_nearest_value<'a, I, F>(&self, key: I, mut cmp: F) -> Option<&PathValue>
     where
         I: Iterator<Item = &'a str>,
@@ -172,13 +202,15 @@ impl PathTree {
     }
 
     /// Visits all values matched by the given condition, `from` and `ext`.
+    /// Traverse also can jump over resolved 'use'. then calls the given
+    /// function on the matched value.
     ///
-    /// Traverse will be stopped when the given function returns Some. If you
-    /// want not to do that, return None.
+    /// If the given function returns Some value, then it is returned and
+    /// traverse stops.
     ///
     /// # Caution
     ///
-    /// Do not call this method until all 'use's are resolved.
+    /// This method ignores unresolved 'use'.
     pub fn traverse_from<'a, I, F, R>(&self, mut from: NodeIndex, ext: I, mut f: F) -> Option<R>
     where
         I: Iterator<Item = &'a str> + Clone,
@@ -244,6 +276,8 @@ impl PathTree {
         None
     }
 
+    /// Returns first matched value's id.
+    ///
     /// # Caution
     ///
     /// Do not call this method until all 'use's are resolved.
@@ -259,11 +293,13 @@ impl PathTree {
                 Some(pid)
             }
         })
-        .expect(&format!(
-            "couldn't find path node: `{}` + `{}`",
-            self.named_path(from),
-            ext.collect::<String>()
-        ))
+        .unwrap_or_else(|| {
+            panic!(
+                "couldn't find path node: `{}` + `{}`",
+                self.named_path(from),
+                ext.collect::<String>()
+            )
+        })
     }
 
     pub fn named_path(&self, index: NodeIndex) -> NamedPath {
@@ -281,24 +317,14 @@ impl PathTree {
     }
 
     pub fn is_descendant(&self, descendant: NodeIndex, ancestor: NodeIndex) -> bool {
-        // @@@ TODO: Remove me
-        let mut limit = 1000;
-
         let mut cur = descendant;
-        loop {
-            if cur == ancestor {
-                return true;
-            }
+        while cur != ancestor {
             if cur == Self::ROOT {
                 return false;
             }
-            cur = self.get_node(descendant).parent;
-
-            limit -= 1;
-            if limit == 0 {
-                panic!();
-            }
+            cur = self.get_node(cur).parent;
         }
+        true
     }
 
     /// Returns id of the right above parent module.
@@ -706,6 +732,7 @@ impl IndexMut<ValueIndex> for SmallVec<[PathValue; 1]> {
 }
 
 pub enum PathValue {
+    Block(PathBlock),
     Const(PathConst),
     ConstRaw(PathConstRaw),
     Extern(PathExtern),
@@ -837,7 +864,8 @@ impl PathValue {
             syn: v.syn,
             syn_file: v.syn_file,
             vis_scope,
-            vfpath: mem::take(&mut v.vfpath),
+            fpath: mem::take(&mut v.fpath),
+            mod_rs: v.mod_rs,
         });
     }
 
@@ -885,6 +913,7 @@ impl PathValue {
 
     pub fn syn_id(&self) -> SynId {
         match self {
+            Self::Block(v) => v.syn_id(),
             Self::Const(v) => v.syn_id(),
             Self::ConstRaw(v) => v.syn_id(),
             Self::Extern(v) => v.syn_id(),
@@ -903,6 +932,50 @@ impl PathValue {
         }
     }
 
+    pub fn vis_scope(&self) -> Option<NodeIndex> {
+        match self {
+            Self::Block(v) => {
+                panic!(
+                    "{}: not available visibility for block",
+                    v.syn_id().content()
+                );
+            }
+            Self::Const(v) => Some(v.vis_scope),
+            Self::ConstRaw(_) => None,
+            Self::Extern(v) => {
+                // TODO
+                panic!(
+                    "{}: not available visibility for extern",
+                    v.syn_id().content()
+                );
+            }
+            Self::Field(v) => {
+                // TODO
+                panic!(
+                    "{}: not available visibility for field",
+                    v.syn_id().content()
+                );
+            }
+            Self::FieldRaw(v) => {
+                // TODO
+                panic!(
+                    "{}: not available visibility for field",
+                    v.syn_id().content()
+                );
+            }
+            Self::Fn(v) => Some(v.vis_scope),
+            Self::FnRaw(_) => None,
+            Self::Mod(v) => Some(v.vis_scope),
+            Self::ModRaw(_) => None,
+            Self::Struct(v) => Some(v.vis_scope),
+            Self::StructRaw(_) => None,
+            Self::TypeAlias(v) => Some(v.vis_scope),
+            Self::TypeAliasRaw(_) => None,
+            Self::Use(v) => Some(v.vis_scope),
+            Self::UseRaw(_) => None,
+        }
+    }
+
     pub fn is_type(&self) -> bool {
         matches!(self, Self::Extern(_) | Self::Struct(_) | Self::StructRaw(_))
     }
@@ -911,6 +984,7 @@ impl PathValue {
 impl fmt::Debug for PathValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Block(v) => v.fmt(f),
             Self::Const(v) => v.fmt(f),
             Self::ConstRaw(v) => v.fmt(f),
             Self::Extern(v) => v.fmt(f),
@@ -931,15 +1005,31 @@ impl fmt::Debug for PathValue {
 }
 
 #[derive(Debug)]
+pub struct PathBlock {
+    /// Read-only pointer to a syntax tree node that never changes.
+    pub syn: *const syn::Block,
+}
+
+impl PathBlock {
+    pub fn as_syn<'o>(&self) -> &'o syn::Block {
+        unsafe { self.syn.as_ref().expect("PathBlock contains nullptr") }
+    }
+
+    pub fn syn_id(&self) -> SynId {
+        self.as_syn().syn_id()
+    }
+}
+
+#[derive(Debug)]
 pub struct PathConst {
     /// Read-only pointer to a syntax tree node that never changes.
-    pub syn: *const SmItemConst,
+    pub syn: *const syn::ItemConst,
     pub vis_scope: NodeIndex,
     pub elem_ty: PathId,
 }
 
 impl PathConst {
-    pub fn as_syn<'o>(&self) -> &'o SmItemConst {
+    pub fn as_syn<'o>(&self) -> &'o syn::ItemConst {
         unsafe { self.syn.as_ref().expect("PathConst contains nullptr") }
     }
 
@@ -951,11 +1041,11 @@ impl PathConst {
 #[derive(Debug)]
 pub struct PathConstRaw {
     /// Read-only pointer to a syntax tree node that never changes.
-    pub syn: *const SmItemConst,
+    pub syn: *const syn::ItemConst,
 }
 
 impl PathConstRaw {
-    pub fn as_syn<'o>(&self) -> &'o SmItemConst {
+    pub fn as_syn<'o>(&self) -> &'o syn::ItemConst {
         unsafe { self.syn.as_ref().expect("PathConstRaw contains nullptr") }
     }
 
@@ -974,12 +1064,14 @@ pub struct PathExtern {
     ///
     /// Note, however, that this identifier doesn't mean unique syntax node that
     /// corresponds to this extern. Many syntax nodes can be related with this
-    /// extern. For example, many syntax node of "i32" will share this extern.
+    /// extern. For example, multiple syntax nodes of "i32" will share this
+    /// extern.
     ///
-    /// Also, extern is a part of the non-extern nodes like below.
-    /// - [`SmItemConst::ty`]
+    /// Also, extern node would be a part of a non-extern node like below.
+    /// - [`syn::ItemConst::ty`]
     /// - [`syn::Field::ty`]
     /// - [`syn::ItemUse::tree`]
+    /// - and so on.
     pub sid: SynId,
 }
 
@@ -992,12 +1084,12 @@ impl PathExtern {
 #[derive(Debug)]
 pub struct PathField {
     /// Read-only pointer to a syntax tree node that never changes.
-    pub syn: *const SmField,
+    pub syn: *const syn::Field,
     pub elem_ty: PathId,
 }
 
 impl PathField {
-    pub fn as_syn<'o>(&self) -> &'o SmField {
+    pub fn as_syn<'o>(&self) -> &'o syn::Field {
         unsafe { self.syn.as_ref().expect("PathField contains nullptr") }
     }
 
@@ -1009,11 +1101,11 @@ impl PathField {
 #[derive(Debug)]
 pub struct PathFieldRaw {
     /// Read-only pointer to a syntax tree node that never changes.
-    pub syn: *const SmField,
+    pub syn: *const syn::Field,
 }
 
 impl PathFieldRaw {
-    pub fn as_syn<'o>(&self) -> &'o SmField {
+    pub fn as_syn<'o>(&self) -> &'o syn::Field {
         unsafe { self.syn.as_ref().expect("PathFieldRaw contains nullptr") }
     }
 
@@ -1025,12 +1117,14 @@ impl PathFieldRaw {
 #[derive(Debug)]
 pub struct PathFn {
     /// Read-only pointer to a syntax tree node that never changes.
-    pub syn: *const ItemFn,
+    pub syn: *const syn::ItemFn,
+
+    /// Refer to the [module documentation](self).
     pub vis_scope: NodeIndex,
 }
 
 impl PathFn {
-    pub fn as_syn<'o>(&self) -> &'o ItemFn {
+    pub fn as_syn<'o>(&self) -> &'o syn::ItemFn {
         unsafe { self.syn.as_ref().expect("PathFn contains nullptr") }
     }
 
@@ -1042,11 +1136,11 @@ impl PathFn {
 #[derive(Debug)]
 pub struct PathFnRaw {
     /// Read-only pointer to a syntax tree node that never changes.
-    pub syn: *const ItemFn,
+    pub syn: *const syn::ItemFn,
 }
 
 impl PathFnRaw {
-    pub fn as_syn<'o>(&self) -> &'o ItemFn {
+    pub fn as_syn<'o>(&self) -> &'o syn::ItemFn {
         unsafe { self.syn.as_ref().expect("PathFnRaw contains nullptr") }
     }
 
@@ -1062,28 +1156,35 @@ impl PathFnRaw {
 #[derive(Debug)]
 pub struct PathMod {
     /// Read-only pointer to a syntax tree node that never changes.
-    pub syn: *const SmItemMod,
+    pub syn: *const syn::ItemMod,
 
     pub syn_file: Option<*const SmFile>,
 
+    /// Refer to the [module documentation](self).
     pub vis_scope: NodeIndex,
 
-    /// Virtual absolute file path that represent this module.
+    /// Absolute file path that represent this module.
     ///
     /// ```ignore
-    /// // /a/b/c.rs
-    /// mod foo {           // vfpath: /a/b/c/foo
-    ///     #[path = "x"]
-    ///     mod bar {       // vfpath: /a/b/c/foo/x
-    ///         mod baz {}  // vfpath: /a/b/c/foo/x/baz
-    ///     }
+    /// // /a.rs
+    /// mod b {           // fpath: /a/b
+    ///     mod c;        // fpath: /a/b/c.rs or /a/b/c/mod.rs
     /// }
+    /// #[path = "d.rs"]
+    /// mod d;            // fpath: /d.rs
+    /// mod e;            // fpath: /a/e.rs or /a/e/mod.rs
     /// ```
-    pub vfpath: PathBuf,
+    pub fpath: PathBuf,
+
+    /// - True if the file is one of "mod.rs", "main.rs", or "lib.rs".
+    /// - True if the file is determined by "path" attribute, plus the module is
+    ///   inline (e.g. #[path = "a.rs"] mod foo;)
+    /// - False otherwise.
+    pub mod_rs: bool,
 }
 
 impl PathMod {
-    pub fn as_syn<'o>(&self) -> &'o SmItemMod {
+    pub fn as_syn<'o>(&self) -> &'o syn::ItemMod {
         unsafe { self.syn.as_ref().expect("PathMod contains nullptr") }
     }
 
@@ -1095,7 +1196,7 @@ impl PathMod {
         if !self.syn.is_null() {
             self.as_syn().content.is_some()
         } else {
-            true
+            false
         }
     }
 }
@@ -1103,18 +1204,27 @@ impl PathMod {
 #[derive(Debug)]
 pub struct PathModRaw {
     /// Read-only pointer to a syntax tree node that never changes.
-    pub syn: *const SmItemMod,
+    pub syn: *const syn::ItemMod,
     pub syn_file: Option<*const SmFile>,
-    pub vfpath: PathBuf,
+    pub fpath: PathBuf,
+    pub mod_rs: bool,
 }
 
 impl PathModRaw {
-    pub fn as_syn<'o>(&self) -> &'o SmItemMod {
+    pub fn as_syn<'o>(&self) -> &'o syn::ItemMod {
         unsafe { self.syn.as_ref().expect("PathModRaw contains nullptr") }
     }
 
     pub fn syn_id(&self) -> SynId {
         self.as_syn().syn_id()
+    }
+
+    pub fn is_inline(&self) -> bool {
+        if !self.syn.is_null() {
+            self.as_syn().content.is_some()
+        } else {
+            false
+        }
     }
 
     pub fn visibility(&self) -> PathVis {
@@ -1129,12 +1239,14 @@ impl PathModRaw {
 #[derive(Debug)]
 pub struct PathStruct {
     /// Read-only pointer to a syntax tree node that never changes.
-    pub syn: *const SmItemStruct,
+    pub syn: *const syn::ItemStruct,
+
+    /// Refer to the [module documentation](self).
     pub vis_scope: NodeIndex,
 }
 
 impl PathStruct {
-    pub fn as_syn<'o>(&self) -> &'o SmItemStruct {
+    pub fn as_syn<'o>(&self) -> &'o syn::ItemStruct {
         unsafe { self.syn.as_ref().expect("PathStruct contains nullptr") }
     }
 
@@ -1146,11 +1258,11 @@ impl PathStruct {
 #[derive(Debug)]
 pub struct PathStructRaw {
     /// Read-only pointer to a syntax tree node that never changes.
-    pub syn: *const SmItemStruct,
+    pub syn: *const syn::ItemStruct,
 }
 
 impl PathStructRaw {
-    pub fn as_syn<'o>(&self) -> &'o SmItemStruct {
+    pub fn as_syn<'o>(&self) -> &'o syn::ItemStruct {
         unsafe { self.syn.as_ref().expect("PathStructRaw contains nullptr") }
     }
 
@@ -1166,12 +1278,14 @@ impl PathStructRaw {
 #[derive(Debug)]
 pub struct PathTypeAlias {
     /// Read-only pointer to a syntax tree node that never changes.
-    pub syn: *const ItemType,
+    pub syn: *const syn::ItemType,
+
+    /// Refer to the [module documentation](self).
     pub vis_scope: NodeIndex,
 }
 
 impl PathTypeAlias {
-    pub fn as_syn<'o>(&self) -> &'o ItemType {
+    pub fn as_syn<'o>(&self) -> &'o syn::ItemType {
         unsafe { self.syn.as_ref().expect("PathTypeAlias contains nullptr") }
     }
 
@@ -1183,11 +1297,11 @@ impl PathTypeAlias {
 #[derive(Debug)]
 pub struct PathTypeAliasRaw {
     /// Read-only pointer to a syntax tree node that never changes.
-    pub syn: *const ItemType,
+    pub syn: *const syn::ItemType,
 }
 
 impl PathTypeAliasRaw {
-    pub fn as_syn<'o>(&self) -> &'o ItemType {
+    pub fn as_syn<'o>(&self) -> &'o syn::ItemType {
         unsafe {
             self.syn
                 .as_ref()
@@ -1207,7 +1321,7 @@ impl PathTypeAliasRaw {
 #[derive(Debug)]
 pub struct PathUse {
     /// Read-only pointer to a syntax tree node that never changes.
-    pub syn: *const ItemUse,
+    pub syn: *const syn::ItemUse,
 
     /// Pointer to a specific item in the [`ItemUse::tree`].
     ///
@@ -1215,12 +1329,13 @@ pub struct PathUse {
     /// points to 'b', 'c', or '*'.
     pub detail: SynId,
 
+    /// Refer to the [module documentation](self).
     pub vis_scope: NodeIndex,
     pub dst: NodeIndex,
 }
 
 impl PathUse {
-    pub fn as_syn<'o>(&self) -> &'o ItemUse {
+    pub fn as_syn<'o>(&self) -> &'o syn::ItemUse {
         unsafe { self.syn.as_ref().expect("PathUse contains nullptr") }
     }
 
@@ -1232,7 +1347,7 @@ impl PathUse {
 #[derive(Debug)]
 pub struct PathUseRaw {
     /// Read-only pointer to a syntax tree node that never changes.
-    pub syn: *const ItemUse,
+    pub syn: *const syn::ItemUse,
 
     /// Pointer to a specific item in the [`ItemUse::tree`].
     ///
@@ -1244,7 +1359,7 @@ pub struct PathUseRaw {
 }
 
 impl PathUseRaw {
-    pub fn as_syn<'o>(&self) -> &'o ItemUse {
+    pub fn as_syn<'o>(&self) -> &'o syn::ItemUse {
         unsafe { self.syn.as_ref().expect("PathUseRaw contains nullptr") }
     }
 
@@ -1329,55 +1444,6 @@ impl NamedPath {
             path: self.as_str(),
         }
     }
-
-    pub fn normalize(&mut self) {
-        if self.is_empty() {
-            return;
-        }
-        if self.starts_with("::") {
-            self.0 = self.trim_start_matches("::").to_owned();
-            return;
-        }
-
-        let mut segments: VecDeque<&str> = self.split("::").collect();
-        let org_len = segments.len();
-
-        // `crate` must be located at the first position. But the input path may
-        // include preceding ancestor path before the `crate` keyword.
-        if let Some((i, _)) = segments
-            .iter()
-            .enumerate()
-            .rfind(|(_, segment)| **segment == "crate")
-        {
-            segments.rotate_left(i);
-            segments.truncate(segments.len() - i);
-        }
-
-        // `super`s must be located start positions. But the input path may include
-        // preceding ancestor path before the `super` keyword.
-        let mut l = 0;
-        while l < segments.len() {
-            if segments[l] == "super" {
-                assert!(l > 0);
-                segments.remove(l);
-                segments.remove(l - 1);
-                l -= 1;
-            } else {
-                l += 1;
-            }
-        }
-
-        if segments.len() != org_len {
-            let mut normalized = String::new();
-            for (i, segment) in segments.iter().enumerate() {
-                normalized.push_str(segment);
-                if i < segments.len() - 1 {
-                    normalized.push_str("::");
-                }
-            }
-            self.0 = normalized;
-        }
-    }
 }
 
 impl Default for NamedPath {
@@ -1460,10 +1526,10 @@ pub enum PathVis {
 }
 
 impl PathVis {
-    pub fn new(vis: &Visibility) -> Self {
+    pub fn new(vis: &syn::Visibility) -> Self {
         match vis {
-            Visibility::Public(_) => PathVis::Pub,
-            Visibility::Restricted(VisRestricted { path, .. }) => {
+            syn::Visibility::Public(_) => PathVis::Pub,
+            syn::Visibility::Restricted(syn::VisRestricted { path, .. }) => {
                 let path = util::path_to_string(&path);
                 match path.as_str() {
                     "crate" => PathVis::PubCrate,
@@ -1472,7 +1538,7 @@ impl PathVis {
                     _ => PathVis::PubPath(path.into()),
                 }
             }
-            Visibility::Inherited => PathVis::Private,
+            syn::Visibility::Inherited => PathVis::Private,
         }
     }
 }

@@ -8,13 +8,13 @@ repository = "https://github.com/ecoricemon/acttey"
 license = "Apache-2.0 OR MIT"
 
 [lib]
-proc-macro = true
-doctest = false
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 wgsl-builtin = { version = "0.1.0", path = "../wgsl-builtin" }
-proc-macro2 = "1.0.69"
-quote = "1.0.33"
+syn-locator = { version = "0.1.1", path = "../syn-locator" }
 syn = { version = "2.0.38", features = ["full", "extra-traits"] }
+proc-macro2 = { version = "1.0.69" }
+quote = { version = "1.0.33" }
 naga = { version = "24.0.0", features = ["wgsl-out"] }
 smallvec = { version = "1.14.0" }

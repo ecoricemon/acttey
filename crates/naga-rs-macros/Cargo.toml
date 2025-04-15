@@ -1,0 +1,19 @@
+[package]
+name = "naga-rs-macros"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+description = "Macro for naga-rs"
+repository = "https://github.com/ecoricemon/acttey"
+license = "Apache-2.0 OR MIT"
+
+[lib]
+proc-macro = true
+doctest = false
+
+[dependencies]
+naga-rs = { version = "0.0.1", path = "../naga-rs" }
+syn = { version = "2.0.38" }
+proc-macro2 = { version = "1.0.69" }
+quote = { version = "1.0.33" }
+naga = { version = "24.0.0" }

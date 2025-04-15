@@ -5,9 +5,9 @@ syn-locator helps you to find source code locations of
 
 ## When to use
 
-If you read a rust file then parsing the read string through the
-`syn::parse_str`, then you will lose span information. This crate finds source
-code locations of syntax tree nodes by simple string comparison.
+If you read a rust file then parse the read string through the `syn::parse_str`,
+you will lose span information. This crate finds source code locations of syntax
+tree nodes by simple string comparison.
 
 ## Example
 
@@ -15,7 +15,7 @@ code locations of syntax tree nodes by simple string comparison.
     use syn_locator::*;
 
     // Assumes that we read this code from a file.
-    let file_path = "/file/path.rs";
+    let file_path = "/path/to/file.rs";
     let code = r"
         struct Foo {
             a: i32,
@@ -40,5 +40,5 @@ code locations of syntax tree nodes by simple string comparison.
         start: 37, // Byte offset
         end: 40 // Byte offset
     });
-    assert_eq!(field_ty.location_message(), "/file/path.rs:3: i32");
+    assert_eq!(field_ty.location_message(), "/path/to/file.rs:3: i32");
 ```

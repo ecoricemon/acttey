@@ -1,5 +1,5 @@
-use super::tree::NamedPath;
-use naga::{Bytes, Scalar, ScalarKind, Type, TypeInner, VectorSize};
+use super::path_tree::NamedPath;
+use naga::{Scalar, ScalarKind, Type, TypeInner, VectorSize};
 use std::collections::HashMap;
 use wgsl_builtin::{helper::*, prelude::*};
 

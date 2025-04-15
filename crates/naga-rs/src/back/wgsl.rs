@@ -1,34 +1,30 @@
-use crate::util::call_site;
+use crate::{Error, Result};
 use naga::{
     Expression, Literal, Module, Scalar, ScalarKind, Type, TypeInner,
     back::wgsl::{self, WriterFlags},
     valid::{Capabilities, ValidationFlags, Validator},
 };
-use syn::{Error, Result};
 
-pub fn write_string(module: &mut Module, capability: Capabilities) -> Result<()> {
+pub fn write_string(module: &mut Module, capability: Capabilities) -> Result<String> {
     // Resolves abstract numerics according to the capability.
     let int_width = 4 + capability.intersects(Capabilities::SHADER_INT64) as u8 * 4;
     let float_width = 4 + capability.intersects(Capabilities::FLOAT64) as u8 * 4;
     resolve_abstract(module, int_width, float_width)?;
 
     println!("@@@ module");
-    println!("{:?}", module);
+    println!("{:#?}", module);
 
     // Validates the naga module.
     println!("@@@ validation begins");
     let mut validator = Validator::new(ValidationFlags::all(), capability);
 
-    let info = validator
-        .validate(module)
-        .map_err(|e| Error::new(call_site(), e))?;
+    let info = validator.validate(module)?;
 
-    if let Ok(res) = wgsl::write_string(module, &info, WriterFlags::empty()) {
-        println!("@@@ === gen wgsl ===");
-        println!("{res}");
-    };
+    let res = wgsl::write_string(module, &info, WriterFlags::empty())?;
+    println!("@@@ gen wgsl");
+    println!("{res}");
 
-    Ok(())
+    Ok(res)
 }
 
 /// Resolves abstract numerics to i32/i64 or f32/f64.
@@ -101,7 +97,7 @@ pub fn resolve_abstract(module: &mut Module, int_width: u8, float_width: u8) -> 
             Literal::AbstractInt(v) => {
                 if int_width == 4 {
                     if *v > i32::MAX as i64 {
-                        return Err(Error::new(call_site(), &format!("`{v}` exceeds i32::MAX")));
+                        return Err(format!("`{v}` exceeds i32::MAX").into());
                     }
                     *lit = Literal::I32(*v as _);
                 } else {

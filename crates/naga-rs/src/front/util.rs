@@ -1,3 +1,4 @@
+use crate::{Error, Result};
 use std::{
     any::TypeId,
     cell::RefCell,
@@ -5,10 +6,21 @@ use std::{
     env,
     ffi::OsStr,
     fmt::{self, Write},
+    fs,
     hash::{BuildHasher, Hash, RandomState},
     path::{Path as StdPath, PathBuf},
 };
-use syn::{Error, PathSegment, Result, Token, punctuated::Punctuated, spanned::Spanned};
+use syn_locator::Locate;
+
+fn with_path<P>(e: std::io::Error, path: P) -> Error
+where
+    P: AsRef<StdPath>,
+{
+    let mut s = String::new();
+    let path = path.as_ref();
+    write!(&mut s, "file: {path:?}, err: {e}").unwrap();
+    s.into()
+}
 
 // Using 'env::args()' can be used to find more specific root directory than
 // 'env::current_dir()' because 'env::args()' gives us the exact entry file
@@ -19,26 +31,25 @@ where
     P: AsRef<StdPath>,
 {
     let path: &StdPath = path.as_ref();
-    if path.is_absolute() {
-        path.canonicalize().map_err(|e| Error::new(call_site(), e))
+    let abs_path = if path.is_absolute() {
+        path.canonicalize().map_err(|e| with_path(e, path))?
     } else {
-        env::current_dir()
-            .map_err(|e| Error::new(call_site(), e))?
+        env::current_dir()?
             .join(path)
             .canonicalize()
-            .map_err(|e| Error::new(call_site(), e))
-    }
+            .map_err(|e| with_path(e, path))?
+    };
+    Ok(abs_path)
 }
 
 pub(crate) fn to_relative_path(path: &StdPath) -> Result<&StdPath> {
     let path: &StdPath = path.as_ref();
-    let rel = if path.is_relative() {
+    let rel_path = if path.is_relative() {
         path
     } else {
-        path.strip_prefix(env::current_dir().map_err(|e| Error::new(call_site(), e))?)
-            .map_err(|e| Error::new(call_site(), e))?
+        path.strip_prefix(env::current_dir()?)?
     };
-    Ok(rel)
+    Ok(rel_path)
 }
 
 pub(crate) fn root_dir<P>(path: P) -> Result<PathBuf>
@@ -54,10 +65,20 @@ pub(crate) fn as_dir(path: &StdPath) -> Result<&StdPath> {
     if path.is_dir() {
         Ok(path)
     } else {
-        path.parent().ok_or(Error::new(
-            call_site(),
-            format!("failed to find parent directory of `{path:?}`"),
-        ))
+        path.parent()
+            .ok_or(format!("failed to find parent directory of `{path:?}`").into())
+    }
+}
+
+pub(crate) fn is_mod_rs<P>(path: P) -> bool
+where
+    P: AsRef<StdPath>,
+{
+    let path = path.as_ref();
+    if path.is_file() {
+        path.ends_with("mod.rs") || path.ends_with("lib.rs") || path.ends_with("main.rs")
+    } else {
+        false
     }
 }
 
@@ -70,8 +91,8 @@ where
     let mut cur = as_dir(&abs_path)?;
 
     loop {
-        for entry in std::fs::read_dir(cur).map_err(|e| Error::new(call_site(), e))? {
-            let entry = entry.map_err(|e| Error::new(call_site(), e))?;
+        for entry in fs::read_dir(cur)? {
+            let entry = entry?;
             let path = entry.path();
             let Some(fname) = path.file_name() else {
                 continue;
@@ -87,8 +108,7 @@ where
         }
     }
 
-    let reason = format!("couldn't find entry file for `{cur:?}`");
-    Err(Error::new(call_site(), reason))
+    Err(format!("couldn't find entry file for `{cur:?}`").into())
 }
 
 /// e.g.
@@ -102,13 +122,11 @@ where
 {
     let fpath: &StdPath = fpath.as_ref();
     if fpath.is_dir() {
-        let reason = format!("{:?} is not a rust file", fpath);
-        return Err(Error::new(call_site(), reason));
+        return Err(format!("{:?} is not a rust file", fpath).into());
     }
     if let Some(ext) = fpath.extension() {
         if ext != "rs" {
-            let reason = format!("{:?} is not a rust file", fpath);
-            return Err(Error::new(call_site(), reason));
+            return Err(format!("{:?} is not a rust file", fpath).into());
         }
     }
 
@@ -142,8 +160,7 @@ pub(crate) fn os_str_to_str(os: &OsStr) -> Result<&str> {
     if let Some(s) = os.to_str() {
         Ok(s)
     } else {
-        let reason = format!("`{os:?}` is not a UTF-8 literal");
-        Err(Error::new(call_site(), reason))
+        Err(format!("`{os:?}` is not a UTF-8 literal").into())
     }
 }
 
@@ -161,7 +178,7 @@ pub(crate) fn element_type_path_string(ty: &syn::Type) -> Result<String> {
     if let syn::Type::Path(v) = element_type(ty)? {
         Ok(path_to_string(&v.path))
     } else {
-        Err(Error::new(ty.span(), "not supported type"))
+        Err(format!("{}: not supported type", ty.location_message()).into())
     }
 }
 
@@ -170,7 +187,7 @@ pub(crate) fn element_type(ty: &syn::Type) -> Result<&syn::Type> {
         syn::Type::Path(_) => Ok(ty),
         syn::Type::Array(v) => element_type(&v.elem),
         syn::Type::Slice(v) => element_type(&v.elem),
-        _ => Err(Error::new(ty.span(), "not supported type")),
+        _ => Err(format!("{}: not supported type", ty.location_message()).into()),
     }
 }
 

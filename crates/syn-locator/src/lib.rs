@@ -1,10 +1,9 @@
 #![doc = include_str!("../README.md")]
 
 use std::{
-    any::{Any, TypeId},
+    any::{self, Any, TypeId},
     cell::RefCell,
     collections::HashMap,
-    fmt,
     pin::Pin,
 };
 
@@ -41,23 +40,18 @@ pub trait Locate: Any {
         loc
     }
 
-    fn location(&self) -> Location
-    where
-        Self: fmt::Debug,
-    {
+    fn location(&self) -> Location {
         LOCATOR
             .with_borrow(|locator| locator.get_location(self))
             .unwrap_or_else(|| {
                 panic!(
-                    "failed to find the location of `{self:?}`. did you forget `Locate::locate`?"
+                    "failed to find the location of `{}`. did you forget `Locate::locate`?",
+                    any::type_name_of_val(self)
                 )
             })
     }
 
-    fn location_message(&self) -> String
-    where
-        Self: fmt::Debug,
-    {
+    fn location_message(&self) -> String {
         LOCATOR
             .with_borrow(|locator| {
                 let loc = locator.get_location(self)?;
@@ -74,15 +68,13 @@ pub trait Locate: Any {
             })
             .unwrap_or_else(|| {
                 panic!(
-                    "failed to find the location of `{self:?}`. did you forget `Locate::locate`?"
+                    "failed to find the location of `{}`. did you forget `Locate::locate`?",
+                    any::type_name_of_val(self)
                 )
             })
     }
 
-    fn code(&self) -> String
-    where
-        Self: fmt::Debug,
-    {
+    fn code(&self) -> String {
         LOCATOR
             .with_borrow(|locator| {
                 let loc = locator.get_location(self)?;
@@ -94,7 +86,8 @@ pub trait Locate: Any {
             })
             .unwrap_or_else(|| {
                 panic!(
-                    "failed to find the location of `{self:?}`. did you forget `Locate::locate`?"
+                    "failed to find the location of `{}`. did you forget `Locate::locate`?",
+                    any::type_name_of_val(self)
                 )
             })
     }
@@ -1288,8 +1281,23 @@ impl Locate for syn::FieldMutability {
     }
 }
 
+// If there's no ': pat' in the field, `self.pat` is partially cloned instead of
+// being parsed from token stream.
+// ref: https://github.com/dtolnay/syn/blob/5357c8fb6bd29fd7c829e0aede1dab4b45a6e00f/src/pat.rs#L556
 impl Locate for syn::FieldPat {
     fn find_loc(&self, file_path: &'static str, code: &str, offset: usize) -> Location {
+        if self.colon_token.is_none() {
+            if let syn::Pat::Ident(..) = &*self.pat {
+                let loc = (&self.attrs, &self.colon_token, &self.pat)
+                    .locate_as_group(file_path, code, offset);
+
+                self.member
+                    .locate(file_path, code, self.attrs.location().end);
+
+                return loc;
+            }
+        }
+
         (&self.attrs, &self.member, &self.colon_token, &self.pat)
             .locate_as_group(file_path, code, offset)
     }
@@ -1723,10 +1731,22 @@ impl Locate for syn::ItemImpl {
     }
 }
 
+// Parse order is not the same as the order they are declared.
+// ref: https://github.com/dtolnay/syn/blob/5357c8fb6bd29fd7c829e0aede1dab4b45a6e00f/src/item.rs#L1240
 impl Locate for syn::ItemMacro {
     fn find_loc(&self, file_path: &'static str, code: &str, offset: usize) -> Location {
-        (&self.attrs, &self.ident, &self.mac, &self.semi_token)
-            .locate_as_group(file_path, code, offset)
+        Surround {
+            front: (
+                &self.attrs,
+                &self.mac.path,
+                &self.mac.bang_token,
+                &self.ident,
+            ),
+            surround: &self.mac.delimiter,
+            inner: (), // tokens are not processed yet.
+            back: &self.semi_token,
+        }
+        .locate(file_path, code, offset)
     }
 }
 
@@ -2037,6 +2057,16 @@ impl Locate for syn::Macro {
                 back: (),
             }
             .locate(file_path, code, offset),
+        }
+    }
+}
+
+impl Locate for syn::MacroDelimiter {
+    fn find_loc(&self, file_path: &'static str, code: &str, offset: usize) -> Location {
+        match self {
+            Self::Paren(v) => v.locate(file_path, code, offset),
+            Self::Brace(v) => v.locate(file_path, code, offset),
+            Self::Bracket(v) => v.locate(file_path, code, offset),
         }
     }
 }
