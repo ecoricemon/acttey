@@ -184,10 +184,9 @@ pub(crate) fn element_type_path_string(ty: &syn::Type) -> Result<String> {
 
 pub(crate) fn element_type(ty: &syn::Type) -> Result<&syn::Type> {
     match ty {
-        syn::Type::Path(_) => Ok(ty),
         syn::Type::Array(v) => element_type(&v.elem),
         syn::Type::Slice(v) => element_type(&v.elem),
-        _ => Err(format!("{}: not supported type", ty.location_message()).into()),
+        _ => Ok(ty),
     }
 }
 
@@ -205,10 +204,10 @@ where
     .unwrap();
 }
 
-pub(crate) fn assert_finite_loop<K, E>(key: K, err: E)
+pub(crate) fn assert_finite_loop<K, F>(key: K, on_error: F)
 where
     K: Eq + Hash + fmt::Debug + Clone + 'static,
-    E: fmt::Display,
+    F: FnOnce(),
 {
     thread_local! {
         static COUNTERS: RefCell<HashMap<TypeId, HashMap<u64, u32>>> = RefCell::new(
@@ -227,7 +226,7 @@ where
             .and_modify(|cnt| {
                 *cnt -= 1;
                 if *cnt == 0 {
-                    panic!("abnormal iterations: msg: {err}, key: {key:?}");
+                    on_error();
                 }
             })
             .or_insert(10);

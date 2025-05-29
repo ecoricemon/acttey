@@ -1,18 +1,19 @@
 //! # Visibility
 //!
-//! Some [`PathValue`]s contain `vis_scope` field. That field indicates a node
+//! Some [`PathValue`]s contain `vis_node` field. That field indicates a node
 //! index of a module that the value is visible. See an example below.
 //! ```ignore
 //! mod a {
 //!     mod b {
-//!         struct A;            // vis_scope: Node index to 'mod b'
-//!         pub(super) struct B; // vis_scope: Node index to 'mod a'
+//!         struct A;            // vis_node: Node index to 'mod b'
+//!         pub(super) struct B; // vis_node: Node index to 'mod a'
 //!     }
 //! }
 //! ```
 //! We use node index instead of path id becuase a node can have only one
 //! module, plus, it makes visibility check easy.
 
+use super::known;
 use crate::{
     Result,
     front::{
@@ -23,22 +24,25 @@ use crate::{
         util,
     },
 };
+use indexmap::IndexSet;
 use smallvec::SmallVec;
 use std::{
     borrow::Cow,
-    cell::Cell,
+    cell::{Cell, UnsafeCell},
     cmp,
     collections::HashSet,
     fmt,
-    iter::{self, FusedIterator},
-    mem,
-    ops::{self, Deref, DerefMut, Index, IndexMut},
+    hash::Hash,
+    iter::{self, FusedIterator, Skip},
+    mem, ops,
     path::{Path as StdPath, PathBuf},
     result::Result as StdResult,
 };
+use syn_locator::Locate;
 
 pub struct PathTree {
     nodes: Vec<PathNode>,
+    types: UnsafeCell<IndexSet<RefType>>,
 }
 
 impl PathTree {
@@ -47,88 +51,96 @@ impl PathTree {
     pub fn new() -> Self {
         // Starts with the root node.
         let nodes = vec![PathNode {
-            leaf: SmallVec::new(),
+            values: SmallVec::new(),
             parent: Self::ROOT,
             children: Vec::new(),
         }];
-        Self { nodes }
+
+        Self {
+            nodes,
+            types: UnsafeCell::new(IndexSet::new()),
+        }
+    }
+
+    pub fn num_nodes(&self) -> usize {
+        self.nodes.len()
     }
 
     pub fn iter(&self) -> PathIter<'_> {
         PathIter::new(self)
     }
 
-    pub fn values(&self) -> PathValues<'_> {
-        PathValues::new(self)
+    pub fn iter_mut(&mut self) -> PathIterMut<'_> {
+        PathIterMut::new(self)
     }
 
-    pub fn get_node(&self, index: NodeIndex) -> &PathNode {
-        &self.nodes[index]
+    pub fn get_type(&self, id: RefTypeId) -> &RefType {
+        let types = unsafe { self.types.get().as_ref().unwrap_unchecked() };
+        &types[id.0]
     }
 
-    pub fn get_mut_node(&mut self, index: NodeIndex) -> &mut PathNode {
-        &mut self.nodes[index]
+    pub fn get_type_id_of(&self, ty: &RefType) -> Option<RefTypeId> {
+        let types = unsafe { self.types.get().as_ref().unwrap_unchecked() };
+        types.get_index_of(ty).map(|index| RefTypeId(index))
     }
 
-    pub fn get_value(&self, id: PathId) -> &PathValue {
-        let node = self.get_node(id.ni);
-        &node.leaf[id.vi]
+    pub fn insert_type(&self, ty: RefType) -> RefTypeId {
+        let types = unsafe { self.types.get().as_mut().unwrap_unchecked() };
+        let (index, _) = types.insert_full(ty);
+        RefTypeId(index)
     }
 
-    pub fn get_mut_value(&mut self, id: PathId) -> &mut PathValue {
-        let node = self.get_mut_node(id.ni);
-        &mut node.leaf[id.vi]
-    }
-
-    pub fn get_values(&self, index: NodeIndex) -> &[PathValue] {
-        let node = self.get_node(index);
-        &node.leaf
-    }
-
-    pub fn get_glob_values(&self, index: NodeIndex) -> &[PathValue] {
-        let node = self.get_node(index);
-        if let Some(glob) = node.children.iter().find(|(k, _)| k == "*") {
-            let glob_node = self.get_node(glob.1);
-            &glob_node.leaf
-        } else {
-            &[]
+    pub fn normalize_search_condition<'a, I>(
+        &self,
+        mut from: NodeIndex,
+        ext: I,
+    ) -> (NodeIndex, Skip<I>)
+    where
+        I: Iterator<Item = &'a str> + Clone,
+    {
+        let mut ext_off = 0;
+        for seg in ext.clone() {
+            if seg == "crate" {
+                from = self.search(PathTree::ROOT, iter::once("crate")).unwrap();
+                ext_off += 1;
+            } else if seg == "super" {
+                from = self.parent_container(from, [ContainerKind::Mod]).ni;
+                ext_off += 1;
+            } else {
+                break;
+            }
         }
+
+        (from, ext.clone().skip(ext_off))
     }
 
-    pub fn search_values<'a, I>(&self, key: I) -> &[PathValue]
+    pub fn search_values<'a, I>(&self, key: I) -> PathNodeIter
     where
-        I: Iterator<Item = &'a str>,
+        I: IntoIterator<Item = &'a str>,
     {
-        let Some(ni) = self.search_from(Self::ROOT, key) else {
-            return &[];
+        let Some(ni) = self.search(Self::ROOT, key) else {
+            return PathNodeIter::empty();
         };
-        self.nodes[ni].leaf.as_ref()
+        self[ni].iter()
     }
 
-    pub fn search_mut_values<'a, I>(&mut self, key: I) -> &mut [PathValue]
+    pub fn search_mut_values<'a, I>(&mut self, key: I) -> PathNodeIterMut
     where
-        I: Iterator<Item = &'a str>,
+        I: IntoIterator<Item = &'a str>,
     {
-        let Some(ni) = self.search_from(Self::ROOT, key) else {
-            return &mut [];
+        let Some(ni) = self.search(Self::ROOT, key) else {
+            return PathNodeIterMut::empty();
         };
-        self.nodes[ni].leaf.as_mut()
+        self[ni].iter_mut()
     }
 
-    pub fn search<'a, I>(&self, key: I) -> Option<NodeIndex>
+    pub fn search<'a, I>(&self, from: NodeIndex, key: I) -> Option<NodeIndex>
     where
-        I: Iterator<Item = &'a str>,
-    {
-        self.search_from(Self::ROOT, key)
-    }
-
-    pub fn search_from<'a, I>(&self, from: NodeIndex, key: I) -> Option<NodeIndex>
-    where
-        I: Iterator<Item = &'a str>,
+        I: IntoIterator<Item = &'a str>,
     {
         let mut cur = from;
         for seg in key {
-            if let Some(next) = self.nodes[cur].children.iter().find(|(k, _)| k == seg) {
+            if let Some(next) = self[cur].children.iter().find(|(k, _)| k == seg) {
                 cur = next.1;
             } else {
                 return None;
@@ -139,18 +151,18 @@ impl PathTree {
 
     /// Ok: node index to the target and advance count
     /// Err: node index to a node in the middle of search and advance count
-    pub fn search_best_from<'a, I>(
+    pub fn search_best<'a, I>(
         &self,
         from: NodeIndex,
         key: I,
     ) -> StdResult<(NodeIndex, usize), (NodeIndex, usize)>
     where
-        I: Iterator<Item = &'a str>,
+        I: IntoIterator<Item = &'a str>,
     {
         let mut cur = from;
         let mut advance = 0;
         for seg in key {
-            if let Some(next) = self.nodes[cur].children.iter().find(|(k, _)| k == seg) {
+            if let Some(next) = self[cur].children.iter().find(|(k, _)| k == seg) {
                 cur = next.1;
                 advance += 1;
             } else {
@@ -162,7 +174,7 @@ impl PathTree {
 
     pub fn is_in_block<'a, I>(&self, key: I) -> bool
     where
-        I: Iterator<Item = &'a str>,
+        I: IntoIterator<Item = &'a str>,
     {
         let value = self.search_nearest_value(key, |value| {
             matches!(
@@ -176,24 +188,24 @@ impl PathTree {
 
     pub fn search_nearest_value<'a, I, F>(&self, key: I, mut cmp: F) -> Option<&PathValue>
     where
-        I: Iterator<Item = &'a str>,
+        I: IntoIterator<Item = &'a str>,
         F: FnMut(&PathValue) -> bool,
     {
         let mut cur = Self::ROOT;
         let mut nearest = None;
         for seg in key {
-            for value in &self.nodes[cur].leaf {
+            for (_, value) in self[cur].iter() {
                 if cmp(value) {
                     nearest = Some(value);
                 }
             }
-            if let Some(next) = self.nodes[cur].children.iter().find(|(k, _)| k == seg) {
+            if let Some(next) = self[cur].children.iter().find(|(k, _)| k == seg) {
                 cur = next.1;
             } else {
                 break;
             }
         }
-        for value in &self.nodes[cur].leaf {
+        for (_, value) in self[cur].iter() {
             if cmp(value) {
                 nearest = Some(value);
             }
@@ -202,54 +214,55 @@ impl PathTree {
     }
 
     /// Visits all values matched by the given condition, `from` and `ext`.
-    /// Traverse also can jump over resolved 'use'. then calls the given
-    /// function on the matched value.
     ///
-    /// If the given function returns Some value, then it is returned and
-    /// traverse stops.
+    /// If the given function returns Some value, then it is returned
+    /// immediately without further traversing.
     ///
     /// # Caution
     ///
-    /// This method ignores unresolved 'use'.
-    pub fn traverse_from<'a, I, F, R>(&self, mut from: NodeIndex, ext: I, mut f: F) -> Option<R>
+    /// This method ignores unresolved `use` and 'type'.
+    pub fn traverse<'a, I, II, F, R>(&self, from: NodeIndex, ext: I, mut f: F) -> Option<R>
     where
-        I: Iterator<Item = &'a str> + Clone,
-        F: FnMut(PathId) -> Option<R>,
+        I: IntoIterator<IntoIter = II>,
+        II: Iterator<Item = &'a str> + Clone,
+        F: FnMut(PathId, &PathValue) -> Option<R>,
     {
-        // Normalizes the given path.
-        let mut ext_off = 0;
-        for seg in ext.clone() {
-            if seg == "crate" {
-                from = self.search(iter::once("crate")).unwrap();
-                ext_off += 1;
-            } else if seg == "super" {
-                from = self.parent_module(from).ni;
-                ext_off += 1;
-            } else {
-                break;
-            }
-        }
+        let ext = ext.into_iter();
+        let (from, ext) = self.normalize_search_condition(from, ext);
 
         let mut stack = Vec::<(NodeIndex, usize)>::new();
+        stack.push((from, 0));
+
         let mut visited = HashSet::<NodeIndex>::new();
-        stack.push((from, ext_off));
+
+        let jump_if_possible =
+            |stack: &mut Vec<(NodeIndex, usize)>, mid: NodeIndex, advance: usize| {
+                for (_, value) in self[mid].iter() {
+                    match value {
+                        PathValue::Use(PathUse { dst, .. }) => {
+                            stack.push((dst.ni, advance));
+                        }
+                        PathValue::TypeAlias(PathTypeAlias { tid, .. }) => {
+                            if let RefType::Path(dst) = self.get_type(*tid) {
+                                stack.push((dst.ni, advance));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            };
+
         while let Some((from, ext_off)) = stack.pop() {
-            match self.search_best_from(from, ext.clone().skip(ext_off)) {
+            match self.search_best(from, ext.clone().into_iter().skip(ext_off)) {
                 Ok((dst, advance)) => {
                     if !visited.insert(dst) {
                         continue;
                     }
 
-                    // Tries to jump over through 'use'. Note that this method
-                    // assumes all `PathValue`s are resolved.
-                    for value in self.get_values(dst).iter().chain(self.get_glob_values(dst)) {
-                        if let PathValue::Use(PathUse { dst, .. }) = value {
-                            stack.push((*dst, ext_off + advance));
-                        }
-                    }
+                    jump_if_possible(&mut stack, dst, advance);
 
-                    for vi in 0..self.get_values(dst).len() {
-                        let ret = f(PathId::new(dst, vi));
+                    for (vi, value) in self[dst].iter() {
+                        let ret = f(dst.to_path_id(vi), value);
                         if ret.is_some() {
                             return ret;
                         }
@@ -260,13 +273,7 @@ impl PathTree {
                         continue;
                     }
 
-                    // Tries to jump over through 'use'. Note that this method
-                    // assumes all `PathValue`s are resolved.
-                    for value in self.get_values(mid).iter().chain(self.get_glob_values(mid)) {
-                        if let PathValue::Use(PathUse { dst, .. }) = value {
-                            stack.push((*dst, ext_off + advance));
-                        }
-                    }
+                    jump_if_possible(&mut stack, mid, advance);
 
                     // Gives extern matching a try.
                     stack.push((Self::ROOT, ext_off + advance));
@@ -276,38 +283,268 @@ impl PathTree {
         None
     }
 
-    /// Returns first matched value's id.
+    /// Finds a type from the given condition, `from` and `ext`.
+    ///
+    /// This method may look up the given `ext` with other conditions inherited
+    /// from the given `from`. See example below.
+    ///
+    /// ```ignore
+    /// // Let `from` is `a::b::foo::{0}::bar::{0}`
+    /// // a::b::foo::{0}::bar::{0} // Searches in the block
+    /// // a::b::foo::{0}           // Searches in the block
+    /// // a::b                     // Searches in the module
+    /// mod a {
+    ///     mod b {            // Maybe `T` is defined or imported here
+    ///         fn foo() {     // Maybe `T` is defined or imported here
+    ///             fn bar() { // Maybe `T` is defined or imported here
+    ///                 T
+    ///             }
+    ///         }
+    ///     }
+    /// }
+    /// ```
     ///
     /// # Caution
     ///
-    /// Do not call this method until all 'use's are resolved.
-    pub fn reach<'a, I>(&self, from: NodeIndex, ext: I) -> PathId
+    /// This method ignores unresolved 'use'.
+    pub fn search_type<'a, I, II>(&self, from: NodeIndex, ext: I) -> Option<RefTypeId>
     where
-        I: Iterator<Item = &'a str> + Clone,
+        I: IntoIterator<IntoIter = II>,
+        II: Iterator<Item = &'a str> + Clone,
     {
-        self.traverse_from(from, ext.clone(), |pid| {
-            let v = self.get_value(pid);
-            if let PathValue::Use(_) = v {
-                None
-            } else {
-                Some(pid)
+        let ext = ext.into_iter();
+
+        // Determines where we are, 'mod' or 'block'.
+
+        enum Context {
+            Mod,
+            Block,
+        }
+
+        let mut cx = None;
+
+        for (_, value) in self[from].iter() {
+            match value {
+                PathValue::Mod(..) | PathValue::ModRaw(..) => {
+                    cx = Some(Context::Mod);
+                    break;
+                }
+                PathValue::Block(..) | PathValue::Fn(..) | PathValue::FnRaw(..) => {
+                    cx = Some(Context::Block);
+                    break;
+                }
+                _ => {}
             }
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "couldn't find path node: `{}` + `{}`",
-                self.named_path(from),
-                ext.collect::<String>()
-            )
-        })
+        }
+
+        let cx = if let Some(cx) = cx {
+            cx
+        } else {
+            let cont_pid = self.parent_container(
+                from,
+                [ContainerKind::Block, ContainerKind::Fn, ContainerKind::Mod],
+            );
+            match self[cont_pid] {
+                PathValue::Mod(_) | PathValue::ModRaw(_) => Context::Mod,
+                _ => Context::Block,
+            }
+        };
+
+        let from = Cell::new(from);
+
+        let cb = |pid: PathId, value: &PathValue| match value {
+            PathValue::Extern => {
+                let tid = self.insert_type(RefType::Path(pid));
+                Some(tid)
+            }
+            PathValue::Struct(v) => {
+                if self.is_descendant(from.get(), v.vis_node) {
+                    let tid = self.insert_type(RefType::Path(pid));
+                    Some(tid)
+                } else {
+                    None
+                }
+            }
+            PathValue::StructRaw(v) => {
+                if let Some(vis) = v.vis_node {
+                    if self.is_descendant(from.get(), vis) {
+                        let tid = self.insert_type(RefType::Path(pid));
+                        return Some(tid);
+                    }
+                }
+                None
+            }
+            PathValue::TypeAlias(v) => self.is_descendant(from.get(), v.vis_node).then_some(v.tid),
+            PathValue::TypeAliasRaw(v) => {
+                if let Some(vis) = v.vis_node {
+                    if self.is_descendant(from.get(), vis) {
+                        let tid = self.insert_type(RefType::Path(pid));
+                        return Some(tid);
+                    }
+                }
+                None
+            }
+            PathValue::Field(v) => Some(v.tid),
+            _ => None,
+        };
+
+        // In a module context, we cannot see items defined in parent blocks.
+        // Therefore, we don't have to search on other conditions.
+        if matches!(cx, Context::Mod) {
+            self.traverse(from.get(), ext, cb)
+        }
+        // In a block context, we can also see items defined in parant blocks
+        // without explicit prefix like 'super' or something like that. So, we
+        // have to consider parent blocks as well.
+        else {
+            'outer: loop {
+                let res = self.traverse(from.get(), ext.clone(), cb);
+                if res.is_some() {
+                    return res;
+                }
+
+                for (_, value) in self[from.get()].iter() {
+                    match value {
+                        PathValue::Block(..) | PathValue::Fn(..) | PathValue::FnRaw(..) => {
+                            let parent = self[from.get()].parent;
+                            from.set(parent);
+                            break;
+                        }
+                        PathValue::Mod(..) | PathValue::ModRaw(..) => break 'outer,
+                        _ => {}
+                    }
+                }
+            }
+
+            None
+        }
+    }
+
+    /// Finds the nearest value from the given condition, `from`, `ext` and
+    /// `pivot`. The nearest value will be chosen, so be careful of cases like
+    /// below.
+    ///
+    /// ```ignore
+    /// let x = ...;
+    /// let x = x ...; // Pivot should be less than lvalue 'x', not rvalue 'x'.
+    /// ```
+    ///
+    /// Plus, this method looks up the given `ext` with other conditions
+    /// inherited from the given `from`. See example below.
+    ///
+    /// ```ignore
+    /// // Let `from` is `a::b::foo::{0}::bar`
+    /// // a::b::foo::{0}::bar::{0} // Searches in the block
+    /// // a::b::foo::{0}::bar      // Searches in the function arguments
+    /// // a::b                     // Searches in the module
+    /// mod a {
+    ///     mod b {
+    ///         fn foo() {
+    ///             fn bar() {
+    ///                 // Searches here
+    ///                 pivot
+    ///                 // Does not search here
+    ///             }
+    ///         }
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// # Caution
+    ///
+    /// This method ignores unresolved `use`.
+    pub fn search_value<'a, I, II>(
+        &self,
+        mut from: NodeIndex,
+        ext: I,
+        pivot: usize,
+    ) -> Option<PathId>
+    where
+        I: IntoIterator<IntoIter = II>,
+        II: Iterator<Item = &'a str> + Clone,
+    {
+        let ext = ext.into_iter();
+
+        let found = Cell::new(None);
+        let mut least_diff = usize::MAX;
+
+        'outer: loop {
+            self.traverse(from, ext.clone(), |pid, value| {
+                const CONTINUE_TRAVERSING: Option<()> = None;
+                const STOP_TRAVERSING: Option<()> = Some(());
+
+                let try1 = |vis: NodeIndex| {
+                    if self.is_descendant(from, vis) {
+                        found.set(Some(pid));
+                        return STOP_TRAVERSING;
+                    }
+                    CONTINUE_TRAVERSING
+                };
+
+                let try2 = |vis: Option<NodeIndex>| {
+                    if let Some(vis) = vis {
+                        return try1(vis);
+                    }
+                    CONTINUE_TRAVERSING
+                };
+
+                match value {
+                    PathValue::Const(v) => try1(v.vis_node),
+                    PathValue::ConstRaw(v) => try2(v.vis_node),
+                    PathValue::Fn(v) => try1(v.vis_node),
+                    PathValue::FnRaw(v) => try2(v.vis_node),
+                    // Struct constructs are in value namespace.
+                    PathValue::Struct(v) => try1(v.vis_node),
+                    PathValue::StructRaw(v) => try2(v.vis_node),
+                    PathValue::Local(v) => {
+                        let end = v.as_syn().location().end;
+                        if end < pivot && (pivot - end) < least_diff {
+                            least_diff = pivot - end;
+                            found.set(Some(pid));
+                        }
+                        CONTINUE_TRAVERSING
+                    }
+                    PathValue::LocalRaw(v) => {
+                        let end = v.as_syn().location().end;
+                        if end < pivot && (pivot - end) < least_diff {
+                            least_diff = pivot - end;
+                            found.set(Some(pid));
+                        }
+                        CONTINUE_TRAVERSING
+                    }
+                    _ => CONTINUE_TRAVERSING,
+                }
+            });
+
+            if found.get().is_some() {
+                break;
+            }
+
+            for (_, value) in self[from].iter() {
+                match value {
+                    PathValue::Block(..) => {
+                        from = self[from].parent;
+                        break;
+                    }
+                    PathValue::Fn(..) | PathValue::FnRaw(..) => {
+                        from = self.parent_container(from, [ContainerKind::Mod]).ni;
+                        break;
+                    }
+                    PathValue::Mod(..) | PathValue::ModRaw(..) => break 'outer,
+                    _ => {}
+                }
+            }
+        }
+
+        found.get()
     }
 
     pub fn named_path(&self, index: NodeIndex) -> NamedPath {
         let mut cur = index;
         let mut segments = Vec::new();
         while cur != Self::ROOT {
-            let c = self.get_node(cur);
-            let p = self.get_node(c.parent);
+            let c = &self[cur];
+            let p = &self[c.parent];
             let (k, _) = p.children.iter().find(|(_, h)| *h == cur).unwrap();
             segments.push(k.0.clone());
             cur = c.parent;
@@ -322,68 +559,130 @@ impl PathTree {
             if cur == Self::ROOT {
                 return false;
             }
-            cur = self.get_node(cur).parent;
+            cur = self[cur].parent;
         }
         true
-    }
-
-    /// Returns id of the right above parent module.
-    pub fn parent_module(&self, index: NodeIndex) -> PathId {
-        let parent = self.get_node(index).parent;
-        self.nearest_module(parent)
     }
 
     /// Returns the nearest module's id.
     ///
     /// If the node at the given index contains module, then returns its id.
-    /// Note that root node is also considered a module.
     pub fn nearest_module(&self, index: NodeIndex) -> PathId {
-        let mut cur = index;
-        while cur != PathTree::ROOT {
-            let node = self.get_node(cur);
-            for (vi, value) in node.leaf.iter().enumerate() {
-                if matches!(value, PathValue::Mod { .. } | PathValue::ModRaw { .. }) {
-                    return PathId::new(cur, vi);
-                }
+        // If input is a module, then returns it.
+        for (vi, value) in self[index].iter() {
+            if matches!(value, PathValue::Mod(..) | PathValue::ModRaw(..)) {
+                return index.to_path_id(vi);
             }
-            cur = node.parent;
         }
 
-        PathId::new(Self::ROOT, 0)
+        // Otherwise, returns parent module.
+        self.parent_container(index, [ContainerKind::Mod])
+    }
+
+    pub fn parent_container<I, II>(&self, mut index: NodeIndex, filters: I) -> PathId
+    where
+        I: IntoIterator<IntoIter = II>,
+        II: Iterator<Item = ContainerKind> + Clone,
+    {
+        let filters = filters.into_iter();
+
+        while index != Self::ROOT {
+            let cont = self._parent_container(index);
+            if filters.clone().into_iter().any(|kind| kind == cont.kind) {
+                return cont.id;
+            }
+            index = cont.id.ni;
+        }
+        index.to_path_id(0) // Invalid id
+    }
+
+    fn _parent_container(&self, index: NodeIndex) -> Container {
+        let mut parent = self[index].parent;
+        let mut values = self[parent].iter();
+
+        // There are no values between 'crate' and the entry module. In
+        // that case, goes up to the 'crate'.
+        while parent != PathTree::ROOT && values.is_empty() {
+            parent = self[parent].parent;
+            values = self[parent].iter();
+        }
+
+        for (vi, value) in self[parent].iter() {
+            match value {
+                PathValue::Mod(..) | PathValue::ModRaw(..) => {
+                    return Container {
+                        kind: ContainerKind::Mod,
+                        id: parent.to_path_id(vi),
+                    };
+                }
+                PathValue::Block(..) => {
+                    return Container {
+                        kind: ContainerKind::Block,
+                        id: parent.to_path_id(vi),
+                    };
+                }
+                PathValue::Fn(..) | PathValue::FnRaw(..) => {
+                    return Container {
+                        kind: ContainerKind::Fn,
+                        id: parent.to_path_id(vi),
+                    };
+                }
+                PathValue::Struct(..) | PathValue::StructRaw(..) => {
+                    return Container {
+                        kind: ContainerKind::Struct,
+                        id: parent.to_path_id(vi),
+                    };
+                }
+                _ => {}
+            }
+        }
+
+        debug_assert_eq!(parent, PathTree::ROOT);
+        Container {
+            kind: ContainerKind::Root,
+            id: parent.to_path_id(0), // Invalid id
+        }
     }
 
     pub fn append_value<'a, I>(&mut self, from: NodeIndex, key: I, value: PathValue) -> PathId
     where
-        I: Iterator<Item = &'a str>,
+        I: IntoIterator<Item = &'a str>,
     {
-        self.insert_node_then(from, key, |ni, values| {
-            values.push(value);
-            PathId::new(ni, values.len() - 1)
+        self.insert_node_then(from, key, |ni, node| {
+            let vi = node.push(value);
+            ni.to_path_id(vi)
         })
     }
 
-    pub fn insert_node_then<'a, I, F, R>(&mut self, from: NodeIndex, key: I, then: F) -> R
+    fn insert_node_then<'a, I, F, R>(&mut self, from: NodeIndex, key: I, then: F) -> R
     where
-        I: Iterator<Item = &'a str>,
-        F: FnOnce(NodeIndex, &mut SmallVec<[PathValue; 1]>) -> R,
+        I: IntoIterator<Item = &'a str>,
+        F: FnOnce(NodeIndex, &mut PathNode) -> R,
     {
         let mut cur = from;
         for seg in key {
-            if let Some(next) = self.nodes[cur].children.iter().find(|(k, _)| k == seg) {
+            if let Some(next) = self[cur].children.iter().find(|(k, _)| k == seg) {
                 cur = next.1;
             } else {
                 let ni = self.new_node(cur);
                 let seg = seg.to_owned().into();
-                self.nodes[cur].children.push((seg, ni));
+                self[cur].children.push((seg, ni));
                 cur = ni;
             }
         }
-        then(cur, &mut self.nodes[cur].leaf)
+        then(cur, &mut self[cur])
+    }
+
+    /// # Panics
+    ///
+    /// Panics if `id` is out of bounds.
+    pub fn take_value(&mut self, id: PathId) -> PathValue {
+        self[id.ni].take(id.vi)
     }
 
     fn new_node(&mut self, parent: NodeIndex) -> NodeIndex {
         self.nodes.push(PathNode {
-            leaf: SmallVec::new(),
+            values: SmallVec::new(),
             parent,
             children: Vec::new(),
         });
@@ -391,81 +690,212 @@ impl PathTree {
     }
 }
 
-impl Index<PathId> for PathTree {
+impl Default for PathTree {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ops::Index<PathId> for PathTree {
     type Output = PathValue;
 
     fn index(&self, id: PathId) -> &Self::Output {
-        self.get_value(id)
+        let node = &self[id.ni];
+        &node.values[id.vi]
     }
 }
 
-impl IndexMut<PathId> for PathTree {
+impl ops::IndexMut<PathId> for PathTree {
     fn index_mut(&mut self, id: PathId) -> &mut Self::Output {
-        self.get_mut_value(id)
+        let node = &mut self[id.ni];
+        &mut node.values[id.vi]
     }
 }
 
-impl Index<NodeIndex> for PathTree {
+impl ops::Index<NodeIndex> for PathTree {
     type Output = PathNode;
 
     fn index(&self, index: NodeIndex) -> &Self::Output {
-        self.get_node(index)
+        &self.nodes[index]
     }
 }
 
-impl IndexMut<NodeIndex> for PathTree {
+impl ops::IndexMut<NodeIndex> for PathTree {
     fn index_mut(&mut self, index: NodeIndex) -> &mut Self::Output {
-        self.get_mut_node(index)
+        &mut self.nodes[index]
     }
 }
 
 impl fmt::Debug for PathTree {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Known libraries such as "std" or primitives like "u32" are not
+        // printed out except things referenced from client code.
+        let referenced_known = referenced_known(self);
+
         thread_local! {
             static NEED_SEP: Cell<bool> = Cell::new(false);
         }
 
-        fn dfs(
+        let mut key = NamedPath::EMPTY;
+        let res = write_(self, Self::ROOT, &mut key, &referenced_known, f);
+        NEED_SEP.set(false);
+        return res;
+
+        // === Internal helper functions ===
+
+        fn referenced_known(this: &PathTree) -> HashSet<PathId> {
+            let mut referenced_known = HashSet::new();
+            for (pid, subject_value) in this.iter() {
+                let subject = this.named_path(pid.ni);
+                if known::is_known_lib(subject.segments().next().unwrap()) {
+                    continue;
+                }
+                match subject_value {
+                    PathValue::Const(v) => {
+                        insert_referenced_primitive(this, v.tid, &mut referenced_known);
+                    }
+                    PathValue::Field(v) => {
+                        insert_referenced_primitive(this, v.tid, &mut referenced_known);
+                    }
+                    PathValue::Fn(v) => {
+                        insert_referenced_primitive(this, v.ret_tid, &mut referenced_known);
+                    }
+                    PathValue::Local(v) => {
+                        insert_referenced_primitive(this, v.tid, &mut referenced_known);
+                    }
+                    PathValue::TypeAlias(v) => {
+                        insert_referenced_primitive(this, v.tid, &mut referenced_known);
+                    }
+                    PathValue::Use(v) => {
+                        let object = this.named_path(v.dst.ni);
+                        if known::is_known_lib(object.segments().next().unwrap()) {
+                            referenced_known.insert(v.dst);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            referenced_known
+        }
+
+        fn insert_referenced_primitive(
+            this: &PathTree,
+            tid: RefTypeId,
+            referenced_known: &mut HashSet<PathId>,
+        ) {
+            match this.get_type(tid) {
+                RefType::Path(pid) => {
+                    let npath = this.named_path(pid.ni);
+                    if known::is_known_primitive(&npath) {
+                        referenced_known.insert(*pid);
+                    }
+                }
+                RefType::Tuple(tuple) => {
+                    for elem in tuple {
+                        insert_referenced_primitive(this, *elem, referenced_known);
+                    }
+                }
+                RefType::Array { elem } => {
+                    insert_referenced_primitive(this, *elem, referenced_known);
+                }
+                RefType::Slice { elem } => {
+                    insert_referenced_primitive(this, *elem, referenced_known);
+                }
+                RefType::Reference { elem, .. } => {
+                    insert_referenced_primitive(this, *elem, referenced_known);
+                }
+                RefType::InferredInt | RefType::InferredFloat | RefType::Default => {}
+            }
+        }
+
+        fn write_(
             this: &PathTree,
             ni: NodeIndex,
-            key: &mut String,
+            key: &mut NamedPath,
+            referenced_known: &HashSet<PathId>,
             f: &mut fmt::Formatter<'_>,
         ) -> fmt::Result {
             for (seg, child) in &this[ni].children {
                 let org_len = key.len();
                 util::push_colon_path(key, seg);
-                for value in &this[*child].leaf {
+
+                for (vi, value) in this[*child].iter() {
+                    let pid = child.to_path_id(vi);
+
+                    // Unreferenced known libraries are skipped.
+                    if known::is_known_lib(key.segments().next().unwrap())
+                        && !referenced_known.contains(&pid)
+                    {
+                        // !!! TODO: Uncomment me
+                        // continue;
+                    }
+
+                    // Unreferenced known primivites are also skipped.
+                    if known::is_known_primitive(key) && !referenced_known.contains(&pid) {
+                        // !!! TODO: Uncomment me
+                        // continue;
+                    }
+
                     if NEED_SEP.get() {
                         write!(f, "\n")?;
                     }
-                    write!(f, "[{child}] {key} -> {value:?}")?;
+                    write!(f, "{pid} {key} -> ")?;
+                    value.write_debug(this, f)?;
                     NEED_SEP.set(true);
                 }
-                dfs(this, *child, key, f)?;
+                write_(this, *child, key, referenced_known, f)?;
+
                 key.truncate(org_len);
             }
             Ok(())
         }
-
-        let mut key = String::new();
-        let res = dfs(self, Self::ROOT, &mut key, f);
-        NEED_SEP.set(false);
-        res
     }
 }
 
+#[derive(Debug)]
+pub struct PathNode {
+    pub values: SmallVec<[PathValue; 1]>,
+    pub parent: NodeIndex,
+    pub children: Vec<(NamedPath, NodeIndex)>,
+}
+
+impl PathNode {
+    pub fn iter(&self) -> PathNodeIter {
+        PathNodeIter::new(self)
+    }
+
+    pub fn iter_mut(&mut self) -> PathNodeIterMut {
+        PathNodeIterMut::new(self)
+    }
+
+    pub fn push(&mut self, value: PathValue) -> ValueIndex {
+        self.values.push(value);
+        ValueIndex(self.values.len() - 1)
+    }
+
+    /// # Panics
+    ///
+    /// Panics if the given index is out of bounds.
+    pub fn take(&mut self, vi: ValueIndex) -> PathValue {
+        mem::take(&mut self.values[vi.0])
+    }
+}
+
+/// An iterator traversing the whole tree and yielding pairs of [`PathId`] and
+/// reference to a [`PathValue`].
+#[derive(Clone)]
 pub struct PathIter<'a> {
     nodes: &'a [PathNode],
+    node_iter: PathNodeIter<'a>,
     ni: NodeIndex,
-    vi: ValueIndex,
 }
 
 impl<'a> PathIter<'a> {
     fn new(tree: &'a PathTree) -> Self {
         Self {
             nodes: &tree.nodes,
+            node_iter: PathNodeIter::empty(),
             ni: NodeIndex(0),
-            vi: ValueIndex(0),
         }
     }
 }
@@ -474,74 +904,168 @@ impl<'a> Iterator for PathIter<'a> {
     type Item = (PathId, &'a PathValue);
 
     fn next(&mut self) -> Option<Self::Item> {
-        while self.ni < self.nodes.len() {
-            let node = &self.nodes[self.ni];
-            while self.vi < node.leaf.len() {
-                if let Some(value) = node.leaf.get(self.vi.0) {
-                    let id = PathId {
-                        ni: self.ni,
-                        vi: self.vi,
-                    };
-                    self.vi += 1;
-                    return Some((id, value));
-                }
-                self.vi += 1;
+        loop {
+            if let Some((vi, value)) = self.node_iter.next() {
+                let ni = self.ni - 1;
+                return Some((ni.to_path_id(vi), value));
             }
-            self.ni += 1;
-            self.vi = ValueIndex(0);
+
+            if self.ni < self.nodes.len() {
+                self.node_iter = self.nodes[self.ni].iter();
+                self.ni += 1;
+            } else {
+                return None;
+            }
         }
-        None
     }
 }
 
-impl<'a> FusedIterator for PathIter<'a> {}
+impl FusedIterator for PathIter<'_> {}
 
-pub struct PathValues<'a> {
-    nodes: &'a [PathNode],
-    ni: usize,
+/// An iterator traversing the whole tree and yielding pairs of [`PathId`] and
+/// mutable reference to a [`PathValue`].
+pub struct PathIterMut<'a> {
+    nodes: &'a mut [PathNode],
+    node_iter: PathNodeIterMut<'a>,
+    ni: NodeIndex,
+}
+
+impl<'a> PathIterMut<'a> {
+    fn new(tree: &'a mut PathTree) -> Self {
+        Self {
+            nodes: &mut tree.nodes,
+            node_iter: PathNodeIterMut::empty(),
+            ni: NodeIndex(0),
+        }
+    }
+}
+
+impl<'a> Iterator for PathIterMut<'a> {
+    type Item = (PathId, &'a mut PathValue);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some((vi, value)) = self.node_iter.next() {
+                let ni = self.ni - 1;
+                return Some((ni.to_path_id(vi), value));
+            }
+
+            match mem::take(&mut self.nodes) {
+                [] => return None,
+                [head, tail @ ..] => {
+                    self.nodes = tail;
+                    self.node_iter = head.iter_mut();
+                    self.ni += 1;
+                }
+            }
+        }
+    }
+}
+
+impl FusedIterator for PathIterMut<'_> {}
+
+/// An iterator traversing a node's values and yielding pairs of value index and
+/// reference to a [`PathValue`].
+#[derive(Clone)]
+pub struct PathNodeIter<'a> {
+    values: &'a [PathValue],
     vi: usize,
 }
 
-impl<'a> PathValues<'a> {
-    fn new(tree: &'a PathTree) -> Self {
+impl<'a> PathNodeIter<'a> {
+    fn new(node: &'a PathNode) -> Self {
         Self {
-            nodes: &tree.nodes,
-            ni: 0,
+            values: &node.values,
             vi: 0,
         }
     }
-}
 
-impl<'a> Iterator for PathValues<'a> {
-    type Item = &'a PathValue;
+    fn empty() -> Self {
+        Self { values: &[], vi: 0 }
+    }
 
-    fn next(&mut self) -> Option<Self::Item> {
-        while self.ni < self.nodes.len() {
-            let node = &self.nodes[self.ni];
-            while self.vi < node.leaf.len() {
-                let value = node.leaf.get(self.vi);
-                self.vi += 1;
-                if value.is_some() {
-                    return value;
-                }
-            }
-            self.ni += 1;
-            self.vi = 0;
-        }
-        None
+    pub fn is_empty(&self) -> bool {
+        self.clone().count() == 0
     }
 }
 
-impl FusedIterator for PathValues<'_> {}
+impl<'a> Iterator for PathNodeIter<'a> {
+    type Item = (ValueIndex, &'a PathValue);
 
-#[derive(Debug)]
-pub struct PathNode {
-    leaf: SmallVec<[PathValue; 1]>,
-    parent: NodeIndex,
-    children: Vec<(NamedPath, NodeIndex)>,
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(PathValue::None) = self.values.get(self.vi) {
+            self.vi += 1;
+        }
+
+        match self.values.get(self.vi) {
+            Some(PathValue::None) | None => None,
+            Some(value) => {
+                let item = (ValueIndex(self.vi), value);
+                self.vi += 1;
+                Some(item)
+            }
+        }
+    }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+impl FusedIterator for PathNodeIter<'_> {}
+
+/// An iterator traversing a node's values and yielding pairs of value index and
+/// mutable reference to a [`PathValue`].
+pub struct PathNodeIterMut<'a> {
+    values: &'a mut [PathValue],
+    vi: usize,
+}
+
+impl<'a> PathNodeIterMut<'a> {
+    fn new(node: &'a mut PathNode) -> Self {
+        Self {
+            values: &mut node.values,
+            vi: 0,
+        }
+    }
+
+    fn empty() -> Self {
+        Self {
+            values: &mut [],
+            vi: 0,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        // `self.value` gets shorten as we call `next()`.
+        self.values.iter().all(|value| value == &PathValue::None)
+    }
+}
+
+impl<'a> Iterator for PathNodeIterMut<'a> {
+    type Item = (ValueIndex, &'a mut PathValue);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match mem::take(&mut self.values) {
+                [] => return None,
+                [PathValue::None, tail @ ..] => {
+                    self.values = tail;
+                    self.vi += 1;
+                    continue;
+                }
+                [head, tail @ ..] => {
+                    let item = (ValueIndex(self.vi), head);
+
+                    self.values = tail;
+                    self.vi += 1;
+
+                    return Some(item);
+                }
+            }
+        }
+    }
+}
+
+impl FusedIterator for PathNodeIterMut<'_> {}
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PathId {
     pub ni: NodeIndex,
     pub vi: ValueIndex,
@@ -562,13 +1086,13 @@ impl PathId {
 
 impl fmt::Display for PathId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.ni)
+        write!(f, "({},{})", self.ni, self.vi)
     }
 }
 
 impl fmt::Debug for PathId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.ni)
+        write!(f, "({},{})", self.ni, self.vi)
     }
 }
 
@@ -576,10 +1100,10 @@ impl fmt::Debug for PathId {
 pub struct NodeIndex(pub usize);
 
 impl NodeIndex {
-    pub const fn to_path_id(self, vi: usize) -> PathId {
+    pub fn to_path_id<I: Into<ValueIndex>>(self, vi: I) -> PathId {
         PathId {
             ni: self,
-            vi: ValueIndex(vi),
+            vi: vi.into(),
         }
     }
 }
@@ -628,7 +1152,15 @@ impl ops::AddAssign<usize> for NodeIndex {
     }
 }
 
-impl Index<NodeIndex> for [PathNode] {
+impl ops::Sub<usize> for NodeIndex {
+    type Output = Self;
+
+    fn sub(self, rhs: usize) -> Self::Output {
+        Self(self.0 - rhs)
+    }
+}
+
+impl ops::Index<NodeIndex> for [PathNode] {
     type Output = PathNode;
 
     fn index(&self, index: NodeIndex) -> &Self::Output {
@@ -636,13 +1168,13 @@ impl Index<NodeIndex> for [PathNode] {
     }
 }
 
-impl IndexMut<NodeIndex> for [PathNode] {
+impl ops::IndexMut<NodeIndex> for [PathNode] {
     fn index_mut(&mut self, index: NodeIndex) -> &mut Self::Output {
         &mut self[index.0]
     }
 }
 
-impl Index<NodeIndex> for Vec<PathNode> {
+impl ops::Index<NodeIndex> for Vec<PathNode> {
     type Output = PathNode;
 
     fn index(&self, index: NodeIndex) -> &Self::Output {
@@ -650,7 +1182,7 @@ impl Index<NodeIndex> for Vec<PathNode> {
     }
 }
 
-impl IndexMut<NodeIndex> for Vec<PathNode> {
+impl ops::IndexMut<NodeIndex> for Vec<PathNode> {
     fn index_mut(&mut self, index: NodeIndex) -> &mut Self::Output {
         &mut self.as_mut_slice()[index]
     }
@@ -703,7 +1235,7 @@ impl ops::AddAssign<usize> for ValueIndex {
     }
 }
 
-impl Index<ValueIndex> for [PathValue] {
+impl ops::Index<ValueIndex> for [PathValue] {
     type Output = PathValue;
 
     fn index(&self, index: ValueIndex) -> &Self::Output {
@@ -711,43 +1243,49 @@ impl Index<ValueIndex> for [PathValue] {
     }
 }
 
-impl IndexMut<ValueIndex> for [PathValue] {
+impl ops::IndexMut<ValueIndex> for [PathValue] {
     fn index_mut(&mut self, index: ValueIndex) -> &mut Self::Output {
         &mut self[index.0]
     }
 }
 
-impl Index<ValueIndex> for SmallVec<[PathValue; 1]> {
+impl ops::Index<ValueIndex> for SmallVec<[PathValue; 1]> {
     type Output = PathValue;
 
     fn index(&self, index: ValueIndex) -> &Self::Output {
-        &self[index.0]
+        &self.as_slice()[index]
     }
 }
 
-impl IndexMut<ValueIndex> for SmallVec<[PathValue; 1]> {
+impl ops::IndexMut<ValueIndex> for SmallVec<[PathValue; 1]> {
     fn index_mut(&mut self, index: ValueIndex) -> &mut Self::Output {
-        &mut self[index.0]
+        &mut self.as_mut_slice()[index]
     }
 }
 
+#[derive(PartialEq, Eq)]
 pub enum PathValue {
     Block(PathBlock),
     Const(PathConst),
     ConstRaw(PathConstRaw),
-    Extern(PathExtern),
+    Extern,
     Field(PathField),
     FieldRaw(PathFieldRaw),
     Fn(PathFn),
     FnRaw(PathFnRaw),
+    Local(PathLocal),
+    LocalRaw(PathLocalRaw),
     Mod(PathMod),
     ModRaw(PathModRaw),
     Struct(PathStruct),
     StructRaw(PathStructRaw),
+    Trait(PathTrait),
+    TraitRaw(PathTraitRaw),
     TypeAlias(PathTypeAlias),
     TypeAliasRaw(PathTypeAliasRaw),
     Use(PathUse),
     UseRaw(PathUseRaw),
+    None,
 }
 
 impl PathValue {
@@ -786,6 +1324,34 @@ impl PathValue {
         v
     }
 
+    pub fn as_local(&self) -> &PathLocal {
+        let Self::Local(v) = self else {
+            unreachable!("invalid variant at `PathValue::as_local`")
+        };
+        v
+    }
+
+    pub fn as_mut_local(&mut self) -> &mut PathLocal {
+        let Self::Local(v) = self else {
+            unreachable!("invalid variant at `PathValue::as_mut_local`")
+        };
+        v
+    }
+
+    pub fn as_local_raw(&self) -> &PathLocalRaw {
+        let Self::LocalRaw(v) = self else {
+            unreachable!("invalid variant at `PathValue::as_local_raw`")
+        };
+        v
+    }
+
+    pub fn as_mut_local_raw(&mut self) -> &mut PathLocalRaw {
+        let Self::LocalRaw(v) = self else {
+            unreachable!("invalid variant at `PathValue::as_mut_local_raw`")
+        };
+        v
+    }
+
     pub fn as_mod(&self) -> &PathMod {
         let Self::Mod(v) = self else {
             unreachable!("invalid variant at `PathValue::as_mod`")
@@ -793,9 +1359,9 @@ impl PathValue {
         v
     }
 
-    pub fn as_mod_mut(&mut self) -> &mut PathMod {
+    pub fn as_mut_mod(&mut self) -> &mut PathMod {
         let Self::Mod(v) = self else {
-            unreachable!("invalid variant at `PathValue::as_mod_mut`")
+            unreachable!("invalid variant at `PathValue::as_mut_mod`")
         };
         v
     }
@@ -821,9 +1387,37 @@ impl PathValue {
         v
     }
 
+    pub fn as_type_alias(&self) -> &PathTypeAlias {
+        let Self::TypeAlias(v) = self else {
+            unreachable!("invalid variant at `PathValue::as_type_alias`")
+        };
+        v
+    }
+
+    pub fn as_mut_type_alias(&mut self) -> &mut PathTypeAlias {
+        let Self::TypeAlias(v) = self else {
+            unreachable!("invalid variant at `PathValue::as_mut_type_alias`")
+        };
+        v
+    }
+
     pub fn as_type_alias_raw(&self) -> &PathTypeAliasRaw {
         let Self::TypeAliasRaw(v) = self else {
-            unreachable!("invalid variant at `PathValue::as_as_type_alias_raw`")
+            unreachable!("invalid variant at `PathValue::as_type_alias_raw`")
+        };
+        v
+    }
+
+    pub fn as_mut_use(&mut self) -> &mut PathUse {
+        let Self::Use(v) = self else {
+            unreachable!("invalid variant at `PathValue::as_mut_use`")
+        };
+        v
+    }
+
+    pub fn as_use(&self) -> &PathUse {
+        let Self::Use(v) = self else {
+            unreachable!("invalid variant at `PathValue::as_use`")
         };
         v
     }
@@ -835,104 +1429,14 @@ impl PathValue {
         v
     }
 
-    pub fn resolve_const(&mut self, vis_scope: NodeIndex, elem_ty: PathId) {
-        let Self::ConstRaw(v) = self else {
-            unreachable!("invalid variant at `PathValue::resolve_const`")
-        };
-        *self = PathValue::Const(PathConst {
-            syn: v.syn,
-            vis_scope,
-            elem_ty,
-        });
-    }
-
-    pub fn resolve_fn(&mut self, vis_scope: NodeIndex) {
-        let Self::FnRaw(v) = self else {
-            unreachable!("invalid variant at `PathValue::resolve_fn`")
-        };
-        *self = PathValue::Fn(PathFn {
-            syn: v.syn,
-            vis_scope,
-        })
-    }
-
-    pub fn resolve_mod(&mut self, vis_scope: NodeIndex) {
-        let Self::ModRaw(v) = self else {
-            unreachable!("invalid variant at `PathValue::resolve_mod`")
-        };
-        *self = PathValue::Mod(PathMod {
-            syn: v.syn,
-            syn_file: v.syn_file,
-            vis_scope,
-            fpath: mem::take(&mut v.fpath),
-            mod_rs: v.mod_rs,
-        });
-    }
-
-    pub fn resolve_struct(&mut self, vis_scope: NodeIndex) {
-        let Self::StructRaw(v) = self else {
-            unreachable!("invalid variant at `PathValue::resolve_struct`")
-        };
-        *self = PathValue::Struct(PathStruct {
-            syn: v.syn,
-            vis_scope,
-        });
-    }
-
-    pub fn resolve_field(&mut self, elem_ty: PathId) {
-        let Self::FieldRaw(v) = self else {
-            unreachable!("invalid variant at `PathValue::resolve_field`")
-        };
-        *self = PathValue::Field(PathField {
-            syn: v.syn,
-            elem_ty,
-        });
-    }
-
-    pub fn resolve_type_alias(&mut self, vis_scope: NodeIndex) {
-        let Self::TypeAliasRaw(v) = self else {
-            unreachable!("invalid variant at `PathValue::resolve_type_alias`")
-        };
-        *self = PathValue::TypeAlias(PathTypeAlias {
-            syn: v.syn,
-            vis_scope,
-        })
-    }
-
-    pub fn resolve_use(&mut self, vis_scope: NodeIndex, dst: NodeIndex) {
+    pub fn as_mut_use_raw(&mut self) -> &mut PathUseRaw {
         let Self::UseRaw(v) = self else {
-            unreachable!("invalid variant at `PathValue::resolve_use`")
+            unreachable!("invalid variant at `PathValue::as_mut_use_raw`")
         };
-        *self = PathValue::Use(PathUse {
-            syn: v.syn,
-            detail: v.detail,
-            vis_scope,
-            dst,
-        });
+        v
     }
 
-    pub fn syn_id(&self) -> SynId {
-        match self {
-            Self::Block(v) => v.syn_id(),
-            Self::Const(v) => v.syn_id(),
-            Self::ConstRaw(v) => v.syn_id(),
-            Self::Extern(v) => v.syn_id(),
-            Self::Field(v) => v.syn_id(),
-            Self::FieldRaw(v) => v.syn_id(),
-            Self::Fn(v) => v.syn_id(),
-            Self::FnRaw(v) => v.syn_id(),
-            Self::Mod(v) => v.syn_id(),
-            Self::ModRaw(v) => v.syn_id(),
-            Self::Struct(v) => v.syn_id(),
-            Self::StructRaw(v) => v.syn_id(),
-            Self::TypeAlias(v) => v.syn_id(),
-            Self::TypeAliasRaw(v) => v.syn_id(),
-            Self::Use(v) => v.syn_id(),
-            Self::UseRaw(v) => v.syn_id(),
-        }
-    }
-
-    pub fn vis_scope(&self) -> Option<NodeIndex> {
+    pub fn vis_node(&self) -> Option<NodeIndex> {
         match self {
             Self::Block(v) => {
                 panic!(
@@ -940,15 +1444,9 @@ impl PathValue {
                     v.syn_id().content()
                 );
             }
-            Self::Const(v) => Some(v.vis_scope),
-            Self::ConstRaw(_) => None,
-            Self::Extern(v) => {
-                // TODO
-                panic!(
-                    "{}: not available visibility for extern",
-                    v.syn_id().content()
-                );
-            }
+            Self::Const(v) => Some(v.vis_node),
+            Self::ConstRaw(v) => v.vis_node,
+            Self::Extern => None,
             Self::Field(v) => {
                 // TODO
                 panic!(
@@ -963,21 +1461,54 @@ impl PathValue {
                     v.syn_id().content()
                 );
             }
-            Self::Fn(v) => Some(v.vis_scope),
-            Self::FnRaw(_) => None,
-            Self::Mod(v) => Some(v.vis_scope),
-            Self::ModRaw(_) => None,
-            Self::Struct(v) => Some(v.vis_scope),
-            Self::StructRaw(_) => None,
-            Self::TypeAlias(v) => Some(v.vis_scope),
-            Self::TypeAliasRaw(_) => None,
-            Self::Use(v) => Some(v.vis_scope),
-            Self::UseRaw(_) => None,
+            Self::Fn(v) => Some(v.vis_node),
+            Self::FnRaw(v) => v.vis_node,
+            Self::Local(..) => None,
+            Self::LocalRaw(..) => None,
+            Self::Mod(v) => Some(v.vis_node),
+            Self::ModRaw(v) => v.vis_node,
+            Self::Struct(v) => Some(v.vis_node),
+            Self::StructRaw(v) => v.vis_node,
+            Self::Trait(v) => Some(v.vis_node),
+            Self::TraitRaw(v) => v.vis_node,
+            Self::TypeAlias(v) => Some(v.vis_node),
+            Self::TypeAliasRaw(v) => v.vis_node,
+            Self::Use(v) => Some(v.vis_node),
+            Self::UseRaw(v) => v.vis_node,
+            Self::None => None,
         }
     }
 
-    pub fn is_type(&self) -> bool {
-        matches!(self, Self::Extern(_) | Self::Struct(_) | Self::StructRaw(_))
+    fn write_debug<T: fmt::Write>(&self, ptree: &PathTree, f: &mut T) -> fmt::Result {
+        match self {
+            Self::Block(v) => v.write_debug(ptree, f),
+            Self::Const(v) => v.write_debug(ptree, f),
+            Self::ConstRaw(v) => v.write_debug(ptree, f),
+            Self::Extern => write!(f, "Extern"),
+            Self::Field(v) => v.write_debug(ptree, f),
+            Self::FieldRaw(v) => v.write_debug(ptree, f),
+            Self::Fn(v) => v.write_debug(ptree, f),
+            Self::FnRaw(v) => v.write_debug(ptree, f),
+            Self::Local(v) => v.write_debug(ptree, f),
+            Self::LocalRaw(v) => v.write_debug(ptree, f),
+            Self::Mod(v) => v.write_debug(ptree, f),
+            Self::ModRaw(v) => v.write_debug(ptree, f),
+            Self::Struct(v) => v.write_debug(ptree, f),
+            Self::StructRaw(v) => v.write_debug(ptree, f),
+            Self::Trait(v) => v.write_debug(ptree, f),
+            Self::TraitRaw(v) => v.write_debug(ptree, f),
+            Self::TypeAlias(v) => v.write_debug(ptree, f),
+            Self::TypeAliasRaw(v) => v.write_debug(ptree, f),
+            Self::Use(v) => v.write_debug(ptree, f),
+            Self::UseRaw(v) => v.write_debug(ptree, f),
+            Self::None => Ok(()),
+        }
+    }
+}
+
+impl Default for PathValue {
+    fn default() -> Self {
+        Self::None
     }
 }
 
@@ -987,24 +1518,29 @@ impl fmt::Debug for PathValue {
             Self::Block(v) => v.fmt(f),
             Self::Const(v) => v.fmt(f),
             Self::ConstRaw(v) => v.fmt(f),
-            Self::Extern(v) => v.fmt(f),
+            Self::Extern => write!(f, "Extern"),
             Self::Field(v) => v.fmt(f),
             Self::FieldRaw(v) => v.fmt(f),
             Self::Fn(v) => v.fmt(f),
             Self::FnRaw(v) => v.fmt(f),
+            Self::Local(v) => v.fmt(f),
+            Self::LocalRaw(v) => v.fmt(f),
             Self::Mod(v) => v.fmt(f),
             Self::ModRaw(v) => v.fmt(f),
             Self::Struct(v) => v.fmt(f),
             Self::StructRaw(v) => v.fmt(f),
+            Self::Trait(v) => v.fmt(f),
+            Self::TraitRaw(v) => v.fmt(f),
             Self::TypeAlias(v) => v.fmt(f),
             Self::TypeAliasRaw(v) => v.fmt(f),
             Self::Use(v) => v.fmt(f),
             Self::UseRaw(v) => v.fmt(f),
+            Self::None => Ok(()),
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PathBlock {
     /// Read-only pointer to a syntax tree node that never changes.
     pub syn: *const syn::Block,
@@ -1018,14 +1554,22 @@ impl PathBlock {
     pub fn syn_id(&self) -> SynId {
         self.as_syn().syn_id()
     }
+
+    fn write_debug<T: fmt::Write>(&self, _: &PathTree, f: &mut T) -> fmt::Result {
+        write!(f, "Block {{ syn: {:?} }}", self.syn)
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PathConst {
     /// Read-only pointer to a syntax tree node that never changes.
     pub syn: *const syn::ItemConst,
-    pub vis_scope: NodeIndex,
-    pub elem_ty: PathId,
+
+    /// Refer to the [module documentation](self).
+    pub vis_node: NodeIndex,
+
+    /// Type of this value.
+    pub tid: RefTypeId,
 }
 
 impl PathConst {
@@ -1036,12 +1580,25 @@ impl PathConst {
     pub fn syn_id(&self) -> SynId {
         self.as_syn().syn_id()
     }
+
+    fn write_debug<T: fmt::Write>(&self, ptree: &PathTree, f: &mut T) -> fmt::Result {
+        write!(
+            f,
+            "Const {{ syn: {:?}, vis_node: {:?}, ty: ",
+            self.syn, self.vis_node,
+        )?;
+        ptree.get_type(self.tid).write_debug(ptree, f)?;
+        write!(f, " }}")
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PathConstRaw {
     /// Read-only pointer to a syntax tree node that never changes.
     pub syn: *const syn::ItemConst,
+
+    /// Refer to the [module documentation](self).
+    pub vis_node: Option<NodeIndex>,
 }
 
 impl PathConstRaw {
@@ -1056,36 +1613,26 @@ impl PathConstRaw {
     pub fn visibility(&self) -> PathVis {
         PathVis::new(&self.as_syn().vis)
     }
-}
 
-#[derive(Debug)]
-pub struct PathExtern {
-    /// Read-only pointer to a syntax tree node that never changes.
-    ///
-    /// Note, however, that this identifier doesn't mean unique syntax node that
-    /// corresponds to this extern. Many syntax nodes can be related with this
-    /// extern. For example, multiple syntax nodes of "i32" will share this
-    /// extern.
-    ///
-    /// Also, extern node would be a part of a non-extern node like below.
-    /// - [`syn::ItemConst::ty`]
-    /// - [`syn::Field::ty`]
-    /// - [`syn::ItemUse::tree`]
-    /// - and so on.
-    pub sid: SynId,
-}
-
-impl PathExtern {
-    pub const fn syn_id(&self) -> SynId {
-        self.sid
+    fn write_debug<T: fmt::Write>(&self, _: &PathTree, f: &mut T) -> fmt::Result {
+        write!(
+            f,
+            "ConstRaw {{ syn: {:?}, vis_node: {:?} }}",
+            self.syn, self.vis_node
+        )
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PathField {
     /// Read-only pointer to a syntax tree node that never changes.
     pub syn: *const syn::Field,
-    pub elem_ty: PathId,
+
+    /// Refer to the [module documentation](self).
+    pub vis_node: NodeIndex,
+
+    /// Type of this value.
+    pub tid: RefTypeId,
 }
 
 impl PathField {
@@ -1096,12 +1643,25 @@ impl PathField {
     pub fn syn_id(&self) -> SynId {
         self.as_syn().syn_id()
     }
+
+    fn write_debug<T: fmt::Write>(&self, ptree: &PathTree, f: &mut T) -> fmt::Result {
+        write!(
+            f,
+            "Field {{ syn: {:?}, vis_node: {:?}, ty: ",
+            self.syn, self.vis_node
+        )?;
+        ptree.get_type(self.tid).write_debug(ptree, f)?;
+        write!(f, " }}")
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PathFieldRaw {
     /// Read-only pointer to a syntax tree node that never changes.
     pub syn: *const syn::Field,
+
+    /// Refer to the [module documentation](self).
+    pub vis_node: Option<NodeIndex>,
 }
 
 impl PathFieldRaw {
@@ -1112,15 +1672,30 @@ impl PathFieldRaw {
     pub fn syn_id(&self) -> SynId {
         self.as_syn().syn_id()
     }
+
+    pub fn visibility(&self) -> PathVis {
+        PathVis::new(&self.as_syn().vis)
+    }
+
+    fn write_debug<T: fmt::Write>(&self, _: &PathTree, f: &mut T) -> fmt::Result {
+        write!(
+            f,
+            "FieldRaw {{ syn: {:?}, vis_node: {:?} }}",
+            self.syn, self.vis_node
+        )
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PathFn {
     /// Read-only pointer to a syntax tree node that never changes.
     pub syn: *const syn::ItemFn,
 
     /// Refer to the [module documentation](self).
-    pub vis_scope: NodeIndex,
+    pub vis_node: NodeIndex,
+
+    /// Return type.
+    pub ret_tid: RefTypeId,
 }
 
 impl PathFn {
@@ -1131,12 +1706,25 @@ impl PathFn {
     pub fn syn_id(&self) -> SynId {
         self.as_syn().syn_id()
     }
+
+    fn write_debug<T: fmt::Write>(&self, ptree: &PathTree, f: &mut T) -> fmt::Result {
+        write!(
+            f,
+            "Fn {{ syn: {:?}, vis_node: {:?}, ret_ty: ",
+            self.syn, self.vis_node
+        )?;
+        ptree.get_type(self.ret_tid).write_debug(ptree, f)?;
+        write!(f, " }}")
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PathFnRaw {
     /// Read-only pointer to a syntax tree node that never changes.
     pub syn: *const syn::ItemFn,
+
+    /// Refer to the [module documentation](self).
+    pub vis_node: Option<NodeIndex>,
 }
 
 impl PathFnRaw {
@@ -1151,9 +1739,72 @@ impl PathFnRaw {
     pub fn visibility(&self) -> PathVis {
         PathVis::new(&self.as_syn().vis)
     }
+
+    fn write_debug<T: fmt::Write>(&self, _: &PathTree, f: &mut T) -> fmt::Result {
+        write!(
+            f,
+            "FnRaw {{ syn: {:?}, vis_node: {:?} }}",
+            self.syn, self.vis_node
+        )
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct PathLocal {
+    /// Read-only pointer to a syntax tree node that never changes.
+    pub syn: *const syn::PatIdent,
+    pub mut_: bool,
+
+    /// Type of this value.
+    pub tid: RefTypeId,
+}
+
+impl PathLocal {
+    pub fn as_syn<'o>(&self) -> &'o syn::PatIdent {
+        unsafe { self.syn.as_ref().expect("PathLocal contains nullptr") }
+    }
+
+    pub fn syn_id(&self) -> SynId {
+        self.as_syn().syn_id()
+    }
+
+    fn write_debug<T: fmt::Write>(&self, ptree: &PathTree, f: &mut T) -> fmt::Result {
+        write!(
+            f,
+            "Local {{ syn: {:?}, mut: {:?}, ty: ",
+            self.syn, self.mut_
+        )?;
+        ptree.get_type(self.tid).write_debug(ptree, f)?;
+        write!(f, " }}")
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct PathLocalRaw {
+    /// Read-only pointer to a syntax tree node that never changes.
+    pub syn: *const syn::PatIdent,
+    pub mut_: bool,
+}
+
+impl PathLocalRaw {
+    pub fn as_syn<'o>(&self) -> &'o syn::PatIdent {
+        unsafe { self.syn.as_ref().expect("PathLocalRaw contains nullptr") }
+    }
+
+    pub fn syn_id(&self) -> SynId {
+        self.as_syn().syn_id()
+    }
+
+    fn write_debug<T: fmt::Write>(&self, _: &PathTree, f: &mut T) -> fmt::Result {
+        write!(
+            f,
+            "LocalRaw {{ syn: {:?}, mut: {:?} }}",
+            self.syn, self.mut_
+        )
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub struct PathMod {
     /// Read-only pointer to a syntax tree node that never changes.
     pub syn: *const syn::ItemMod,
@@ -1161,7 +1812,7 @@ pub struct PathMod {
     pub syn_file: Option<*const SmFile>,
 
     /// Refer to the [module documentation](self).
-    pub vis_scope: NodeIndex,
+    pub vis_node: NodeIndex,
 
     /// Absolute file path that represent this module.
     ///
@@ -1177,8 +1828,8 @@ pub struct PathMod {
     pub fpath: PathBuf,
 
     /// - True if the file is one of "mod.rs", "main.rs", or "lib.rs".
-    /// - True if the file is determined by "path" attribute, plus the module is
-    ///   inline (e.g. #[path = "a.rs"] mod foo;)
+    /// - True if the file is determined by "path" attribute and the module is
+    ///   not inline (e.g. #[path = "a.rs"] mod foo;)
     /// - False otherwise.
     pub mod_rs: bool,
 }
@@ -1199,13 +1850,24 @@ impl PathMod {
             false
         }
     }
+
+    fn write_debug<T: fmt::Write>(&self, _: &PathTree, f: &mut T) -> fmt::Result {
+        write!(
+            f,
+            "Mod {{ syn: {:?}, syn_file: {:?}, vis_node: {:?}, fpath: {:?}, mod_rs: {:?} }}",
+            self.syn, self.syn_file, self.vis_node, self.fpath, self.mod_rs
+        )
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PathModRaw {
     /// Read-only pointer to a syntax tree node that never changes.
     pub syn: *const syn::ItemMod,
     pub syn_file: Option<*const SmFile>,
+
+    /// Refer to the [module documentation](self).
+    pub vis_node: Option<NodeIndex>,
     pub fpath: PathBuf,
     pub mod_rs: bool,
 }
@@ -1234,15 +1896,23 @@ impl PathModRaw {
             PathVis::Private
         }
     }
+
+    fn write_debug<T: fmt::Write>(&self, _: &PathTree, f: &mut T) -> fmt::Result {
+        write!(
+            f,
+            "ModRaw {{ syn: {:?}, syn_file: {:?}, vis_node: {:?}, fpath: {:?}, mod_rs: {:?} }}",
+            self.syn, self.syn_file, self.vis_node, self.fpath, self.mod_rs
+        )
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PathStruct {
     /// Read-only pointer to a syntax tree node that never changes.
     pub syn: *const syn::ItemStruct,
 
     /// Refer to the [module documentation](self).
-    pub vis_scope: NodeIndex,
+    pub vis_node: NodeIndex,
 }
 
 impl PathStruct {
@@ -1253,12 +1923,23 @@ impl PathStruct {
     pub fn syn_id(&self) -> SynId {
         self.as_syn().syn_id()
     }
+
+    fn write_debug<T: fmt::Write>(&self, _: &PathTree, f: &mut T) -> fmt::Result {
+        write!(
+            f,
+            "Struct {{ syn: {:?}, vis_node: {:?} }}",
+            self.syn, self.vis_node
+        )
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PathStructRaw {
     /// Read-only pointer to a syntax tree node that never changes.
     pub syn: *const syn::ItemStruct,
+
+    /// Refer to the [module documentation](self).
+    pub vis_node: Option<NodeIndex>,
 }
 
 impl PathStructRaw {
@@ -1273,15 +1954,76 @@ impl PathStructRaw {
     pub fn visibility(&self) -> PathVis {
         PathVis::new(&self.as_syn().vis)
     }
+
+    fn write_debug<T: fmt::Write>(&self, _: &PathTree, f: &mut T) -> fmt::Result {
+        write!(
+            f,
+            "StructRaw {{ syn: {:?}, vis_node: {:?} }}",
+            self.syn, self.vis_node
+        )
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
+pub struct PathTrait {
+    /// Read-only pointer to a syntax tree node that never changes.
+    pub syn: *const syn::ItemTrait,
+
+    /// Refer to the [module documentation](self).
+    pub vis_node: NodeIndex,
+}
+
+impl PathTrait {
+    fn write_debug<T: fmt::Write>(&self, ptree: &PathTree, f: &mut T) -> fmt::Result {
+        write!(
+            f,
+            "Trait {{ syn: {:?}, vis_node: {:?} }}",
+            self.syn, self.vis_node
+        )
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct PathTraitRaw {
+    /// Read-only pointer to a syntax tree node that never changes.
+    pub syn: *const syn::ItemTrait,
+
+    /// Refer to the [module documentation](self).
+    pub vis_node: Option<NodeIndex>,
+}
+
+impl PathTraitRaw {
+    pub fn as_syn<'o>(&self) -> &'o syn::ItemTrait {
+        unsafe { self.syn.as_ref().expect("PathTraitRaw contains nullptr") }
+    }
+
+    pub fn syn_id(&self) -> SynId {
+        self.as_syn().syn_id()
+    }
+
+    pub fn visibility(&self) -> PathVis {
+        PathVis::new(&self.as_syn().vis)
+    }
+
+    fn write_debug<T: fmt::Write>(&self, _: &PathTree, f: &mut T) -> fmt::Result {
+        write!(
+            f,
+            "TraitRaw {{ syn: {:?}, vis_node: {:?} }}",
+            self.syn, self.vis_node
+        )
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub struct PathTypeAlias {
     /// Read-only pointer to a syntax tree node that never changes.
     pub syn: *const syn::ItemType,
 
     /// Refer to the [module documentation](self).
-    pub vis_scope: NodeIndex,
+    pub vis_node: NodeIndex,
+
+    /// Type of this value.
+    pub tid: RefTypeId,
 }
 
 impl PathTypeAlias {
@@ -1292,12 +2034,25 @@ impl PathTypeAlias {
     pub fn syn_id(&self) -> SynId {
         self.as_syn().syn_id()
     }
+
+    fn write_debug<T: fmt::Write>(&self, ptree: &PathTree, f: &mut T) -> fmt::Result {
+        write!(
+            f,
+            "TypeAlias {{ syn: {:?}, vis_node: {:?}, ty: ",
+            self.syn, self.vis_node
+        )?;
+        ptree.get_type(self.tid).write_debug(ptree, f)?;
+        write!(f, " }}")
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PathTypeAliasRaw {
     /// Read-only pointer to a syntax tree node that never changes.
     pub syn: *const syn::ItemType,
+
+    /// Refer to the [module documentation](self).
+    pub vis_node: Option<NodeIndex>,
 }
 
 impl PathTypeAliasRaw {
@@ -1316,46 +2071,48 @@ impl PathTypeAliasRaw {
     pub fn visibility(&self) -> PathVis {
         PathVis::new(&self.as_syn().vis)
     }
+
+    fn write_debug<T: fmt::Write>(&self, _: &PathTree, f: &mut T) -> fmt::Result {
+        write!(
+            f,
+            "TypeAliasRaw {{ syn: {:?}, vis_node: {:?} }}",
+            self.syn, self.vis_node
+        )
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct PathUse {
-    /// Read-only pointer to a syntax tree node that never changes.
-    pub syn: *const syn::ItemUse,
-
-    /// Pointer to a specific item in the [`ItemUse::tree`].
-    ///
-    /// For instance, if [`Self::syn`] points to 'use a::{b, c, *}', this field
-    /// points to 'b', 'c', or '*'.
-    pub detail: SynId,
-
     /// Refer to the [module documentation](self).
-    pub vis_scope: NodeIndex,
-    pub dst: NodeIndex,
+    pub vis_node: NodeIndex,
+    pub dst: PathId,
 }
 
 impl PathUse {
-    pub fn as_syn<'o>(&self) -> &'o syn::ItemUse {
-        unsafe { self.syn.as_ref().expect("PathUse contains nullptr") }
-    }
-
-    pub fn syn_id(&self) -> SynId {
-        self.as_syn().syn_id()
+    fn write_debug<T: fmt::Write>(&self, _: &PathTree, f: &mut T) -> fmt::Result {
+        write!(
+            f,
+            "Use {{ vis_node: {:?}, dst: {:?} }}",
+            self.vis_node, self.dst
+        )
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathUseRaw {
     /// Read-only pointer to a syntax tree node that never changes.
     pub syn: *const syn::ItemUse,
 
     /// Pointer to a specific item in the [`ItemUse::tree`].
     ///
-    /// For instance, if [`Self::syn`] points to 'use a::{b, c, *}', this field
-    /// points to 'b', 'c', or '*'.
+    /// For instance, if [`Self::syn`] points to 'use a::{b, c, \*}', this field
+    /// points to 'b', 'c', or '\*'.
     pub detail: SynId,
 
+    /// Refer to the [module documentation](self).
+    pub vis_node: Option<NodeIndex>,
     pub npath: NamedPath,
+    pub dst_node: Option<NodeIndex>,
 }
 
 impl PathUseRaw {
@@ -1369,6 +2126,71 @@ impl PathUseRaw {
 
     pub fn visibility(&self) -> PathVis {
         PathVis::new(&self.as_syn().vis)
+    }
+
+    fn write_debug<T: fmt::Write>(&self, _: &PathTree, f: &mut T) -> fmt::Result {
+        write!(
+            f,
+            "UseRaw {{ syn: {:?}, detail: {:?}, vis_node: {:?}, npath: {:?}, dst_node: {:?} }}",
+            self.syn, self.detail, self.vis_node, self.npath, self.dst_node
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RefTypeId(usize);
+
+// === RefType ===
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RefType {
+    Path(PathId),
+    Tuple(Vec<RefTypeId>),
+    Array { elem: RefTypeId },
+    Slice { elem: RefTypeId },
+    Reference { elem: RefTypeId, mut_: bool },
+    InferredInt,
+    InferredFloat,
+    Default,
+}
+
+impl RefType {
+    pub(crate) fn write_debug<T: fmt::Write>(&self, ptree: &PathTree, f: &mut T) -> fmt::Result {
+        match self {
+            Self::Path(pid) => write!(f, "{pid:?}"),
+            Self::Tuple(tuple) => {
+                write!(f, "Tuple(")?;
+                for (i, elem) in tuple.iter().enumerate() {
+                    ptree.get_type(*elem).write_debug(ptree, f)?;
+                    if i < tuple.len() - 1 {
+                        write!(f, ", ")?;
+                    }
+                }
+                write!(f, ")")
+            }
+            Self::Array { elem } => {
+                write!(f, "Array {{ elem: ")?;
+                ptree.get_type(*elem).write_debug(ptree, f)?;
+                write!(f, " }}")
+            }
+            Self::Slice { elem } => {
+                write!(f, "Slice {{ elem: ")?;
+                ptree.get_type(*elem).write_debug(ptree, f)?;
+                write!(f, " }}")
+            }
+            Self::Reference { elem, mut_ } => {
+                if *mut_ {
+                    write!(f, "&mut ")?;
+                } else {
+                    write!(f, "& ")?;
+                }
+                ptree.get_type(*elem).write_debug(ptree, f)?;
+                write!(f, " }}")
+            }
+            Self::InferredInt => write!(f, "InferredInt"),
+            Self::InferredFloat => write!(f, "InferredFloat"),
+            Self::Default => write!(f, "Default"),
+        }
     }
 }
 
@@ -1464,7 +2286,7 @@ impl fmt::Display for NamedPath {
     }
 }
 
-impl Deref for NamedPath {
+impl ops::Deref for NamedPath {
     type Target = String;
 
     fn deref(&self) -> &Self::Target {
@@ -1472,7 +2294,7 @@ impl Deref for NamedPath {
     }
 }
 
-impl DerefMut for NamedPath {
+impl ops::DerefMut for NamedPath {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
@@ -1547,4 +2369,19 @@ impl Default for PathVis {
     fn default() -> Self {
         Self::Private
     }
+}
+
+#[derive(Clone, Copy)]
+pub struct Container {
+    kind: ContainerKind,
+    id: PathId,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ContainerKind {
+    Root,
+    Mod,
+    Block,
+    Fn,
+    Struct,
 }

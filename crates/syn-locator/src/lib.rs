@@ -3,18 +3,28 @@
 use std::{
     any::{self, Any, TypeId},
     cell::RefCell,
+    cmp,
     collections::HashMap,
     pin::Pin,
 };
 
 pub trait LocateEntry: Locate {
-    fn locate_as_entry(self: Pin<&Self>, file_path: &str, code: &str) {
+    fn locate_as_entry(self: Pin<&Self>, file_path: &str, code: String) {
         let loc = self.location(file_path, code);
-        self.locate(loc.file_path, code, 0);
+        let code = LOCATOR
+            .with_borrow(|locator| locator.filtered_code_ptr(file_path))
+            .unwrap();
+
+        // Safety: Locating doesn't modify code itself. Therefore, the address
+        // and its content will never change until end of this block.
+        unsafe {
+            let code = code.as_ref().unwrap_unchecked();
+            self.locate(loc.file_path, code, 0);
+        }
     }
 
     #[doc(hidden)]
-    fn location(self: Pin<&Self>, file_path: &str, code: &str) -> Location {
+    fn location(self: Pin<&Self>, file_path: &str, code: String) -> Location {
         LOCATOR.with_borrow_mut(|locator| locator.insert_file(&*self, file_path, code))
     }
 }
@@ -56,7 +66,7 @@ pub trait Locate: Any {
             .with_borrow(|locator| {
                 let loc = locator.get_location(self)?;
                 let path = loc.file_path;
-                let code = locator.get_code(path)?;
+                let code = locator.get_original_code(path)?;
                 let line = code.as_bytes()[..loc.start]
                     .iter()
                     .filter(|&&b| b == b'\n')
@@ -79,7 +89,7 @@ pub trait Locate: Any {
             .with_borrow(|locator| {
                 let loc = locator.get_location(self)?;
                 let path = loc.file_path;
-                let code = locator.get_code(path)?;
+                let code = locator.get_original_code(path)?;
                 let content = &code[loc.start..loc.end];
 
                 Some(content.to_owned())
@@ -314,14 +324,19 @@ impl Locator {
         }
     }
 
+    fn clear(&mut self) {
+        self.files.clear();
+        self.map.clear();
+    }
+
     /// Inserts file then returns its index.
     fn insert_file<T: Any + ?Sized>(
         &mut self,
         syn_file: &T,
         file_path: &str,
-        code: &str,
+        code: String,
     ) -> Location {
-        fn inner(this: &mut Locator, key: LocationKey, file_path: &str, code: &str) -> Location {
+        fn inner(this: &mut Locator, key: LocationKey, file_path: &str, code: String) -> Location {
             if let Some(loc) = this.map.get(&key) {
                 return *loc;
             }
@@ -331,13 +346,12 @@ impl Locator {
 
             let file_path: Box<str> = file_path.into();
             let file_path = Box::leak(file_path);
-            this.files.insert(file_path, File::new(code));
-
             let loc = Location {
                 file_path,
                 start: 0,
                 end: code.len(),
             };
+            this.files.insert(file_path, File::new(code));
             this.map.insert(key, loc);
 
             loc
@@ -354,8 +368,16 @@ impl Locator {
         self.map.get(&LocationKey::new(syn_node)).cloned()
     }
 
-    fn get_code(&self, file_path: &str) -> Option<&str> {
-        self.files.get(file_path).map(|file| file.code.as_str())
+    fn get_original_code(&self, file_path: &str) -> Option<&str> {
+        self.files
+            .get(file_path)
+            .map(|file| file.original_code.as_str())
+    }
+
+    fn filtered_code_ptr(&self, file_path: &str) -> Option<*const str> {
+        self.files
+            .get(file_path)
+            .map(|file| file.filtered_code.as_str() as *const _)
     }
 }
 
@@ -369,14 +391,16 @@ impl Drop for Locator {
 }
 
 struct File {
-    /// Filtered Rust code.
-    code: String,
+    original_code: String,
+    filtered_code: String,
 }
 
 impl File {
-    fn new(code: &str) -> Self {
+    fn new(code: String) -> Self {
+        let filtered_code = Self::remove_non_tokens(&code);
         Self {
-            code: Self::remove_non_tokens(code),
+            original_code: code,
+            filtered_code,
         }
     }
 
@@ -430,8 +454,30 @@ pub struct Location {
     pub end: usize,
 }
 
+impl PartialOrd for Location {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Location {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
+        match self.file_path.cmp(other.file_path) {
+            cmp::Ordering::Equal => match self.start.cmp(&other.start) {
+                cmp::Ordering::Equal => self.end.cmp(&other.end),
+                o => o,
+            },
+            o => o,
+        }
+    }
+}
+
 thread_local! {
     static LOCATOR: RefCell<Locator> = RefCell::new(Locator::new());
+}
+
+pub fn clear() {
+    LOCATOR.with_borrow_mut(|locator| locator.clear());
 }
 
 macro_rules! impl_locate_for_token {
@@ -569,14 +615,14 @@ macro_rules! impl_locate_for_pair_tokens {
                 const OPEN: char = $open;
                 const CLOSE: char = $close;
 
-                let code = &code[offset..];
+                let cur_code = &code[offset..];
 
                 let mut start = 0;
                 let mut end = 0;
                 let mut cur = offset;
                 let mut level = 0;
 
-                for c in code.chars() {
+                for c in cur_code.chars() {
                     if c == OPEN {
                         if level == 0 {
                             start = cur;
@@ -595,7 +641,7 @@ macro_rules! impl_locate_for_pair_tokens {
                 }
 
                 if start >= end {
-                    panic!("expected `{OPEN}..{CLOSE}` from {code}");
+                    panic!("expected `{OPEN}..{CLOSE}` from {cur_code}");
                 }
 
                 Location {
@@ -1469,13 +1515,13 @@ impl Locate for syn::Generics {
 
 impl Locate for syn::Ident {
     fn find_loc(&self, file_path: &'static str, code: &str, offset: usize) -> Location {
-        let code = &code[offset..];
+        let cur_code = &code[offset..];
 
         let ident = self.to_string();
         let start = offset
-            + code
+            + cur_code
                 .find(&ident)
-                .unwrap_or_else(|| panic!("expected `{ident}` from `{code}`"));
+                .unwrap_or_else(|| panic!("expected `{ident}` from `{cur_code}`"));
 
         Location {
             file_path,
@@ -1905,12 +1951,12 @@ impl Locate for syn::Label {
 
 impl Locate for syn::Lifetime {
     fn find_loc(&self, file_path: &'static str, code: &str, offset: usize) -> Location {
-        let code = &code[offset..];
+        let cur_code = &code[offset..];
 
         let start = offset
-            + code
+            + cur_code
                 .find('\'')
-                .unwrap_or_else(|| panic!("expected ' from {code}"));
+                .unwrap_or_else(|| panic!("expected ' from {cur_code}"));
         let end = self.ident.locate(file_path, code, start + 1).end;
 
         Location {
@@ -2389,12 +2435,12 @@ impl Locate for syn::QSelf {
         const OPEN: char = '<';
         const CLOSE: char = '>';
 
-        let code = &code[front_loc.end..];
+        let cur_code = &code[front_loc.end..];
 
         let mut cur = front_loc.end;
         let mut level = 1;
 
-        for c in code.chars() {
+        for c in cur_code.chars() {
             if c == OPEN {
                 level += 1;
             } else if c == CLOSE {
@@ -2427,26 +2473,45 @@ impl Locate for syn::RangeLimits {
 
 impl Locate for syn::Receiver {
     fn find_loc(&self, file_path: &'static str, code: &str, offset: usize) -> Location {
+        // If there is no colon, `self.ty` must be ignored because it is not
+        // constructed from source code.
+
         if let Some((and_token, reference)) = &self.reference {
-            (
-                &self.attrs,
-                and_token,
-                reference,
-                &self.mutability,
-                &self.self_token,
-                &self.colon_token,
-                &self.ty,
-            )
-                .locate_as_group(file_path, code, offset)
+            if let Some(colon_token) = &self.colon_token {
+                (
+                    &self.attrs,
+                    and_token,
+                    reference,
+                    &self.mutability,
+                    &self.self_token,
+                    colon_token,
+                    &self.ty,
+                )
+                    .locate_as_group(file_path, code, offset)
+            } else {
+                (
+                    &self.attrs,
+                    and_token,
+                    reference,
+                    &self.mutability,
+                    &self.self_token,
+                )
+                    .locate_as_group(file_path, code, offset)
+            }
         } else {
-            (
-                &self.attrs,
-                &self.mutability,
-                &self.self_token,
-                &self.colon_token,
-                &self.ty,
-            )
-                .locate_as_group(file_path, code, offset)
+            if let Some(colon_token) = &self.colon_token {
+                (
+                    &self.attrs,
+                    &self.mutability,
+                    &self.self_token,
+                    colon_token,
+                    &self.ty,
+                )
+                    .locate_as_group(file_path, code, offset)
+            } else {
+                (&self.attrs, &self.mutability, &self.self_token)
+                    .locate_as_group(file_path, code, offset)
+            }
         }
     }
 }
@@ -3051,11 +3116,11 @@ pub mod helper {
         offset: usize,
         content: char,
     ) -> Location {
-        let code = &code[offset..];
+        let cur_code = &code[offset..];
         let start = offset
-            + code
+            + cur_code
                 .find(content)
-                .unwrap_or_else(|| panic!("expected `{content}` from `{code}`"));
+                .unwrap_or_else(|| panic!("expected `{content}` from `{cur_code}`"));
 
         Location {
             file_path,
@@ -3070,12 +3135,12 @@ pub mod helper {
         offset: usize,
         content: &str,
     ) -> Location {
-        let code = &code[offset..];
+        let cur_code = &code[offset..];
 
         let start = offset
-            + code
+            + cur_code
                 .find(content)
-                .unwrap_or_else(|| panic!("expected `{content}` from `{code}`"));
+                .unwrap_or_else(|| panic!("expected `{content}` from `{cur_code}`"));
 
         Location {
             file_path,

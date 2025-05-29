@@ -3,49 +3,82 @@ use naga::{Scalar, ScalarKind, Type, TypeInner, VectorSize};
 use std::collections::HashMap;
 use wgsl_builtin::{helper::*, prelude::*};
 
-pub fn known(path: &NamedPath) -> Option<Type> {
-    thread_local! {
-        static KNOWN: HashMap<&'static str, Type> = {
-            let mut map = HashMap::new();
-            map.extend(i8::entry());
-            map.extend(u8::entry());
-            map.extend(i16::entry());
-            map.extend(u16::entry());
-            map.extend(i32::entry());
-            map.extend(u32::entry());
-            map.extend(f32::entry());
-            map.extend(i64::entry());
-            map.extend(u64::entry());
-            map.extend(f64::entry());
-            map.extend(isize::entry());
-            map.extend(usize::entry());
-            map.extend(Vec2i::entry());
-            map.extend(Vec3i::entry());
-            map.extend(Vec4i::entry());
-            map.extend(Vec2u::entry());
-            map.extend(Vec3u::entry());
-            map.extend(Vec4u::entry());
-            map.extend(Vec2f::entry());
-            map.extend(Vec3f::entry());
-            map.extend(Vec4f::entry());
-            map.extend(Mat2x2f::entry());
-            map.extend(Mat2x3f::entry());
-            map.extend(Mat2x4f::entry());
-            map.extend(Mat3x2f::entry());
-            map.extend(Mat3x3f::entry());
-            map.extend(Mat3x4f::entry());
-            map.extend(Mat4x2f::entry());
-            map.extend(Mat4x3f::entry());
-            map.extend(Mat4x4f::entry());
-            map
-        };
-    }
+thread_local! {
+    static KNOWN_PRIMITIVES: HashMap<&'static str, Type> = {
+        let mut map = HashMap::new();
+        map.extend(i8::entry());
+        map.extend(u8::entry());
+        map.extend(i16::entry());
+        map.extend(u16::entry());
+        map.extend(i32::entry());
+        map.extend(u32::entry());
+        map.extend(f32::entry());
+        map.extend(i64::entry());
+        map.extend(u64::entry());
+        map.extend(f64::entry());
+        map.extend(isize::entry());
+        map.extend(usize::entry());
+        map.extend(Vec2i::entry());
+        map.extend(Vec3i::entry());
+        map.extend(Vec4i::entry());
+        map.extend(Vec2u::entry());
+        map.extend(Vec3u::entry());
+        map.extend(Vec4u::entry());
+        map.extend(Vec2f::entry());
+        map.extend(Vec3f::entry());
+        map.extend(Vec4f::entry());
+        map.extend(Mat2x2f::entry());
+        map.extend(Mat2x3f::entry());
+        map.extend(Mat2x4f::entry());
+        map.extend(Mat3x2f::entry());
+        map.extend(Mat3x3f::entry());
+        map.extend(Mat3x4f::entry());
+        map.extend(Mat4x2f::entry());
+        map.extend(Mat4x3f::entry());
+        map.extend(Mat4x4f::entry());
+        map
+    };
 
+    static KNOWN_LIBS: HashMap<&'static str, &'static str> = {
+        let mut map = HashMap::new();
+        map.insert("core", LIB_CORE_CODE);
+        map.insert("core.rs", LIB_CORE_CODE);
+        map.insert("std", LIB_STD_CODE);
+        map.insert("std.rs", LIB_STD_CODE);
+        map
+    }
+}
+
+pub fn is_known_primitive(path: &str) -> bool {
+    panic_if_unsupported_primitive(path);
+    KNOWN_PRIMITIVES.with(|known| known.contains_key(path))
+}
+
+pub fn known_primitive_to_naga_type(path: &str) -> Option<Type> {
+    panic_if_unsupported_primitive(path);
+    KNOWN_PRIMITIVES.with(|known| known.get(path).cloned())
+}
+
+/// * key - A name of known library like "std" or "std.rs".
+pub fn is_known_lib(key: &str) -> bool {
+    KNOWN_LIBS.with(|known| known.contains_key(key))
+}
+
+/// * key - A name of known library like "std" or "std.rs".
+pub fn known_lib_code(key: &str) -> &'static str {
+    KNOWN_LIBS.with(|known| {
+        if let Some(code) = known.get(key) {
+            *code
+        } else {
+            panic!("`{key}` is not a known library");
+        }
+    })
+}
+
+fn panic_if_unsupported_primitive(path: &str) {
     if path == "i128" || path == "u128" {
-        panic!("128-bits is not allowed");
+        panic!("`{path}` is not allowed");
     }
-
-    KNOWN.with(|known| known.get(path.as_str()).cloned())
 }
 
 trait NagaType {
@@ -642,3 +675,18 @@ impl NagaType for wgsl_builtin::prelude::Mat4x4f {
         [(key_a, ty.clone()), (key_b, ty.clone()), (key_c, ty)]
     }
 }
+
+const LIB_CORE_CODE: &str = r#"
+pub mod ops {
+    pub trait Add {}
+
+    impl Add for i32 {}
+    impl Add<&i32> for i32 {}
+    impl<'a> Add<i32> for &'a i32 {}
+    impl<'a> Add<&i32> for &'a i32 {}
+}
+"#;
+
+const LIB_STD_CODE: &str = r#"
+pub use core::ops;
+"#;

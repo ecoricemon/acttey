@@ -25,7 +25,7 @@ tree nodes by simple string comparison.
 
     // Finds location of the syntax tree.
     let syn = std::pin::Pin::new(&syn);
-    syn.locate_as_entry(file_path, code);
+    syn.locate_as_entry(file_path, code.to_owned());
 
     // Picks a syntax tree node.
     let item_struct = match &syn.items[0] {

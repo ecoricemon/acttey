@@ -15,7 +15,7 @@ where
     Ok(code)
 }
 
-fn translate<I, II>(paths: I) -> Result<SemanticAnalyzer>
+pub fn translate<I, II>(paths: I) -> Result<SemanticAnalyzer>
 where
     I: Iterator<Item = II> + Clone,
     II: AsRef<std::path::Path>,

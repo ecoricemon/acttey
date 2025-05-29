@@ -13,7 +13,7 @@ use naga::{
     Arena, ArraySize, BinaryOperator, Block, Constant, Expression, FastIndexMap, Function,
     FunctionArgument, FunctionResult, Handle, Literal, LocalVariable, Module, ScalarKind, Span,
     Statement, StructMember, Type, TypeInner,
-    front::{SymbolTable, Typifier},
+    front::Typifier,
     proc::{Alignment, ConstantEvaluator, Emitter, ExpressionKindTracker, Layouter},
 };
 use quote::ToTokens;
@@ -71,7 +71,12 @@ impl NagaProcessor {
         }
 
         while let Some(task) = tasks.pop() {
-            util::assert_finite_loop(task, "constructing naga module");
+            util::assert_finite_loop(task, || {
+                panic!(
+                    "too many iterations detected during naga construction\nkey: {task:?}\n{:#?}",
+                    self.module
+                );
+            });
 
             let sid = task.sid;
             let mut cx = NagaCx {
@@ -79,12 +84,12 @@ impl NagaProcessor {
                 ptree: &path_proc.ptree,
                 s2p: &path_proc.s2p,
 
-                // From naga processor or handler.
+                // From naga processor.
                 module: &mut self.module,
+
+                // Naga helper or temporary storage.
                 tasks: &mut tasks,
                 s2n: &mut s2n,
-
-                // naga helper or temporary storage.
                 layouter: &mut layouter,
                 typifier: &mut typifier,
                 namer: &mut namer,
@@ -97,7 +102,7 @@ impl NagaProcessor {
 
             macro_rules! unwrap {
                 ($($t:tt)*) => {
-                    match $($t)* {
+                    match { $($t)* } {
                         Ok(()) | Err(Fail::Soft) => {}
                         Err(Fail::Hard(e)) => return Err(e)
                     }
@@ -106,22 +111,27 @@ impl NagaProcessor {
 
             match task.kind {
                 NagaTaskKind::Const => unwrap! {
-                    item_const_to_naga(sid.downcast::<syn::ItemConst>(), &mut cx)
+                    let r = sid.as_any().downcast_ref().unwrap();
+                    item_const_to_naga(&mut cx, r)
                 },
                 NagaTaskKind::File => unwrap! {
-                    file_to_naga(sid.downcast::<SmFile>(), &mut cx)
+                    let r = sid.as_any().downcast_ref().unwrap();
+                    file_to_naga(&mut cx, r)
                 },
                 NagaTaskKind::Fn => unwrap! {
-                    item_fn_to_naga(sid.downcast::<syn::ItemFn>(), &mut cx)
+                    let r = sid.as_any().downcast_ref().unwrap();
+                    item_fn_to_naga(&mut cx, r)
                 },
                 NagaTaskKind::Struct => unwrap! {
-                    item_struct_to_naga(sid.downcast::<syn::ItemStruct>(), &mut cx)
+                    let r = sid.as_any().downcast_ref().unwrap();
+                    item_struct_to_naga(&mut cx, r)
                 },
                 NagaTaskKind::Block {
                     stmt_start_idx,
                     h_block_ty,
                 } => unwrap! {
-                    block_to_naga(sid.downcast::<syn::Block>(), &mut cx, stmt_start_idx, h_block_ty)
+                    let r = sid.as_any().downcast_ref().unwrap();
+                    block_to_naga(&mut cx, r, stmt_start_idx, h_block_ty)
                 },
             }
         }
@@ -251,12 +261,12 @@ pub struct NagaCx<'a> {
     ptree: &'a PathTree,
     s2p: &'a SynToPath,
 
-    // From naga processor or handler.
+    // From naga processor.
     module: &'a mut Module,
+
+    // Naga helper or temporary storage.
     tasks: &'a mut NagaTaskQueue,
     s2n: &'a mut SynToNaga,
-
-    // naga helper or temporary storage.
     layouter: &'a mut Layouter,
     typifier: &'a mut Typifier,
     namer: &'a mut Namer,
@@ -319,7 +329,7 @@ impl<'a> NagaCx<'a> {
         }
 
         let value = f(self)?;
-        let handle = self.get_mut_expressions().append(value, Span::UNDEFINED);
+        let handle = self.try_eval_expr_and_append(value)?;
         self.s2n.add_syn_to_naga(sid, NagaHandle::Expr(handle));
         Ok(handle)
     }
@@ -348,7 +358,7 @@ impl<'a> NagaCx<'a> {
     /// If the naga module already contains value the given function generates,
     /// the generated value is dropped and handle to the existing naga value is
     /// returned.
-    fn insert_type<F>(&mut self, sid: SynId, f: F) -> Handle<Type>
+    fn insert_type_with<F>(&mut self, sid: SynId, f: F) -> Handle<Type>
     where
         F: FnOnce(&mut Self) -> Type,
     {
@@ -357,9 +367,14 @@ impl<'a> NagaCx<'a> {
         }
 
         let value = f(self);
-        let handle = self.module.types.insert(value, Span::UNDEFINED);
-        self.layouter.update(self.module.to_ctx()).unwrap();
+        let handle = self.insert_type(value);
         self.s2n.add_syn_to_naga(sid, NagaHandle::Type(handle));
+        handle
+    }
+
+    fn insert_type(&mut self, ty: Type) -> Handle<Type> {
+        let handle = self.module.types.insert(ty, Span::UNDEFINED);
+        self.layouter.update(self.module.to_ctx()).unwrap();
         handle
     }
 
@@ -374,7 +389,7 @@ impl<'a> NagaCx<'a> {
                 let h_elem = self.insert_type_by_syn(&v.elem)?;
 
                 // Size
-                let h_expr = expr_to_naga(&v.len, self, Some(h_elem))?;
+                let h_expr = expr_to_naga(self, &v.len, Some(h_elem))?;
                 let expr = &self.get_expressions()[h_expr];
                 let expr_value = match expr_to_u32(expr) {
                     Ok(v) => v,
@@ -387,7 +402,7 @@ impl<'a> NagaCx<'a> {
                     );
                 };
 
-                let h_ty = self.insert_type(v.syn_id(), |cx| Type {
+                let h_ty = self.insert_type_with(v.syn_id(), |cx| Type {
                     name: None,
                     inner: TypeInner::Array {
                         base: h_elem,
@@ -401,7 +416,7 @@ impl<'a> NagaCx<'a> {
                 // Element type
                 let h_elem = self.insert_type_by_syn(&v.elem)?;
 
-                let h_ty = self.insert_type(v.syn_id(), |cx| Type {
+                let h_ty = self.insert_type_with(v.syn_id(), |cx| Type {
                     name: None,
                     inner: TypeInner::Array {
                         base: h_elem,
@@ -421,48 +436,37 @@ impl<'a> NagaCx<'a> {
         let mut res = Err(Fail::Soft);
 
         self.ptree
-            .traverse_from(self.state.base, ext.segments(), |pid| {
+            .traverse(self.state.base, ext.segments(), |pid, value| {
                 const CONTINUE_TRAVERSING: Option<()> = None;
                 const STOP_TRAVERSING: Option<()> = Some(());
 
-                let sid = self.ptree.get_value(pid).syn_id();
-                match self.s2n.get_naga_handle(sid) {
-                    Some(handle) => {
-                        res = Ok(handle.to_type_handle());
+                // Extern: known types like "i32" or unknonwn
+                if matches!(value, PathValue::Extern) {
+                    let npath = self.ptree.named_path(pid.ni);
+                    if let Some(ty) = known_primitive_to_naga_type(&npath) {
+                        let handle = self.insert_type(ty);
+                        res = Ok(handle);
+                        STOP_TRAVERSING
+                    } else {
+                        res = terr!("{}: unknown extern type", self.ptree.named_path(pid.ni));
                         STOP_TRAVERSING
                     }
-                    None => match self._insert_known_path_type(pid) {
-                        ok @ Ok(..) => {
-                            res = ok;
-                            STOP_TRAVERSING
-                        }
-                        err @ Err(Fail::Hard(..)) => {
-                            res = err;
-                            STOP_TRAVERSING
-                        }
-                        Err(Fail::Soft) => CONTINUE_TRAVERSING,
-                    },
+                } else {
+                    let sid = match value {
+                        PathValue::Struct(v) => v.syn_id(),
+                        PathValue::TypeAlias(v) => v.syn_id(),
+                        _ => todo!(),
+                    };
+                    if let Some(handle) = self.s2n.get_naga_handle(sid) {
+                        res = Ok(handle.to_type_handle());
+                        STOP_TRAVERSING
+                    } else {
+                        CONTINUE_TRAVERSING
+                    }
                 }
             });
 
         res
-    }
-
-    fn _insert_known_path_type(&mut self, pid: PathId) -> TriResult<Handle<Type>> {
-        let value = self.ptree.get_value(pid);
-        match value {
-            PathValue::Extern(v) => {
-                let sid = v.syn_id();
-                let npath = self.ptree.named_path(pid.ni);
-                if let Some(ty) = known(&npath) {
-                    let handle = self.insert_type(sid, |_| ty);
-                    Ok(handle)
-                } else {
-                    terr!("{}: unknown type", value.syn_id().content())
-                }
-            }
-            _ => Err(Fail::Soft),
-        }
     }
 
     fn get_expressions(&self) -> &Arena<Expression> {
@@ -546,7 +550,7 @@ impl<'a> NagaCx<'a> {
         for input in &sig.inputs {
             match input {
                 syn::FnArg::Receiver(v) => {
-                    todo!("receiver argument is not implemented yet");
+                    todo!("{v:?}");
                 }
                 syn::FnArg::Typed(v) => {
                     let name = if let syn::Pat::Ident(ident) = v.pat.as_ref() {
@@ -625,12 +629,15 @@ enum Fail {
     Hard(Error),
 }
 
-fn file_to_naga(file: &SmFile, cx: &mut NagaCx) -> TriResult<()> {
-    // Replaces the scope.
+fn file_to_naga(cx: &mut NagaCx, file: &SmFile) -> TriResult<()> {
+    // Sets to the file scope, which creates a new branch in the path tree.
     cx.state.base = cx.s2p.to_path_id(file.syn_id()).ni;
 
     for item in &file.file.items {
-        item_to_naga(item, cx)?;
+        match item_to_naga(cx, item) {
+            Ok(..) | Err(Fail::Soft) => {}
+            e @ Err(Fail::Hard(..)) => return e,
+        }
     }
 
     Ok(())
@@ -639,7 +646,7 @@ fn file_to_naga(file: &SmFile, cx: &mut NagaCx) -> TriResult<()> {
 /// For a struct directly declared in a module,
 /// - Creates [`naga::Type`].
 /// - Inserts the naga value in the naga module.
-fn item_struct_to_naga(st: &syn::ItemStruct, cx: &mut NagaCx) -> TriResult<()> {
+fn item_struct_to_naga(cx: &mut NagaCx, st: &syn::ItemStruct) -> TriResult<()> {
     let sid = st.syn_id();
     if cx.s2n.get_naga_handle(sid).is_some() {
         return Ok(());
@@ -651,7 +658,7 @@ fn item_struct_to_naga(st: &syn::ItemStruct, cx: &mut NagaCx) -> TriResult<()> {
     let mut members = Vec::new();
 
     for field in &st.fields {
-        let member = field_to_naga(field, cx, offset)?;
+        let member = field_to_naga(cx, field, offset)?;
         let member_layout = cx.layouter[member.ty];
         offset = member.offset + member_layout.size;
         max_align = max_align.max(member_layout.alignment * 1);
@@ -661,7 +668,7 @@ fn item_struct_to_naga(st: &syn::ItemStruct, cx: &mut NagaCx) -> TriResult<()> {
 
     let layout = Alignment::new(max_align).unwrap();
     let span = layout.round_up(offset);
-    cx.insert_type(sid, |_| Type {
+    cx.insert_type_with(sid, |_| Type {
         name: Some(st.ident.to_string()),
         inner: TypeInner::Struct { members, span },
     });
@@ -673,18 +680,18 @@ fn item_struct_to_naga(st: &syn::ItemStruct, cx: &mut NagaCx) -> TriResult<()> {
 /// For an item directly declared in a module,
 /// - Creates corresponding naga value.
 /// - Inserts the naga value in the naga module.
-fn item_to_naga(item: &syn::Item, cx: &mut NagaCx) -> TriResult<()> {
+fn item_to_naga(cx: &mut NagaCx, item: &syn::Item) -> TriResult<()> {
     match item {
-        syn::Item::Const(v) => item_const_to_naga(v, cx),
+        syn::Item::Const(v) => item_const_to_naga(cx, v),
         syn::Item::Enum(_) => Ok(()),
         syn::Item::ExternCrate(_) => Ok(()),
-        syn::Item::Fn(v) => item_fn_to_naga(v, cx),
+        syn::Item::Fn(v) => item_fn_to_naga(cx, v),
         syn::Item::ForeignMod(_) => Ok(()),
         syn::Item::Impl(_) => Ok(()),
         syn::Item::Macro(_) => Ok(()),
         syn::Item::Mod(_) => Ok(()),
         syn::Item::Static(_) => Ok(()),
-        syn::Item::Struct(v) => item_struct_to_naga(v, cx),
+        syn::Item::Struct(v) => item_struct_to_naga(cx, v),
         syn::Item::Trait(_) => Ok(()),
         syn::Item::TraitAlias(_) => Ok(()),
         syn::Item::Type(_) => Ok(()),
@@ -698,7 +705,7 @@ fn item_to_naga(item: &syn::Item, cx: &mut NagaCx) -> TriResult<()> {
 /// For a const directly declared in a module,
 /// - Creates [`naga::Constant`].
 /// - Inserts the naga value in the naga module.
-fn item_const_to_naga(item_const: &syn::ItemConst, cx: &mut NagaCx) -> TriResult<()> {
+fn item_const_to_naga(cx: &mut NagaCx, item_const: &syn::ItemConst) -> TriResult<()> {
     let sid = item_const.syn_id();
     cx.reserve_resched(NagaTaskKind::Const, sid);
 
@@ -711,7 +718,7 @@ fn item_const_to_naga(item_const: &syn::ItemConst, cx: &mut NagaCx) -> TriResult
         let h_ty = cx.insert_type_by_syn(&item_const.ty)?;
 
         // Inserts expression of this constant.
-        let h_expr = expr_to_naga(&item_const.expr, cx, Some(h_ty))?;
+        let h_expr = expr_to_naga(cx, &item_const.expr, Some(h_ty))?;
 
         // Overwrites expression's type with the explicit constant type if
         // possible.
@@ -740,7 +747,10 @@ fn item_const_to_naga(item_const: &syn::ItemConst, cx: &mut NagaCx) -> TriResult
 /// For a free standing function directly declared in a module,
 /// - Creates [`naga::Function`].
 /// - Inserts the naga value in the naga module.
-fn item_fn_to_naga(item_fn: &syn::ItemFn, cx: &mut NagaCx) -> TriResult<()> {
+fn item_fn_to_naga(cx: &mut NagaCx, item_fn: &syn::ItemFn) -> TriResult<()> {
+    // Sets to the fn scope, which creates a new branch in the path tree.
+    cx.state.base = cx.s2p.to_path_id(item_fn.syn_id()).ni;
+
     let sid = item_fn.syn_id();
     cx.reserve_resched(NagaTaskKind::Fn, sid);
 
@@ -750,7 +760,7 @@ fn item_fn_to_naga(item_fn: &syn::ItemFn, cx: &mut NagaCx) -> TriResult<()> {
 
     // Function with signature information
     let c_arguments = arguments.clone();
-    cx.insert_working_fn(sid, move |cx| {
+    cx.insert_working_fn(sid, move |_cx| {
         Ok(Function {
             name: Some(name),
             arguments: c_arguments,
@@ -781,7 +791,7 @@ fn item_fn_to_naga(item_fn: &syn::ItemFn, cx: &mut NagaCx) -> TriResult<()> {
 
     // Block
     let stmt_start_idx = 0;
-    block_to_naga(&item_fn.block, cx, stmt_start_idx, h_block_ty)?;
+    block_to_naga(cx, &item_fn.block, stmt_start_idx, h_block_ty)?;
 
     // Restores the state.
     cx.state.local = None;
@@ -791,11 +801,14 @@ fn item_fn_to_naga(item_fn: &syn::ItemFn, cx: &mut NagaCx) -> TriResult<()> {
 }
 
 fn block_to_naga(
-    block: &syn::Block,
     cx: &mut NagaCx,
+    block: &syn::Block,
     stmt_start_idx: usize,
     h_block_ty: Option<Handle<Type>>,
 ) -> TriResult<()> {
+    // Sets the block scope, which creates a new branch in the path tree.
+    cx.state.base = cx.s2p.to_path_id(block.syn_id()).ni;
+
     let sid = block.syn_id();
 
     for (i, stmt) in block.stmts.iter().enumerate().skip(stmt_start_idx) {
@@ -807,7 +820,7 @@ fn block_to_naga(
             sid,
         );
 
-        if let Some(stmt) = stmt_to_naga(stmt, cx, h_block_ty)? {
+        if let Some(stmt) = stmt_to_naga(cx, stmt, h_block_ty)? {
             // TODO: If not a function context?
             cx.get_mut_function().body.push(stmt, Span::UNDEFINED);
         }
@@ -826,21 +839,21 @@ fn block_to_naga(
 }
 
 fn stmt_to_naga(
-    stmt: &syn::Stmt,
     cx: &mut NagaCx,
+    stmt: &syn::Stmt,
     h_block_ty: Option<Handle<Type>>,
 ) -> TriResult<Option<Statement>> {
     match stmt {
         syn::Stmt::Local(local) => {
-            local_to_naga(local, cx)?;
+            local_to_naga(cx, local)?;
             Ok(None)
         }
         syn::Stmt::Item(item) => {
-            item_to_naga(item, cx)?;
+            item_to_naga(cx, item)?;
             Ok(None)
         }
         syn::Stmt::Expr(expr, semi) => {
-            let h_expr = expr_to_naga(expr, cx, h_block_ty)?;
+            let h_expr = expr_to_naga(cx, expr, h_block_ty)?;
             let stmt = if semi.is_none() {
                 Some(Statement::Return {
                     value: Some(h_expr),
@@ -850,11 +863,11 @@ fn stmt_to_naga(
             };
             Ok(stmt)
         }
-        syn::Stmt::Macro(mac) => todo!("SmStmt::to_naga, {mac:?}"),
+        syn::Stmt::Macro(mac) => todo!("{mac:?}"),
     }
 }
 
-fn local_to_naga(local: &syn::Local, cx: &mut NagaCx) -> TriResult<()> {
+fn local_to_naga(cx: &mut NagaCx, local: &syn::Local) -> TriResult<()> {
     let (mutability, ident, ty) = helper(&local.pat)?;
     let Some(ty) = ty else {
         return terr!(
@@ -871,14 +884,14 @@ fn local_to_naga(local: &syn::Local, cx: &mut NagaCx) -> TriResult<()> {
     };
 
     let h_ty = cx.insert_type_by_syn(ty)?;
-    let h_expr = expr_to_naga(&init.expr, cx, Some(h_ty))?;
+    let h_expr = expr_to_naga(cx, &init.expr, Some(h_ty))?;
 
     if !mutability {
         let f = cx.get_mut_function();
         f.named_expressions.insert(h_expr, ident);
     } else {
         let f = cx.get_mut_function();
-        let h_local_var = f.local_variables.append(
+        f.local_variables.append(
             LocalVariable {
                 name: Some(ident),
                 ty: h_ty,
@@ -886,7 +899,6 @@ fn local_to_naga(local: &syn::Local, cx: &mut NagaCx) -> TriResult<()> {
             },
             Span::UNDEFINED,
         );
-        cx.try_eval_expr_and_append(Expression::LocalVariable(h_local_var))?;
     }
 
     return Ok(());
@@ -913,8 +925,8 @@ fn local_to_naga(local: &syn::Local, cx: &mut NagaCx) -> TriResult<()> {
 }
 
 fn expr_to_naga(
-    expr: &syn::Expr,
     cx: &mut NagaCx,
+    expr: &syn::Expr,
     ty: Option<Handle<Type>>,
 ) -> TriResult<Handle<Expression>> {
     if let Some(handle) = cx.s2n.get_naga_handle(expr.syn_id()) {
@@ -922,22 +934,22 @@ fn expr_to_naga(
     }
 
     match expr {
-        syn::Expr::Array(v) => expr_array_to_naga(v, cx, ty),
-        syn::Expr::Binary(v) => expr_binary_to_naga(v, cx, ty),
-        syn::Expr::Lit(v) => expr_lit_to_naga(v, cx),
-        syn::Expr::Path(v) => expr_path_to_naga(v, cx),
-        o => todo!("syn::Expr::ToNaga, {o:?}"),
+        syn::Expr::Array(v) => expr_array_to_naga(cx, v, ty),
+        syn::Expr::Binary(v) => expr_binary_to_naga(cx, v, ty),
+        syn::Expr::Lit(v) => expr_lit_to_naga(cx, v),
+        syn::Expr::Path(v) => expr_path_to_naga(cx, v),
+        o => todo!("{o:?}"),
     }
 }
 
 fn expr_array_to_naga(
-    expr_array: &syn::ExprArray,
     cx: &mut NagaCx,
+    expr_array: &syn::ExprArray,
     ty: Option<Handle<Type>>,
 ) -> TriResult<Handle<Expression>> {
     let mut components = Vec::with_capacity(expr_array.elems.len());
     for elem in &expr_array.elems {
-        let h_elem = expr_to_naga(elem, cx, ty)?;
+        let h_elem = expr_to_naga(cx, elem, ty)?;
         components.push(h_elem);
     }
 
@@ -948,13 +960,13 @@ fn expr_array_to_naga(
 }
 
 fn expr_binary_to_naga(
-    expr_binary: &syn::ExprBinary,
     cx: &mut NagaCx,
+    expr_binary: &syn::ExprBinary,
     ty: Option<Handle<Type>>,
 ) -> TriResult<Handle<Expression>> {
     let op = bin_op_to_naga(&expr_binary.op)?;
-    let h_left = expr_to_naga(&expr_binary.left, cx, ty)?;
-    let h_right = expr_to_naga(&expr_binary.right, cx, ty)?;
+    let h_left = expr_to_naga(cx, &expr_binary.left, ty)?;
+    let h_right = expr_to_naga(cx, &expr_binary.right, ty)?;
 
     cx.try_eval_expr_and_append(Expression::Binary {
         op,
@@ -963,31 +975,42 @@ fn expr_binary_to_naga(
     })
 }
 
-fn expr_lit_to_naga(expr_lit: &syn::ExprLit, cx: &mut NagaCx) -> TriResult<Handle<Expression>> {
+fn expr_lit_to_naga(cx: &mut NagaCx, expr_lit: &syn::ExprLit) -> TriResult<Handle<Expression>> {
     let lit = lit_to_naga(&expr_lit.lit)?;
     cx.try_eval_expr_and_append(Expression::Literal(lit))
 }
 
-fn expr_path_to_naga(expr_path: &syn::ExprPath, cx: &mut NagaCx) -> TriResult<Handle<Expression>> {
+fn expr_path_to_naga(cx: &mut NagaCx, expr_path: &syn::ExprPath) -> TriResult<Handle<Expression>> {
     let sid = expr_path.syn_id();
     if let Some(handle) = cx.s2n.get_naga_handle(sid) {
         return Ok(handle.to_expr_handle());
     }
 
-    // TODO: Need more general approach
-
     let ext: NamedPath = util::path_to_string(&expr_path.path).into();
-    let pid = cx.ptree.reach(cx.state.base, ext.segments());
-    let value = cx.ptree.get_value(pid);
-    match value {
-        PathValue::Const(c) => {
-            let Some(handle) = cx.s2n.get_naga_handle(c.syn_id()) else {
+    let pivot = expr_path.location().start;
+    let Some(pid) = cx.ptree.search_value(cx.state.base, ext.segments(), pivot) else {
+        return terr!(
+            "failed to find `{}` + `{}`",
+            cx.ptree.named_path(cx.state.base),
+            ext
+        );
+    };
+
+    match &cx.ptree[pid] {
+        PathValue::Const(v) => {
+            let Some(handle) = cx.s2n.get_naga_handle(v.syn_id()) else {
                 return Err(Fail::Soft);
             };
             let expr = Expression::Constant(handle.to_const_handle());
             cx.try_eval_expr_and_append(expr.clone())
         }
-        _ => todo!("@@@ syn::ExprPath::to_naga"),
+        PathValue::Local(v) => {
+            let Some(handle) = cx.s2n.get_naga_handle(v.syn_id()) else {
+                return Err(Fail::Soft);
+            };
+            todo!("{handle:?}");
+        }
+        o => todo!("{o:?}"),
     }
 }
 
@@ -1057,7 +1080,7 @@ fn lit_to_naga(lit: &syn::Lit) -> TriResult<Literal> {
     })
 }
 
-fn field_to_naga(field: &syn::Field, cx: &mut NagaCx, mut offset: u32) -> TriResult<StructMember> {
+fn field_to_naga(cx: &mut NagaCx, field: &syn::Field, mut offset: u32) -> TriResult<StructMember> {
     // Finds naga handle of this field.
     cx.insert_type_by_syn(&field.ty).map(|h_ty| {
         // Constructs naga struct member using the type handle.

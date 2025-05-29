@@ -19,7 +19,7 @@ fn test_item_fn() {
     }";
     let syn = syn::parse_str::<syn::ItemFn>(code).unwrap();
     let syn = Pin::new(&syn);
-    syn.locate_as_entry(&unique_name(), code);
+    syn.locate_as_entry(&unique_name(), code.to_owned());
 
     assert_eq!(syn.vis.code(), "pub(crate)");
     assert_eq!(syn.sig.code(), "fn foo(a: i32, b: f32) -> usize");
@@ -39,7 +39,7 @@ fn test_item_struct() {
     }";
     let syn = syn::parse_str::<syn::ItemStruct>(code).unwrap();
     let syn = Pin::new(&syn);
-    syn.locate_as_entry(&unique_name(), code);
+    syn.locate_as_entry(&unique_name(), code.to_owned());
 
     assert_eq!(syn.vis.code(), "pub");
     assert_eq!(syn.struct_token.code(), "struct");
@@ -61,7 +61,7 @@ fn test_item_macro() {
     }";
     let syn = syn::parse_str::<syn::ItemMacro>(code).unwrap();
     let syn = Pin::new(&syn);
-    syn.locate_as_entry(&unique_name(), code);
+    syn.locate_as_entry(&unique_name(), code.to_owned());
 
     assert_eq!(syn.ident.code(), "foo");
     assert_eq!(syn.mac.path.code(), "macro_rules");
@@ -87,7 +87,7 @@ fn test_field_pat() {
     ";
     let syn = syn::parse_str::<syn::Stmt>(code).unwrap();
     let syn = Pin::new(&syn);
-    syn.locate_as_entry(&unique_name(), code);
+    syn.locate_as_entry(&unique_name(), code.to_owned());
 
     let local = match syn.get_ref() {
         syn::Stmt::Local(v) => v,

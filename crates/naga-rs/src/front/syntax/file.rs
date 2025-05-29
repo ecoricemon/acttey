@@ -1,6 +1,8 @@
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::ToTokens;
-use std::{fs, hash, marker::PhantomPinned, path::PathBuf, pin::Pin};
+use std::{
+    cell::RefCell, collections::HashMap, fs, hash, marker::PhantomPinned, path::PathBuf, pin::Pin,
+};
 use syn::{Error, Result};
 use syn_locator::{Locate, LocateEntry, LocateGroup, Location};
 
@@ -14,9 +16,7 @@ pub struct SmFile {
 }
 
 impl SmFile {
-    pub fn from_path(abs_path: PathBuf) -> Result<Pin<Box<Self>>> {
-        let code = fs::read_to_string(&abs_path).map_err(|e| Error::new(Span::call_site(), e))?;
-
+    pub fn new(abs_path: PathBuf, code: String) -> Result<Pin<Box<Self>>> {
         let this = Box::pin(Self {
             file: syn::parse_file(&code)?,
             abs_path: abs_path.clone(),
@@ -28,7 +28,7 @@ impl SmFile {
             .to_str()
             .unwrap_or_else(|| panic!("{abs_path:?} contains non UTF-8 charactor"));
 
-        this.as_ref().locate_as_entry(fpath, code.as_str());
+        this.as_ref().locate_as_entry(fpath, code);
 
         Ok(this)
     }

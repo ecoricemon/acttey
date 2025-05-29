@@ -32,18 +32,33 @@ macro_rules! impl_identify_syn {
 impl_identify_syn!(crate::front::syntax::file::SmFile);
 impl_identify_syn!(syn::Block);
 impl_identify_syn!(syn::Expr);
+impl_identify_syn!(syn::ExprAssign);
 impl_identify_syn!(syn::ExprBinary);
+impl_identify_syn!(syn::ExprBlock);
+impl_identify_syn!(syn::ExprCast);
 impl_identify_syn!(syn::ExprLit);
 impl_identify_syn!(syn::ExprPath);
+impl_identify_syn!(syn::ExprRepeat);
+impl_identify_syn!(syn::ExprTuple);
 impl_identify_syn!(syn::Field);
 impl_identify_syn!(syn::FnArg);
+impl_identify_syn!(syn::Ident);
 impl_identify_syn!(syn::ItemConst);
 impl_identify_syn!(syn::ItemFn);
 impl_identify_syn!(syn::ItemMod);
 impl_identify_syn!(syn::ItemStruct);
+impl_identify_syn!(syn::ItemTrait);
 impl_identify_syn!(syn::ItemType);
 impl_identify_syn!(syn::ItemUse);
 impl_identify_syn!(syn::Lit);
+impl_identify_syn!(syn::Local);
+impl_identify_syn!(syn::LocalInit);
+impl_identify_syn!(syn::Pat);
+impl_identify_syn!(syn::PatIdent);
+impl_identify_syn!(syn::PatStruct);
+impl_identify_syn!(syn::PatTuple);
+impl_identify_syn!(syn::PatType);
+impl_identify_syn!(syn::Path);
 impl_identify_syn!(syn::Stmt);
 impl_identify_syn!(syn::Type);
 impl_identify_syn!(syn::TypeArray);
@@ -58,13 +73,13 @@ impl_identify_syn!(syn::UseTree);
 pub struct SynId(*const dyn IdentifySyn);
 
 impl SynId {
-    pub fn downcast<T: Any>(&self) -> &T {
-        let r = unsafe { self.0.as_ref().unwrap() };
-        r.as_any().downcast_ref().unwrap()
-    }
-
     pub fn content(&self) -> String {
         unsafe { self.0.as_ref().unwrap_unchecked() }.content()
+    }
+
+    pub fn as_any(&self) -> &dyn Any {
+        let r = unsafe { self.0.as_ref().unwrap() };
+        r.as_any()
     }
 }
 

@@ -18,3 +18,4 @@ proc-macro2 = { version = "1.0.69" }
 quote = { version = "1.0.33" }
 naga = { version = "24.0.0", features = ["wgsl-out"] }
 smallvec = { version = "1.14.0" }
+indexmap = { version = "2.9.0" }

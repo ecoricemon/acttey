@@ -11,17 +11,14 @@ pub fn write_string(module: &mut Module, capability: Capabilities) -> Result<Str
     let float_width = 4 + capability.intersects(Capabilities::FLOAT64) as u8 * 4;
     resolve_abstract(module, int_width, float_width)?;
 
-    println!("@@@ module");
-    println!("{:#?}", module);
-
     // Validates the naga module.
-    println!("@@@ validation begins");
+    println!("@@@ === validation begins ===");
     let mut validator = Validator::new(ValidationFlags::all(), capability);
 
     let info = validator.validate(module)?;
 
     let res = wgsl::write_string(module, &info, WriterFlags::empty())?;
-    println!("@@@ gen wgsl");
+    println!("@@@ === gen wgsl ===");
     println!("{res}");
 
     Ok(res)
